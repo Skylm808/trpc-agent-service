@@ -1,0 +1,215 @@
+package config
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const validYAML = `schema_version: 1
+tenants:
+  - tenant_id: tenant-a
+    name: Tenant A
+    enabled: true
+    config_version: 3
+    audit:
+      enabled: true
+      retention_days: 30
+      store_content: false
+      redact_fields: [authorization]
+    apps:
+      - app_id: support
+        name: Support Agent
+        enabled: true
+        config:
+          instruction: Help the user.
+        model:
+          provider: openai
+          name: example-model
+          base_url: https://models.example.com/v1
+          api_key:
+            provider: env
+            key: MODEL_API_KEY
+          temperature: 0.2
+          max_tokens: 2048
+        tools:
+          allow: [calculator, search]
+          deny: [shell]
+          require_approval: [search]
+          request_token_budget: 10000
+          monthly_cost_budget_cents: 100000
+        channels:
+          - binding_id: http-a
+            type: http
+            provider_account_id: local
+            enabled: true
+          - binding_id: telegram-a
+            type: telegram
+            provider_account_id: bot-a
+            token:
+              provider: env
+              key: TELEGRAM_BOT_TOKEN
+            enabled: true
+        storage:
+          session:
+            type: inmemory
+            namespace: tenant-a-support
+          memory:
+            type: inmemory
+          summary:
+            type: inmemory
+          artifact:
+            type: local
+            endpoint: ./data/artifacts
+          knowledge:
+            type: inmemory
+          audit:
+            type: sqlite
+            endpoint: ./data/audit.db
+`
+
+func TestLoadValidConfiguration(t *testing.T) {
+	file, err := Load(strings.NewReader(validYAML))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(file.Tenants) != 1 || len(file.Tenants[0].Apps) != 1 {
+		t.Fatalf("unexpected config: %+v", file)
+	}
+	if file.Tenants[0].ConfigVersion != 3 {
+		t.Fatalf("config version = %d", file.Tenants[0].ConfigVersion)
+	}
+}
+
+func TestLoadRejectsInvalidConfiguration(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "unknown field",
+			yaml: validYAML + "unknown_field: true\n",
+			want: "field unknown_field not found",
+		},
+		{
+			name: "empty tenant",
+			yaml: strings.Replace(validYAML, "tenant_id: tenant-a", "tenant_id: ''", 1),
+			want: "tenant_id must be non-empty",
+		},
+		{
+			name: "duplicate binding",
+			yaml: strings.Replace(validYAML, "binding_id: telegram-a", "binding_id: http-a", 1),
+			want: "duplicate binding_id",
+		},
+		{
+			name: "invalid backend",
+			yaml: strings.Replace(validYAML, "type: inmemory\n            namespace", "type: invalid\n            namespace", 1),
+			want: "storage.session.type",
+		},
+		{
+			name: "credentials in endpoint",
+			yaml: strings.Replace(validYAML, "endpoint: ./data/artifacts", "endpoint: https://user:pass@example.com", 1),
+			want: "must not contain credentials",
+		},
+		{
+			name: "secret-like query in endpoint",
+			yaml: strings.Replace(validYAML, "endpoint: ./data/artifacts", "endpoint: https://example.com?token=secret", 1),
+			want: "must not contain query parameters",
+		},
+		{
+			name: "secret-like fragment in endpoint",
+			yaml: strings.Replace(validYAML, "endpoint: ./data/artifacts", "endpoint: https://example.com/#token=secret", 1),
+			want: "must not contain fragments",
+		},
+		{
+			name: "secret-like fragment in webhook",
+			yaml: strings.Replace(validYAML, "provider_account_id: local", "provider_account_id: local\n            webhook_url: 'https://example.com/#token=secret'", 1),
+			want: "must not contain fragments",
+		},
+		{
+			name: "multiple documents",
+			yaml: validYAML + "---\n{}\n",
+			want: "multiple YAML documents",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Load(strings.NewReader(test.yaml))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadNeverResolvesOrLeaksSecretValue(t *testing.T) {
+	const canary = "canary-super-secret-value"
+	t.Setenv("MODEL_API_KEY", canary)
+
+	file, err := Load(strings.NewReader(validYAML))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	encoded, err := json.Marshal(file)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if strings.Contains(string(encoded), canary) {
+		t.Fatalf("serialized config leaked secret: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), "MODEL_API_KEY") {
+		t.Fatalf("serialized config lost secret reference: %s", encoded)
+	}
+}
+
+func TestLoadRejectsInlineSecretValueWithoutEchoingIt(t *testing.T) {
+	const canary = "inline-canary-secret"
+	invalid := strings.Replace(
+		validYAML,
+		"key: MODEL_API_KEY",
+		"key: MODEL_API_KEY\n            value: "+canary,
+		1,
+	)
+	_, err := Load(strings.NewReader(invalid))
+	if err == nil {
+		t.Fatal("Load() error = nil, want non-nil")
+	}
+	if strings.Contains(err.Error(), canary) {
+		t.Fatalf("Load() error leaked inline secret: %v", err)
+	}
+}
+
+func TestLoadFromEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(validYAML), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv(EnvConfigPath, path)
+	file, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv() error = %v", err)
+	}
+	if file.Tenants[0].ID != "tenant-a" {
+		t.Fatalf("tenant ID = %q", file.Tenants[0].ID)
+	}
+}
+
+func TestLoadFromEnvRequiresPath(t *testing.T) {
+	t.Setenv(EnvConfigPath, "")
+	if _, err := LoadFromEnv(); err == nil {
+		t.Fatal("LoadFromEnv() error = nil, want non-nil")
+	}
+}
+
+func TestExampleConfigurationLoads(t *testing.T) {
+	file, err := LoadFile("../../configs/example.yaml")
+	if err != nil {
+		t.Fatalf("LoadFile(example) error = %v", err)
+	}
+	if file.Tenants[0].ID != "demo" {
+		t.Fatalf("example tenant ID = %q", file.Tenants[0].ID)
+	}
+}

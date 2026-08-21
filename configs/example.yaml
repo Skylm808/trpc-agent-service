@@ -1,0 +1,71 @@
+schema_version: 1
+tenants:
+  - tenant_id: demo
+    name: Demo Tenant
+    enabled: true
+    config_version: 1
+    audit:
+      enabled: true
+      retention_days: 30
+      store_content: false
+      redact_fields:
+        - authorization
+        - api_key
+    apps:
+      - app_id: assistant
+        name: Demo Assistant
+        enabled: true
+        config:
+          instruction: You are a helpful assistant for the demo tenant.
+        model:
+          provider: mock
+          name: deterministic-mock
+          temperature: 0
+          max_tokens: 2048
+        tools:
+          allow:
+            - calculator
+          deny:
+            - shell
+          require_approval: []
+          request_token_budget: 10000
+          monthly_cost_budget_cents: 10000
+        channels:
+          - binding_id: demo-http
+            type: http
+            provider_account_id: local-development
+            enabled: true
+          - binding_id: demo-wecom
+            type: wecom
+            provider_account_id: replace-with-wecom-corp-id
+            webhook_url: https://example.invalid/channels/wecom/demo-wecom
+            token:
+              provider: env
+              key: WECOM_TOKEN
+            secret:
+              provider: env
+              key: WECOM_AES_KEY
+            enabled: false
+          - binding_id: demo-telegram
+            type: telegram
+            provider_account_id: replace-with-telegram-bot-id
+            token:
+              provider: env
+              key: TELEGRAM_BOT_TOKEN
+            enabled: false
+        storage:
+          session:
+            type: inmemory
+            namespace: demo-assistant
+          memory:
+            type: inmemory
+          summary:
+            type: inmemory
+          artifact:
+            type: local
+            endpoint: ./data/artifacts
+          knowledge:
+            type: inmemory
+          audit:
+            type: sqlite
+            endpoint: ./data/audit.db

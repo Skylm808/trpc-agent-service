@@ -1,0 +1,40 @@
+package tenant
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestSecretRefStringRedactsKey(t *testing.T) {
+	ref := SecretRef{Provider: SecretProviderEnv, Key: "VERY_SECRET_ENV_NAME"}
+	formatted := ref.String()
+	if strings.Contains(formatted, ref.Key) {
+		t.Fatalf("String() = %q contains secret key", formatted)
+	}
+	if formatted != "<secret-ref:env>" {
+		t.Fatalf("String() = %q", formatted)
+	}
+}
+
+func TestAgentAppCloneIsDeep(t *testing.T) {
+	temperature := 0.5
+	original := AgentApp{
+		Model:    ModelProfile{Temperature: &temperature},
+		Tools:    ToolPolicy{Allow: []string{"calculator"}},
+		Channels: []ChannelBinding{{ID: "binding-a"}},
+	}
+	cloned := original.Clone()
+	*cloned.Model.Temperature = 1.5
+	cloned.Tools.Allow[0] = "other"
+	cloned.Channels[0].ID = "binding-b"
+
+	if *original.Model.Temperature != 0.5 {
+		t.Fatalf("original temperature mutated: %v", *original.Model.Temperature)
+	}
+	if original.Tools.Allow[0] != "calculator" {
+		t.Fatalf("original tools mutated: %v", original.Tools.Allow)
+	}
+	if original.Channels[0].ID != "binding-a" {
+		t.Fatalf("original channels mutated: %v", original.Channels)
+	}
+}
