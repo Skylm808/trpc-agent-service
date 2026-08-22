@@ -31,7 +31,7 @@ func TestMigrationContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"tenants", "agent_apps", "config_versions", "channel_bindings", "identity_mappings", "session_heads", "last_event_seq", "last_fence", "state_version", "message_events", "event_seq", "session_summaries", "cutoff_event_seq", "memory_entries", "memory_id", "source_event_seq", "inbox_messages", "outbox_messages", "audit_logs", "migration_jobs"} {
+	for _, required := range []string{"tenants", "agent_apps", "config_versions", "channel_bindings", "identity_mappings", "session_heads", "last_event_seq", "last_fence", "state_version", "message_events", "event_seq", "session_summaries", "cutoff_event_seq", "memory_entries", "memory_id", "source_event_seq", "inbox_messages", "inbox_seq", "claim_owner", "claim_token", "lease_until", "outbox_messages", "source_inbox_id", "fence", "derived_jobs", "audit_logs", "migration_jobs"} {
 		if !strings.Contains(up, required) {
 			t.Errorf("up migration missing %q", required)
 		}

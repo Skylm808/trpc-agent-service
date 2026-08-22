@@ -1,5 +1,6 @@
 DROP TABLE IF EXISTS migration_jobs;
 DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS derived_jobs;
 DROP TABLE IF EXISTS outbox_messages;
 DROP TABLE IF EXISTS inbox_messages;
 DROP TABLE IF EXISTS memory_entries;
