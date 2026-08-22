@@ -1,0 +1,231 @@
+package openclaw
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+)
+
+// Submitter asynchronously schedules a durable RunRequest.
+type Submitter interface {
+	Submit(gateway.RunRequest) error
+}
+
+// Handler authenticates bindings, canonicalizes identities, claims Inbox, and acknowledges quickly.
+type Handler struct {
+	Routes     Routes
+	Inbox      idempotency.Store
+	Submitter  Submitter
+	Hub        *Hub
+	ClaimOwner string
+	ClaimTTL   time.Duration
+}
+
+// Routes returns the OpenClaw-compatible HTTP surface.
+func (handler *Handler) RoutesHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/healthz", method(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})))
+	mux.Handle("/v1/gateway/status", method(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	})))
+	mux.Handle("/v1/gateway/cancel", method(http.MethodPost, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "cancel is unavailable for durable queued requests"})
+	})))
+	mux.Handle("/v1/gateway/messages", method(http.MethodPost, http.HandlerFunc(handler.message)))
+	mux.Handle("/v1/gateway/messages:stream", method(http.MethodPost, http.HandlerFunc(handler.stream)))
+	return mux
+}
+
+func (handler *Handler) message(w http.ResponseWriter, request *http.Request) {
+	accepted, _, status, err := handler.accept(request)
+	if err != nil {
+		writeError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, accepted)
+}
+
+func (handler *Handler) stream(w http.ResponseWriter, request *http.Request) {
+	accepted, events, status, err := handler.acceptStream(request)
+	if err != nil {
+		writeError(w, status, err)
+		return
+	}
+	defer handler.Hub.Unsubscribe(accepted.RequestID, events)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return
+	}
+	if accepted.Duplicate {
+		writeSSE(w, StreamEvent{Type: "run.ignored", RequestID: accepted.RequestID, TraceID: accepted.TraceID, Terminal: true})
+		flusher.Flush()
+		return
+	}
+	for {
+		select {
+		case event := <-events:
+			writeSSE(w, event)
+			flusher.Flush()
+			if event.Terminal {
+				return
+			}
+		case <-request.Context().Done():
+			return
+		}
+	}
+}
+
+func (handler *Handler) accept(request *http.Request) (MessageResponse, <-chan StreamEvent, int, error) {
+	return handler.acceptWithSubscription(request, false)
+}
+func (handler *Handler) acceptStream(request *http.Request) (MessageResponse, <-chan StreamEvent, int, error) {
+	return handler.acceptWithSubscription(request, true)
+}
+
+func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe bool) (MessageResponse, <-chan StreamEvent, int, error) {
+	if handler == nil || handler.Routes == nil || handler.Inbox == nil || handler.Submitter == nil || handler.ClaimOwner == "" {
+		return MessageResponse{}, nil, http.StatusServiceUnavailable, errors.New("gateway is not configured")
+	}
+	if subscribe && handler.Hub == nil {
+		return MessageResponse{}, nil, http.StatusServiceUnavailable, errors.New("stream event hub is not configured")
+	}
+	bindingID := strings.TrimSpace(request.Header.Get("X-Channel-Binding"))
+	credential := strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "))
+	route, err := handler.Routes.Resolve(bindingID, credential)
+	if err != nil {
+		return MessageResponse{}, nil, http.StatusUnauthorized, errors.New("invalid gateway credential")
+	}
+	var input MessageRequest
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		return MessageResponse{}, nil, http.StatusBadRequest, fmt.Errorf("decode message: %w", err)
+	}
+	if input.MessageID == "" || input.SessionID != "" {
+		return MessageResponse{}, nil, http.StatusUnprocessableEntity, errors.New("message_id is required and session_id is server-generated")
+	}
+	if input.Channel != "" && input.Channel != string(route.ChannelType) {
+		return MessageResponse{}, nil, http.StatusUnprocessableEntity, errors.New("channel does not match authenticated binding")
+	}
+	externalUserID := strings.TrimSpace(input.From)
+	if externalUserID == "" {
+		externalUserID = strings.TrimSpace(input.UserID)
+	}
+	if externalUserID == "" {
+		return MessageResponse{}, nil, http.StatusUnprocessableEntity, errors.New("from or user_id is required")
+	}
+	text := strings.TrimSpace(input.Text)
+	for _, part := range input.ContentParts {
+		if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+			if text != "" {
+				text += "\n"
+			}
+			text += strings.TrimSpace(part.Text)
+		}
+	}
+	if text == "" {
+		return MessageResponse{}, nil, http.StatusUnprocessableEntity, errors.New("text content is required")
+	}
+	userID, err := tenant.CanonicalUserID(route.ChannelType, route.BindingID, externalUserID)
+	if err != nil {
+		return MessageResponse{}, nil, http.StatusUnprocessableEntity, err
+	}
+	sessionID, err := canonicalSession(route.BindingID, externalUserID, input.ConversationID, input.ThreadID)
+	if err != nil {
+		return MessageResponse{}, nil, http.StatusUnprocessableEntity, err
+	}
+	traceID := strings.TrimSpace(request.Header.Get("X-Trace-ID"))
+	if traceID == "" {
+		traceID = newID()
+	}
+	inbound := gateway.InboundMessage{TenantID: route.TenantID, AppID: route.AppID, BindingID: route.BindingID, ExternalMessageID: input.MessageID, ExternalUserID: externalUserID, UserID: userID, SessionID: sessionID, Text: text, TraceID: traceID, ConfigVersion: route.ConfigVersion, ReceivedAt: time.Now().UTC()}
+	claim, won, err := handler.Inbox.Claim(request.Context(), inbound, handler.ClaimOwner, handler.claimTTL())
+	if err != nil {
+		return MessageResponse{}, nil, http.StatusServiceUnavailable, err
+	}
+	response := MessageResponse{RequestID: claim.InboxID, SessionID: sessionID, TraceID: traceID, Accepted: true, Duplicate: !won}
+	if !won {
+		response.TraceID = claim.Message.TraceID
+		return response, nil, http.StatusAccepted, nil
+	}
+	var events <-chan StreamEvent
+	var unsubscribe func()
+	if subscribe && handler.Hub != nil {
+		events, unsubscribe = handler.Hub.Subscribe(claim.InboxID)
+	}
+	run := gateway.RunRequest{InboxID: claim.InboxID, InboxSeq: claim.InboxSeq, TenantID: route.TenantID, AppID: route.AppID, BindingID: route.BindingID, ExternalMessageID: input.MessageID, UserID: userID, SessionID: sessionID, Text: text, TraceID: traceID, ConfigVersion: route.ConfigVersion, ClaimOwner: claim.Owner, ClaimToken: claim.ClaimToken, ClaimAttempt: claim.Attempt, ClaimLeaseUntil: claim.LeaseUntil}
+	if err := handler.Submitter.Submit(run); err != nil {
+		if unsubscribe != nil {
+			unsubscribe()
+		}
+		_ = handler.Inbox.Fail(context.Background(), claim, err, time.Now().UTC().Add(time.Second))
+		return MessageResponse{}, nil, http.StatusServiceUnavailable, err
+	}
+	return response, events, http.StatusAccepted, nil
+}
+
+func canonicalSession(bindingID, userID, conversationID, threadID string) (string, error) {
+	var base string
+	var err error
+	if strings.TrimSpace(conversationID) == "" {
+		base, err = tenant.DirectSessionID(bindingID, userID)
+	} else {
+		base, err = tenant.GroupSessionID(bindingID, conversationID)
+	}
+	if err != nil || strings.TrimSpace(threadID) == "" {
+		return base, err
+	}
+	return tenant.ThreadSessionID(base, threadID)
+}
+func (handler *Handler) claimTTL() time.Duration {
+	if handler.ClaimTTL > 0 {
+		return handler.ClaimTTL
+	}
+	return 30 * time.Second
+}
+func newID() string {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return fmt.Sprintf("trace-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(value[:])
+}
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+func writeError(w http.ResponseWriter, status int, err error) {
+	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+func writeSSE(w io.Writer, event StreamEvent) {
+	payload, _ := json.Marshal(event)
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, payload)
+}
+
+func method(want string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != want {
+			w.Header().Set("Allow", want)
+			writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+			return
+		}
+		next.ServeHTTP(w, request)
+	})
+}

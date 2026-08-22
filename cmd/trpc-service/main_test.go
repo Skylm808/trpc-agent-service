@@ -32,6 +32,12 @@ func TestRunNonBlockingFlags(t *testing.T) {
 	}
 }
 
+func TestGatewayTokenEnv(t *testing.T) {
+	if got := gatewayTokenEnv("demo-http.v2"); got != "TRPC_AGENT_GATEWAY_TOKEN_DEMO_HTTP_V2" {
+		t.Fatalf("gatewayTokenEnv=%q", got)
+	}
+}
+
 func TestRunExitsCleanlyOnInterrupt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

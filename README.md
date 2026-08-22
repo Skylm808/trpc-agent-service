@@ -154,8 +154,26 @@ PR3 提供了无需模型密钥、数据库或网络的纵向链路示例，实�
 go run ./examples/quickstart
 ```
 
+启动 PR5 的本地 OpenClaw HTTP 纵向链路（仅开发环境，状态保存在进程内）：
+
+```bash
+export TRPC_AGENT_GATEWAY_TOKEN_DEMO_HTTP=local-secret
+go run ./cmd/trpc-service --config ./configs/example.yaml --listen 127.0.0.1:8080
+
+curl -H 'Authorization: Bearer local-secret' \
+  -H 'X-Channel-Binding: demo-http' \
+  -H 'Content-Type: application/json' \
+  -d '{"channel":"http","from":"demo-user","message_id":"m-1","text":"calculate 6*7"}' \
+  http://127.0.0.1:8080/v1/gateway/messages
+```
+
+生产环境不能使用这个本地组合器；需要注入 PostgreSQL Inbox/WriteStore、Redis
+Coordinator 和持久化队列。
+
 控制面数据模型见 [`docs/data-model.md`](docs/data-model.md)，Runtime
-Bundle 的版本切换与生命周期约束见 [`docs/runtime.md`](docs/runtime.md)。
+Bundle 的版本切换与生命周期约束见 [`docs/runtime.md`](docs/runtime.md)，多节点
+Inbox/fencing/Outbox 与 OpenClaw HTTP 链路见
+[`docs/message-runtime.md`](docs/message-runtime.md)。
 
 停止服务：
 

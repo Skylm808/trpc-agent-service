@@ -46,6 +46,21 @@ type Bundle struct {
 
 // NewBundle assembles LLMAgent, storage, tools, plugins, and Runner through public v1.11.2 APIs.
 func NewBundle(snapshot config.RuntimeSnapshot, plugins ...plugin.Plugin) (*Bundle, error) {
+	app := snapshot.App()
+	services, err := storage.NewInMemory(app.Storage)
+	if err != nil {
+		return nil, err
+	}
+	bundle, err := NewBundleWithServices(snapshot, services, plugins...)
+	if err != nil {
+		_ = services.Close()
+		return nil, err
+	}
+	return bundle, nil
+}
+
+// NewBundleWithServices assembles a Bundle with tenant-routed services owned by it.
+func NewBundleWithServices(snapshot config.RuntimeSnapshot, services *storage.Services, plugins ...plugin.Plugin) (*Bundle, error) {
 	pluginNames := make(map[string]struct{}, len(plugins))
 	for _, candidate := range plugins {
 		if candidate == nil || candidate.Name() == "" {
@@ -68,9 +83,8 @@ func NewBundle(snapshot config.RuntimeSnapshot, plugins ...plugin.Plugin) (*Bund
 	if err != nil {
 		return nil, err
 	}
-	services, err := storage.NewInMemory(app.Storage)
-	if err != nil {
-		return nil, err
+	if services == nil || services.Session == nil || services.Memory == nil || services.Artifact == nil {
+		return nil, errors.New("runtime: session, memory, and artifact services are required")
 	}
 	agent := llmagent.New(app.Name, llmagent.WithModel(serviceagent.MockModel{}), llmagent.WithInstruction(app.Config.Instruction), llmagent.WithTools(tools))
 	run := runner.NewRunner(appName, agent, runner.WithSessionService(services.Session), runner.WithMemoryService(services.Memory), runner.WithArtifactService(services.Artifact), runner.WithPlugins(plugins...))
