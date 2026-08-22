@@ -23,36 +23,46 @@ type Routes interface {
 }
 
 // StaticRoutes is an immutable local registry suitable for tests and Compose.
-type StaticRoutes struct{ routes map[string]Route }
+type StaticRoutes struct{ routes map[string][]Route }
 
 // NewStaticRoutes validates and copies routes.
 func NewStaticRoutes(routes ...Route) (*StaticRoutes, error) {
-	registry := &StaticRoutes{routes: make(map[string]Route, len(routes))}
+	registry := &StaticRoutes{routes: make(map[string][]Route, len(routes))}
 	for _, route := range routes {
 		if route.TenantID == "" || route.AppID == "" || route.BindingID == "" || route.ChannelType == "" || route.ConfigVersion == 0 || route.Credential == "" {
 			return nil, errors.New("openclaw: route scope, version, channel, and credential are required")
 		}
-		if _, exists := registry.routes[route.BindingID]; exists {
-			return nil, errors.New("openclaw: duplicate binding")
+		for _, existing := range registry.routes[route.BindingID] {
+			if len(existing.Credential) == len(route.Credential) && subtle.ConstantTimeCompare([]byte(existing.Credential), []byte(route.Credential)) == 1 {
+				return nil, errors.New("openclaw: ambiguous binding credential")
+			}
 		}
-		registry.routes[route.BindingID] = route
+		registry.routes[route.BindingID] = append(registry.routes[route.BindingID], route)
 	}
 	return registry, nil
 }
 
 // Resolve performs a constant-time credential comparison.
 func (routes *StaticRoutes) Resolve(bindingID, credential string) (Route, error) {
-	route, ok := routes.routes[bindingID]
-	if !ok || len(credential) != len(route.Credential) || subtle.ConstantTimeCompare([]byte(credential), []byte(route.Credential)) != 1 {
-		return Route{}, errors.New("openclaw: invalid binding credential")
+	for _, route := range routes.routes[bindingID] {
+		if len(credential) == len(route.Credential) && subtle.ConstantTimeCompare([]byte(credential), []byte(route.Credential)) == 1 {
+			return route, nil
+		}
 	}
-	return route, nil
+	return Route{}, errors.New("openclaw: invalid binding credential")
 }
 
 // Hub fans execution events out to an optional streaming HTTP client.
 type Hub struct {
 	mu   sync.Mutex
 	subs map[string]map[chan StreamEvent]struct{}
+}
+
+// EventBus supports local or distributed request-scoped event delivery.
+type EventBus interface {
+	gateway.EventPublisher
+	Subscribe(string) (<-chan StreamEvent, func())
+	Unsubscribe(string, <-chan StreamEvent)
 }
 
 func NewHub() *Hub { return &Hub{subs: make(map[string]map[chan StreamEvent]struct{})} }
@@ -97,7 +107,10 @@ func (hub *Hub) Unsubscribe(requestID string, target <-chan StreamEvent) {
 
 // Publish implements gateway.EventPublisher. Slow clients cannot block Workers.
 func (hub *Hub) Publish(event gateway.RunEvent) {
-	projected := StreamEvent{Type: event.Type, RequestID: event.RequestID, TraceID: event.TraceID, Delta: event.Delta, Message: event.Message, ToolName: event.ToolName, Error: event.Error, Terminal: event.Terminal}
+	projected := StreamEvent{Type: event.Type, RequestID: event.RequestID, SessionID: event.SessionID, TraceID: event.TraceID, Delta: event.Delta, Reply: event.Message, Stage: event.Stage, ToolName: event.ToolName, ToolCallID: event.ToolCallID, ToolStatus: event.ToolStatus, Error: event.Error, Terminal: event.Terminal}
+	if event.TotalTokens != 0 {
+		projected.Usage = &Usage{PromptTokens: event.PromptTokens, CompletionTokens: event.CompletionTokens, TotalTokens: event.TotalTokens}
+	}
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
 	for stream := range hub.subs[event.RequestID] {

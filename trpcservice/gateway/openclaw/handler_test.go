@@ -27,6 +27,18 @@ type captureSubmitter struct {
 	calls   atomic.Int32
 }
 
+type fakeCanceler struct{ requestID string }
+type fakeApprover struct{ tenantID, requestID, toolName string }
+
+func (canceler *fakeCanceler) Cancel(requestID string) bool {
+	canceler.requestID = requestID
+	return true
+}
+func (approver *fakeApprover) Grant(tenantID, requestID, toolName string) bool {
+	approver.tenantID, approver.requestID, approver.toolName = tenantID, requestID, toolName
+	return true
+}
+
 func (submitter *captureSubmitter) Submit(request gateway.RunRequest) error {
 	submitter.request = request
 	submitter.calls.Add(1)
@@ -71,6 +83,55 @@ func TestClientCannotChooseSessionOrTenant(t *testing.T) {
 	response := request(t, handler, "/v1/gateway/messages", "binding-a", "secret", "", `{"from":"u","message_id":"m","text":"x","session_id":"tenant-b/session"}`)
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestStatusAndCancelAreAuthenticatedAndTenantScoped(t *testing.T) {
+	routes, _ := NewStaticRoutes(Route{TenantID: "tenant-a", AppID: "assistant", BindingID: "binding-a", ChannelType: tenant.ChannelTypeHTTP, ConfigVersion: 1, Credential: "secret"})
+	registry := NewRegistry()
+	canceler := &fakeCanceler{}
+	approver := &fakeApprover{}
+	handler := (&Handler{Routes: routes, Inbox: idempotency.NewMemoryStore(), Submitter: &captureSubmitter{}, Status: registry, Canceler: canceler, Approver: approver, ClaimOwner: "gateway"}).RoutesHandler()
+	accepted := request(t, handler, "/v1/gateway/messages", "binding-a", "secret", "trace", `{"from":"u","message_id":"m","text":"x"}`)
+	var response MessageResponse
+	if err := json.Unmarshal(accepted.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	statusRequest := httptest.NewRequest(http.MethodGet, "/v1/gateway/status?request_id="+response.RequestID, nil)
+	statusRequest.Header.Set("X-Channel-Binding", "binding-a")
+	statusRequest.Header.Set("Authorization", "Bearer secret")
+	statusResponse := httptest.NewRecorder()
+	handler.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), "run.accepted") {
+		t.Fatalf("status=%d body=%s", statusResponse.Code, statusResponse.Body.String())
+	}
+	cancelResponse := request(t, handler, "/v1/gateway/cancel", "binding-a", "secret", "", `{"request_id":"`+response.RequestID+`"}`)
+	if cancelResponse.Code != http.StatusAccepted || canceler.requestID != response.RequestID {
+		t.Fatalf("cancel status=%d request=%q body=%s", cancelResponse.Code, canceler.requestID, cancelResponse.Body.String())
+	}
+	foreign := request(t, handler, "/v1/gateway/cancel", "binding-a", "secret", "", `{"request_id":"tenant-b/binding-a/m"}`)
+	if foreign.Code != http.StatusBadRequest {
+		t.Fatalf("foreign cancel status=%d", foreign.Code)
+	}
+	approved := request(t, handler, "/v1/gateway/approve", "binding-a", "secret", "", `{"request_id":"`+response.RequestID+`","tool_name":"danger"}`)
+	if approved.Code != http.StatusAccepted || approver.tenantID != "tenant-a" || approver.requestID != response.RequestID || approver.toolName != "danger" {
+		t.Fatalf("approve status=%d approver=%+v body=%s", approved.Code, approver, approved.Body.String())
+	}
+}
+
+func TestStaticRoutesAllowTenantScopedBindingIDs(t *testing.T) {
+	routes, err := NewStaticRoutes(
+		Route{TenantID: "tenant-a", AppID: "app", BindingID: "shared", ChannelType: tenant.ChannelTypeHTTP, ConfigVersion: 1, Credential: "secret-a"},
+		Route{TenantID: "tenant-b", AppID: "app", BindingID: "shared", ChannelType: tenant.ChannelTypeHTTP, ConfigVersion: 1, Credential: "secret-b"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ credential, tenantID string }{{"secret-a", "tenant-a"}, {"secret-b", "tenant-b"}} {
+		route, err := routes.Resolve("shared", test.credential)
+		if err != nil || route.TenantID != test.tenantID {
+			t.Fatalf("credential=%s route=%+v err=%v", test.credential, route, err)
+		}
 	}
 }
 

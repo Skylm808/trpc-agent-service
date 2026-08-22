@@ -17,6 +17,7 @@ type InboundMessage struct {
 	TraceID                    string
 	ConfigVersion              tenant.ConfigVersion
 	ReceivedAt                 time.Time
+	TraceContext               map[string]string
 }
 
 // RunRequest is the durable unit dispatched to an Agent Worker.
@@ -31,6 +32,7 @@ type RunRequest struct {
 	ClaimAttempt               int
 	InboxSeq                   uint64
 	ClaimLeaseUntil            time.Time
+	TraceContext               map[string]string
 }
 
 // OutboundMessage is a durable reply awaiting channel delivery.
@@ -54,9 +56,15 @@ func (request RunRequest) Key() SessionKey {
 // RunEvent is a transport-neutral projection of an Agent event.
 type RunEvent struct {
 	Type, RequestID, TraceID string
+	SessionID                string
 	Delta, Message, ToolName string
+	Stage, ToolStatus        string
+	ToolCallID               string
 	Error                    string
 	Terminal                 bool
+	PromptTokens             int
+	CompletionTokens         int
+	TotalTokens              int
 }
 
 // EventPublisher observes execution without owning persistence or routing.

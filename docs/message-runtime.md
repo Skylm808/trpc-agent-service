@@ -1,4 +1,4 @@
-# PR4/PR5：多节点消息运行时与 OpenClaw HTTP Gateway
+# PR4/PR5：多节点消息运行时与 OpenClaw-compatible durable HTTP Gateway
 
 ## 组件边界
 
@@ -50,14 +50,27 @@ OpenClaw/IM callback
 
 ## OpenClaw 兼容 HTTP
 
+这里实现的是 OpenClaw 文本协议的 durable callback profile，不是上游 `gwclient`
+的逐字节替代：消息持久化后返回 `202 Accepted`，而不是等待完整回复后返回 `200`。
+多模态 DTO 目前也是 text-only 子集。
+
 端点：
 
 - `POST /v1/gateway/messages`：持久化成功即返回 `202`，不等待模型和工具。
-- `POST /v1/gateway/messages:stream`：SSE 输出 `run.started`、`tool`、
-  `message.delta`、`run.completed` 或 `run.error`。
+- `POST /v1/gateway/messages:stream`：Runner 产生事件时立即输出 `run.started`、
+  `run.progress`、`message.delta`、`message.completed`、`run.completed` 或终态事件。
 - `GET /healthz`、`GET /v1/gateway/status`。
-- `POST /v1/gateway/cancel`：当前 durable queue 版本明确返回 `501`，后续需用
-  `runner.ManagedRunner.Cancel(request_id)` 和 Inbox 状态 CAS 实现，不能伪装成功。
+- `POST /v1/gateway/cancel`：取消本节点当前活跃的 Runner，并将 Inbox 以 CAS 标记为
+  `canceled`；未知或已结束请求返回 `404`。生产多节点部署必须把取消命令送到持有
+  request 的 Worker（例如 Redis command bus），不能依赖 Gateway 进程内查找。
+
+本地 `Hub` 和 `Registry` 仅供单进程开发。Gateway 与 Worker 分离或水平扩展时，SSE
+事件应使用 `RedisEventBus`（或等价共享 Pub/Sub），status 应投影到共享持久化后端；
+因此客户端不需要 sticky session。
+
+进程内 Hub 对 delta 使用有界、非阻塞缓冲；慢客户端可能丢失中间 delta，但终态
+`message.completed`/`run.completed` 会优先投递。需要完整回放时，应从共享 event log
+按 request ID 重放，而不是把 Pub/Sub 当作事实存储。
 
 客户端通过 `Authorization: Bearer ...` 和 `X-Channel-Binding` 认证。token 只参与
 常量时间比较，不写入消息、日志或 trace。服务端根据凭证解析 tenant/app；外部

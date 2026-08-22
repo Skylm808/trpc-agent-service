@@ -27,7 +27,10 @@ type Handler struct {
 	Routes     Routes
 	Inbox      idempotency.Store
 	Submitter  Submitter
-	Hub        *Hub
+	Hub        EventBus
+	Status     *Registry
+	Canceler   Canceler
+	Approver   Approver
 	ClaimOwner string
 	ClaimTTL   time.Duration
 }
@@ -38,15 +41,82 @@ func (handler *Handler) RoutesHandler() http.Handler {
 	mux.Handle("/healthz", method(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})))
-	mux.Handle("/v1/gateway/status", method(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
-	})))
-	mux.Handle("/v1/gateway/cancel", method(http.MethodPost, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "cancel is unavailable for durable queued requests"})
-	})))
+	mux.Handle("/v1/gateway/status", method(http.MethodGet, http.HandlerFunc(handler.status)))
+	mux.Handle("/v1/gateway/cancel", method(http.MethodPost, http.HandlerFunc(handler.cancel)))
+	mux.Handle("/v1/gateway/approve", method(http.MethodPost, http.HandlerFunc(handler.approve)))
 	mux.Handle("/v1/gateway/messages", method(http.MethodPost, http.HandlerFunc(handler.message)))
 	mux.Handle("/v1/gateway/messages:stream", method(http.MethodPost, http.HandlerFunc(handler.stream)))
 	return mux
+}
+
+func (handler *Handler) status(w http.ResponseWriter, request *http.Request) {
+	route, err := handler.authenticate(request)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+	requestID := request.URL.Query().Get("request_id")
+	if requestID == "" || !strings.HasPrefix(requestID, route.TenantID+"/"+route.BindingID+"/") {
+		writeError(w, http.StatusNotFound, errors.New("request not found"))
+		return
+	}
+	status, ok := handler.Status.Get(requestID)
+	if !ok {
+		writeError(w, http.StatusNotFound, errors.New("request not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+func (handler *Handler) cancel(w http.ResponseWriter, request *http.Request) {
+	route, err := handler.authenticate(request)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+	var input struct {
+		RequestID string `json:"request_id"`
+	}
+	if json.NewDecoder(io.LimitReader(request.Body, 4096)).Decode(&input) != nil || !strings.HasPrefix(input.RequestID, route.TenantID+"/"+route.BindingID+"/") {
+		writeError(w, http.StatusBadRequest, errors.New("valid request_id is required"))
+		return
+	}
+	if handler.Canceler == nil || !handler.Canceler.Cancel(input.RequestID) {
+		writeError(w, http.StatusNotFound, errors.New("active request not found"))
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"request_id": input.RequestID, "canceled": true})
+}
+func (handler *Handler) approve(w http.ResponseWriter, request *http.Request) {
+	route, err := handler.authenticate(request)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+	var input struct {
+		RequestID string `json:"request_id"`
+		ToolName  string `json:"tool_name"`
+	}
+	if json.NewDecoder(io.LimitReader(request.Body, 4096)).Decode(&input) != nil || !strings.HasPrefix(input.RequestID, route.TenantID+"/"+route.BindingID+"/") || strings.TrimSpace(input.ToolName) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("valid request_id and tool_name are required"))
+		return
+	}
+	if handler.Approver == nil || !handler.Approver.Grant(route.TenantID, input.RequestID, input.ToolName) {
+		writeError(w, http.StatusServiceUnavailable, errors.New("approval store is unavailable"))
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"request_id": input.RequestID, "tool_name": input.ToolName, "approved": true})
+}
+func (handler *Handler) authenticate(request *http.Request) (Route, error) {
+	if handler == nil || handler.Routes == nil {
+		return Route{}, errors.New("gateway is not configured")
+	}
+	bindingID := strings.TrimSpace(request.Header.Get("X-Channel-Binding"))
+	credential := strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "))
+	route, err := handler.Routes.Resolve(bindingID, credential)
+	if err != nil {
+		return Route{}, errors.New("invalid gateway credential")
+	}
+	return route, nil
 }
 
 func (handler *Handler) message(w http.ResponseWriter, request *http.Request) {
@@ -73,13 +143,18 @@ func (handler *Handler) stream(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if accepted.Duplicate {
-		writeSSE(w, StreamEvent{Type: "run.ignored", RequestID: accepted.RequestID, TraceID: accepted.TraceID, Terminal: true})
+		writeSSE(w, StreamEvent{Type: "run.ignored", RequestID: accepted.RequestID, SessionID: accepted.SessionID, TraceID: accepted.TraceID, Ignored: true, Terminal: true})
 		flusher.Flush()
 		return
 	}
 	for {
 		select {
-		case event := <-events:
+		case event, ok := <-events:
+			if !ok {
+				writeSSE(w, StreamEvent{Type: "run.error", RequestID: accepted.RequestID, SessionID: accepted.SessionID, TraceID: accepted.TraceID, Error: "event stream closed", Terminal: true})
+				flusher.Flush()
+				return
+			}
 			writeSSE(w, event)
 			flusher.Flush()
 			if event.Terminal {
@@ -105,9 +180,7 @@ func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe 
 	if subscribe && handler.Hub == nil {
 		return MessageResponse{}, nil, http.StatusServiceUnavailable, errors.New("stream event hub is not configured")
 	}
-	bindingID := strings.TrimSpace(request.Header.Get("X-Channel-Binding"))
-	credential := strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "))
-	route, err := handler.Routes.Resolve(bindingID, credential)
+	route, err := handler.authenticate(request)
 	if err != nil {
 		return MessageResponse{}, nil, http.StatusUnauthorized, errors.New("invalid gateway credential")
 	}
@@ -146,12 +219,16 @@ func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe 
 	if err != nil {
 		return MessageResponse{}, nil, http.StatusUnprocessableEntity, err
 	}
-	sessionID, err := canonicalSession(route.BindingID, externalUserID, input.ConversationID, input.ThreadID)
+	threadID := input.ThreadID
+	if threadID == "" {
+		threadID = input.Thread
+	}
+	sessionID, err := canonicalSession(route.BindingID, externalUserID, input.ConversationID, threadID)
 	if err != nil {
 		return MessageResponse{}, nil, http.StatusUnprocessableEntity, err
 	}
 	traceID := strings.TrimSpace(request.Header.Get("X-Trace-ID"))
-	if traceID == "" {
+	if !validCorrelationID(traceID) {
 		traceID = newID()
 	}
 	inbound := gateway.InboundMessage{TenantID: route.TenantID, AppID: route.AppID, BindingID: route.BindingID, ExternalMessageID: input.MessageID, ExternalUserID: externalUserID, UserID: userID, SessionID: sessionID, Text: text, TraceID: traceID, ConfigVersion: route.ConfigVersion, ReceivedAt: time.Now().UTC()}
@@ -164,12 +241,15 @@ func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe 
 		response.TraceID = claim.Message.TraceID
 		return response, nil, http.StatusAccepted, nil
 	}
+	if handler.Status != nil {
+		handler.Status.Publish(gateway.RunEvent{Type: "run.accepted", RequestID: claim.InboxID, SessionID: sessionID, TraceID: traceID})
+	}
 	var events <-chan StreamEvent
 	var unsubscribe func()
 	if subscribe && handler.Hub != nil {
 		events, unsubscribe = handler.Hub.Subscribe(claim.InboxID)
 	}
-	run := gateway.RunRequest{InboxID: claim.InboxID, InboxSeq: claim.InboxSeq, TenantID: route.TenantID, AppID: route.AppID, BindingID: route.BindingID, ExternalMessageID: input.MessageID, UserID: userID, SessionID: sessionID, Text: text, TraceID: traceID, ConfigVersion: route.ConfigVersion, ClaimOwner: claim.Owner, ClaimToken: claim.ClaimToken, ClaimAttempt: claim.Attempt, ClaimLeaseUntil: claim.LeaseUntil}
+	run := gateway.RunRequest{InboxID: claim.InboxID, InboxSeq: claim.InboxSeq, TenantID: route.TenantID, AppID: route.AppID, BindingID: route.BindingID, ExternalMessageID: input.MessageID, UserID: userID, SessionID: sessionID, Text: text, TraceID: traceID, TraceContext: inbound.TraceContext, ConfigVersion: route.ConfigVersion, ClaimOwner: claim.Owner, ClaimToken: claim.ClaimToken, ClaimAttempt: claim.Attempt, ClaimLeaseUntil: claim.LeaseUntil}
 	if err := handler.Submitter.Submit(run); err != nil {
 		if unsubscribe != nil {
 			unsubscribe()
@@ -178,6 +258,19 @@ func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe 
 		return MessageResponse{}, nil, http.StatusServiceUnavailable, err
 	}
 	return response, events, http.StatusAccepted, nil
+}
+
+func validCorrelationID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, current := range value {
+		if (current >= 'a' && current <= 'z') || (current >= 'A' && current <= 'Z') || (current >= '0' && current <= '9') || current == '-' || current == '_' || current == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func canonicalSession(bindingID, userID, conversationID, threadID string) (string, error) {
@@ -212,7 +305,13 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 func writeError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]string{"error": err.Error()})
+	errorType := "invalid_request"
+	if status >= 500 {
+		errorType = "server_error"
+	} else if status == http.StatusUnauthorized {
+		errorType = "authentication_error"
+	}
+	writeJSON(w, status, ErrorResponse{Error: APIError{Type: errorType, Message: err.Error()}})
 }
 func writeSSE(w io.Writer, event StreamEvent) {
 	payload, _ := json.Marshal(event)
