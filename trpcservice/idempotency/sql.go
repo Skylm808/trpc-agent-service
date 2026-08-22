@@ -21,6 +21,33 @@ type SQLStore struct {
 
 var _ Store = (*SQLStore)(nil)
 
+// Cancel marks an exact active SQL claim terminal.
+func (store *SQLStore) Cancel(ctx context.Context, claim Claim) error {
+	if err := validateSQLClaim(store, claim); err != nil {
+		return err
+	}
+	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='canceled',completed_at=$6 WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing'`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, store.now().UTC())
+	return exactClaimResult(result, err)
+}
+
+// Renew extends an unexpired SQL claim with an owner/token CAS.
+func (store *SQLStore) Renew(ctx context.Context, claim Claim, ttl time.Duration) (Claim, error) {
+	if err := validateSQLClaim(store, claim); err != nil {
+		return Claim{}, err
+	}
+	if ttl <= 0 {
+		return Claim{}, errors.New("idempotency: positive ttl is required")
+	}
+	now := store.now().UTC()
+	until := now.Add(ttl)
+	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET lease_until=$7 WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing' AND lease_until>$6`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, now, until)
+	if err := exactClaimResult(result, err); err != nil {
+		return Claim{}, err
+	}
+	claim.LeaseUntil = until
+	return claim, nil
+}
+
 // Claim atomically inserts or reclaims a delivery under serializable isolation.
 func (store *SQLStore) Claim(ctx context.Context, message gateway.InboundMessage, owner string, ttl time.Duration) (Claim, bool, error) {
 	if store == nil || store.DB == nil {
@@ -55,7 +82,7 @@ func (store *SQLStore) Claim(ctx context.Context, message gateway.InboundMessage
 			return Claim{}, false, err
 		}
 		existing := Claim{InboxID: InboxID(stored), Owner: existingOwner.String, ClaimToken: existingToken.String, Attempt: attempt, InboxSeq: inboxSeq, Status: status, LeaseUntil: leaseUntil.Time, Message: stored}
-		if status == StatusCompleted || (status == StatusProcessing && leaseUntil.Valid && now.Before(leaseUntil.Time)) || (status == StatusRetry && nextAttempt.Valid && now.Before(nextAttempt.Time)) {
+		if status == StatusCompleted || status == StatusCanceled || (status == StatusProcessing && leaseUntil.Valid && now.Before(leaseUntil.Time)) || (status == StatusRetry && nextAttempt.Valid && now.Before(nextAttempt.Time)) {
 			if err := tx.Commit(); err != nil {
 				return Claim{}, false, err
 			}
@@ -110,7 +137,7 @@ func (store *SQLStore) Fail(ctx context.Context, claim Claim, cause error, retry
 	}
 	lastError := ""
 	if cause != nil {
-		lastError = cause.Error()
+		lastError = sanitizeError(cause.Error())
 	}
 	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='retry', next_attempt_at=$6, last_error=$7, lease_until=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing'`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, retryAt.UTC(), lastError)
 	return exactClaimResult(result, err)

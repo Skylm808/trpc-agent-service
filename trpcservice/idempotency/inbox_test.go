@@ -83,3 +83,30 @@ func TestRetryWaitsUntilScheduledTime(t *testing.T) {
 		t.Fatal("due retry did not win")
 	}
 }
+
+func TestRenewPreventsReclaimAndRejectsStaleOwner(t *testing.T) {
+	store := NewMemoryStore()
+	now := time.Unix(100, 0)
+	store.now = func() time.Time { return now }
+	claim, won, err := store.Claim(context.Background(), testMessage("tenant-a"), "worker-a", time.Second)
+	if err != nil || !won {
+		t.Fatalf("claim=%+v won=%v err=%v", claim, won, err)
+	}
+	now = now.Add(500 * time.Millisecond)
+	renewed, err := store.Renew(context.Background(), claim, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(700 * time.Millisecond)
+	if _, won, err := store.Claim(context.Background(), testMessage("tenant-a"), "worker-b", time.Second); err != nil || won {
+		t.Fatalf("renewed claim reclaimed won=%v err=%v", won, err)
+	}
+	stale := claim
+	stale.ClaimToken += "-stale"
+	if _, err := store.Renew(context.Background(), stale, time.Second); !errors.Is(err, ErrClaimOwner) {
+		t.Fatalf("stale renew err=%v", err)
+	}
+	if err := store.Complete(context.Background(), renewed); err != nil {
+		t.Fatal(err)
+	}
+}

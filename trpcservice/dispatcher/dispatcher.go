@@ -12,6 +12,9 @@ import (
 // Handler processes one durable request.
 type Handler func(context.Context, gateway.RunRequest) error
 
+// ErrorHandler schedules or reports a failed durable request.
+type ErrorHandler func(context.Context, gateway.RunRequest, error)
+
 type sessionQueue struct {
 	requests []gateway.RunRequest
 	running  bool
@@ -22,6 +25,7 @@ type Dispatcher struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	handler Handler
+	onError ErrorHandler
 	mu      sync.Mutex
 	queues  map[gateway.SessionKey]*sessionQueue
 	wg      sync.WaitGroup
@@ -30,11 +34,16 @@ type Dispatcher struct {
 
 // New creates a Dispatcher.
 func New(parent context.Context, handler Handler) (*Dispatcher, error) {
+	return NewWithErrorHandler(parent, handler, nil)
+}
+
+// NewWithErrorHandler creates a Dispatcher with explicit retry/error handling.
+func NewWithErrorHandler(parent context.Context, handler Handler, onError ErrorHandler) (*Dispatcher, error) {
 	if parent == nil || handler == nil {
 		return nil, errors.New("dispatcher: context and handler are required")
 	}
 	ctx, cancel := context.WithCancel(parent)
-	return &Dispatcher{ctx: ctx, cancel: cancel, handler: handler, queues: make(map[gateway.SessionKey]*sessionQueue)}, nil
+	return &Dispatcher{ctx: ctx, cancel: cancel, handler: handler, onError: onError, queues: make(map[gateway.SessionKey]*sessionQueue)}, nil
 }
 
 // Submit enqueues without waiting for Agent execution.
@@ -72,7 +81,9 @@ func (dispatcher *Dispatcher) run(key gateway.SessionKey) {
 		request := queue.requests[0]
 		queue.requests = queue.requests[1:]
 		dispatcher.mu.Unlock()
-		_ = dispatcher.handler(dispatcher.ctx, request)
+		if err := dispatcher.handler(dispatcher.ctx, request); err != nil && dispatcher.onError != nil {
+			dispatcher.onError(dispatcher.ctx, request, err)
+		}
 	}
 }
 

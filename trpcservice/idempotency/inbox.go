@@ -21,6 +21,7 @@ const (
 	StatusProcessing Status = "processing"
 	StatusCompleted  Status = "completed"
 	StatusRetry      Status = "retry"
+	StatusCanceled   Status = "canceled"
 )
 
 // Claim is one Inbox ownership attempt.
@@ -36,8 +37,38 @@ type Claim struct {
 // Store claims duplicate deliveries and records terminal/retry state.
 type Store interface {
 	Claim(context.Context, gateway.InboundMessage, string, time.Duration) (Claim, bool, error)
+	Renew(context.Context, Claim, time.Duration) (Claim, error)
+	Cancel(context.Context, Claim) error
 	Complete(context.Context, Claim) error
 	Fail(context.Context, Claim, error, time.Time) error
+}
+
+// Cancel marks an explicitly canceled active claim terminal.
+func (store *MemoryStore) Cancel(_ context.Context, claim Claim) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	item := store.records[claim.InboxID]
+	if item == nil || item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing {
+		return ErrClaimOwner
+	}
+	item.claim.Status = StatusCanceled
+	return nil
+}
+
+// Renew extends an unexpired claim only for its exact owner and token.
+func (store *MemoryStore) Renew(_ context.Context, claim Claim, ttl time.Duration) (Claim, error) {
+	if ttl <= 0 {
+		return Claim{}, errors.New("idempotency: positive ttl is required")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	item := store.records[claim.InboxID]
+	now := store.now().UTC()
+	if item == nil || item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing || !now.Before(item.claim.LeaseUntil) {
+		return Claim{}, ErrClaimOwner
+	}
+	item.claim.LeaseUntil = now.Add(ttl)
+	return item.claim, nil
 }
 
 type record struct {
@@ -75,7 +106,7 @@ func (store *MemoryStore) Claim(_ context.Context, message gateway.InboundMessag
 	id := InboxID(message)
 	existing := store.records[id]
 	if existing != nil {
-		if existing.claim.Status == StatusCompleted {
+		if existing.claim.Status == StatusCompleted || existing.claim.Status == StatusCanceled {
 			return existing.claim, false, nil
 		}
 		if existing.claim.Status == StatusProcessing && now.Before(existing.claim.LeaseUntil) {
@@ -128,7 +159,7 @@ func (store *MemoryStore) Fail(_ context.Context, claim Claim, cause error, retr
 	item.claim.Status = StatusRetry
 	item.nextAttempt = retryAt.UTC()
 	if cause != nil {
-		item.lastError = cause.Error()
+		item.lastError = sanitizeError(cause.Error())
 	}
 	return nil
 }

@@ -125,12 +125,18 @@ func (store *SQLWriteStore) PublishSummary(ctx context.Context, key gateway.Sess
 		return errors.New("sessioncoord: summary cutoff exceeds session head")
 	}
 	var oldVersion, oldCutoff uint64
-	err = tx.QueryRowContext(ctx, `SELECT summary_version,cutoff_event_seq FROM session_summaries WHERE tenant_id=$1 AND app_id=$2 AND user_id=$3 AND session_id=$4 ORDER BY summary_version DESC LIMIT 1`, key.TenantID, key.AppID, key.UserID, key.SessionID).Scan(&oldVersion, &oldCutoff)
+	var oldContent string
+	err = tx.QueryRowContext(ctx, `SELECT summary_version,cutoff_event_seq,content FROM session_summaries WHERE tenant_id=$1 AND app_id=$2 AND user_id=$3 AND session_id=$4 ORDER BY summary_version DESC LIMIT 1`, key.TenantID, key.AppID, key.UserID, key.SessionID).Scan(&oldVersion, &oldCutoff, &oldContent)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if err == nil && (summary.Version <= oldVersion || summary.CutoffEventSeq <= oldCutoff) {
-		return errors.New("sessioncoord: stale summary")
+	if err == nil {
+		if summary.Version == oldVersion && summary.CutoffEventSeq == oldCutoff && summary.Content == oldContent {
+			return tx.Commit()
+		}
+		if summary.Version <= oldVersion || summary.CutoffEventSeq <= oldCutoff {
+			return errors.New("sessioncoord: stale summary")
+		}
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO session_summaries (tenant_id,app_id,user_id,session_id,summary_version,cutoff_event_seq,content,status,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8)`, key.TenantID, key.AppID, key.UserID, key.SessionID, summary.Version, summary.CutoffEventSeq, summary.Content, store.now().UTC())
 	if err != nil {

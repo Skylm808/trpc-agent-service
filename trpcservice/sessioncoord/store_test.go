@@ -79,6 +79,9 @@ func TestAtomicIdempotencySummaryAndMemory(t *testing.T) {
 	if err := store.PublishSummary(context.Background(), key, lease.Token, Summary{Version: 1, CutoffEventSeq: 1, Content: "summary"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.PublishSummary(context.Background(), key, lease.Token, Summary{Version: 1, CutoffEventSeq: 1, Content: "summary"}); err != nil {
+		t.Fatalf("idempotent summary: %v", err)
+	}
 	if err := store.PublishSummary(context.Background(), key, lease.Token, Summary{Version: 2, CutoffEventSeq: 1, Content: "stale"}); err == nil {
 		t.Fatal("stale cutoff accepted")
 	}

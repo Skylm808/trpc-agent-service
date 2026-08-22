@@ -33,9 +33,9 @@ CREATE TABLE IF NOT EXISTS session_heads (
 );
 CREATE TABLE IF NOT EXISTS message_events (
   tenant_id TEXT NOT NULL, app_id TEXT NOT NULL, user_id TEXT NOT NULL, session_id TEXT NOT NULL,
-  event_id TEXT NOT NULL, inbox_id TEXT NOT NULL, event_seq BIGINT NOT NULL, event_type TEXT NOT NULL, payload_json JSONB NOT NULL,
+  event_id TEXT NOT NULL, event_seq BIGINT NOT NULL, event_type TEXT NOT NULL, payload_json JSONB NOT NULL,
   state_delta_json JSONB, trace_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (tenant_id, app_id, user_id, session_id, event_seq), UNIQUE (tenant_id, event_id), UNIQUE (tenant_id, inbox_id),
+  PRIMARY KEY (tenant_id, app_id, user_id, session_id, event_seq), UNIQUE (tenant_id, event_id),
   FOREIGN KEY (tenant_id, app_id, user_id, session_id) REFERENCES session_heads(tenant_id, app_id, user_id, session_id)
 );
 CREATE TABLE IF NOT EXISTS session_summaries (
@@ -56,35 +56,19 @@ CREATE TABLE IF NOT EXISTS memory_entries (
   FOREIGN KEY (tenant_id, app_id) REFERENCES agent_apps(tenant_id, app_id)
 );
 CREATE TABLE IF NOT EXISTS inbox_messages (
-  tenant_id TEXT NOT NULL, binding_id TEXT NOT NULL, external_message_id TEXT NOT NULL, inbox_id TEXT NOT NULL, app_id TEXT NOT NULL,
-  user_id TEXT NOT NULL, session_id TEXT NOT NULL, config_version BIGINT NOT NULL, inbox_seq BIGINT NOT NULL,
-  status TEXT NOT NULL, attempts INT NOT NULL DEFAULT 0, claim_owner TEXT, claim_token TEXT,
-  lease_until TIMESTAMPTZ, next_attempt_at TIMESTAMPTZ, claimed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ,
-  trace_id TEXT, last_error TEXT,
+  tenant_id TEXT NOT NULL, binding_id TEXT NOT NULL, external_message_id TEXT NOT NULL, app_id TEXT NOT NULL,
+  user_id TEXT NOT NULL, session_id TEXT NOT NULL, status TEXT NOT NULL, attempts INT NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ, claimed_at TIMESTAMPTZ, trace_id TEXT, last_error TEXT,
   payload_json JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (tenant_id, binding_id, external_message_id),
-  UNIQUE (tenant_id, inbox_id),
-  UNIQUE (tenant_id, app_id, user_id, session_id, inbox_seq),
-  FOREIGN KEY (tenant_id, binding_id) REFERENCES channel_bindings(tenant_id, binding_id),
-  FOREIGN KEY (tenant_id, config_version) REFERENCES config_versions(tenant_id, version)
+  FOREIGN KEY (tenant_id, binding_id) REFERENCES channel_bindings(tenant_id, binding_id)
 );
 CREATE TABLE IF NOT EXISTS outbox_messages (
   tenant_id TEXT NOT NULL, outbox_id TEXT NOT NULL, dedupe_key TEXT NOT NULL, binding_id TEXT NOT NULL,
-  app_id TEXT NOT NULL, user_id TEXT NOT NULL, session_id TEXT NOT NULL, source_inbox_id TEXT NOT NULL,
-  source_event_id TEXT NOT NULL, fence BIGINT NOT NULL, status TEXT NOT NULL, attempts INT NOT NULL DEFAULT 0,
+  user_id TEXT NOT NULL, session_id TEXT NOT NULL, status TEXT NOT NULL, attempts INT NOT NULL DEFAULT 0,
   retry_at TIMESTAMPTZ, last_error TEXT, payload_json JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (tenant_id, outbox_id), UNIQUE (tenant_id, dedupe_key),
-  FOREIGN KEY (tenant_id, binding_id) REFERENCES channel_bindings(tenant_id, binding_id),
-  FOREIGN KEY (tenant_id, source_inbox_id) REFERENCES inbox_messages(tenant_id, inbox_id),
-  FOREIGN KEY (tenant_id, source_event_id) REFERENCES message_events(tenant_id, event_id)
-);
-CREATE TABLE IF NOT EXISTS derived_jobs (
-  tenant_id TEXT NOT NULL, app_id TEXT NOT NULL, user_id TEXT NOT NULL, session_id TEXT NOT NULL,
-  job_id TEXT NOT NULL, job_type TEXT NOT NULL, source_event_id TEXT NOT NULL, source_event_seq BIGINT NOT NULL,
-  status TEXT NOT NULL, attempts INT NOT NULL DEFAULT 0, claim_owner TEXT, claim_token TEXT, lease_until TIMESTAMPTZ,
-  next_attempt_at TIMESTAMPTZ, last_error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (tenant_id, job_id), UNIQUE (tenant_id, job_type, source_event_id),
-  FOREIGN KEY (tenant_id, source_event_id) REFERENCES message_events(tenant_id, event_id)
+  FOREIGN KEY (tenant_id, binding_id) REFERENCES channel_bindings(tenant_id, binding_id)
 );
 CREATE TABLE IF NOT EXISTS audit_logs (
   tenant_id TEXT NOT NULL, audit_id TEXT NOT NULL, channel TEXT, user_id TEXT, session_id TEXT,
@@ -104,5 +88,4 @@ CREATE TABLE IF NOT EXISTS migration_jobs (
 CREATE INDEX IF NOT EXISTS idx_inbox_ready ON inbox_messages (tenant_id, status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_identity_internal_user ON identity_mappings (tenant_id, internal_user_id);
 CREATE INDEX IF NOT EXISTS idx_outbox_ready ON outbox_messages (tenant_id, status, retry_at);
-CREATE INDEX IF NOT EXISTS idx_derived_jobs_ready ON derived_jobs (tenant_id, status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_audit_trace ON audit_logs (tenant_id, trace_id, created_at);

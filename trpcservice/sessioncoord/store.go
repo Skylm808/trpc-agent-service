@@ -190,8 +190,13 @@ func (store *MemoryWriteStore) PublishSummary(_ context.Context, key gateway.Ses
 	if summary.CutoffEventSeq > data.head.LastEventSeq {
 		return errors.New("sessioncoord: summary cutoff exceeds session head")
 	}
-	if data.summary != nil && (summary.CutoffEventSeq <= data.summary.CutoffEventSeq || summary.Version <= data.summary.Version) {
-		return errors.New("sessioncoord: stale summary")
+	if data.summary != nil {
+		if summary.Version == data.summary.Version && summary.CutoffEventSeq == data.summary.CutoffEventSeq && summary.Content == data.summary.Content {
+			return nil
+		}
+		if summary.CutoffEventSeq <= data.summary.CutoffEventSeq || summary.Version <= data.summary.Version {
+			return errors.New("sessioncoord: stale summary")
+		}
 	}
 	summary.UpdatedAt = store.now().UTC()
 	data.summary = &summary

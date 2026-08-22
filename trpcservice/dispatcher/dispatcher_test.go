@@ -2,12 +2,40 @@ package dispatcher
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 )
+
+func TestDispatcherReportsProcessorErrors(t *testing.T) {
+	want := errors.New("boom")
+	reported := make(chan error, 1)
+	dispatcher, err := NewWithErrorHandler(context.Background(), func(context.Context, gateway.RunRequest) error {
+		return want
+	}, func(_ context.Context, _ gateway.RunRequest, err error) {
+		reported <- err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.Submit(gateway.RunRequest{TenantID: "t", AppID: "a", UserID: "u", SessionID: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-reported:
+		if !errors.Is(got, want) {
+			t.Fatalf("reported error=%v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("processor error was swallowed")
+	}
+	if err := dispatcher.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestDispatcherOrdersSameSession(t *testing.T) {
 	var mu sync.Mutex
