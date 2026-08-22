@@ -1,0 +1,335 @@
+package runtime
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/memory"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/plugin"
+	"trpc.group/trpc-go/trpc-agent-go/runner"
+	"trpc.group/trpc-go/trpc-agent-go/session"
+)
+
+func runtimeSnapshot(t *testing.T, tenantID string, version int) config.RuntimeSnapshot {
+	t.Helper()
+	payload := fmt.Sprintf(`schema_version: 1
+tenants:
+- tenant_id: %s
+  name: Tenant
+  enabled: true
+  config_version: %d
+  audit: {enabled: true, retention_days: 30, store_content: false}
+  apps:
+  - app_id: assistant
+    name: Assistant
+    enabled: true
+    config: {instruction: Echo the user.}
+    model: {provider: mock, name: offline-mock}
+    tools: {allow: [echo, calculator], deny: []}
+    channels: [{binding_id: http, type: http, provider_account_id: local, enabled: true}]
+    storage:
+      session: {type: inmemory}
+      memory: {type: inmemory}
+      summary: {type: inmemory}
+      artifact: {type: inmemory}
+      knowledge: {type: inmemory}
+      audit: {type: inmemory}
+`, tenantID, version)
+	file, err := config.Load(strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := file.Snapshot(tenantID, "assistant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func TestBundleRunsPublicTRPCAgentChain(t *testing.T) {
+	bundle, err := NewBundle(runtimeSnapshot(t, "tenant-a", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bundle.Close()
+	result, err := bundle.Run(context.Background(), RunInput{RequestID: "inbox-1", UserID: "user/a", SessionID: "dm/http/a", Text: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var completion bool
+	for _, item := range result.Events {
+		if item.RequestID != "inbox-1" {
+			t.Fatalf("request ID=%q", item.RequestID)
+		}
+		completion = completion || item.IsRunnerCompletion()
+	}
+	if !completion {
+		t.Fatal("runner completion event missing")
+	}
+	saved, err := bundle.services.Session.GetSession(context.Background(), session.Key{AppName: bundle.AppName(), UserID: "user/a", SessionID: "dm/http/a"})
+	if err != nil || saved == nil {
+		t.Fatalf("saved session=%v err=%v", saved, err)
+	}
+	if got := bundle.ToolNames(); len(got) != 2 || got[0] != "echo" || got[1] != "calculator" {
+		t.Fatalf("tools=%v", got)
+	}
+}
+
+func TestBundleExecutesCalculatorThroughRunner(t *testing.T) {
+	bundle, err := NewBundle(runtimeSnapshot(t, "tenant-a", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bundle.Close()
+	result, err := bundle.Run(context.Background(), RunInput{RequestID: "tool-request", UserID: "user", SessionID: "tool-session", Text: "calculate 6*7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var toolResult, final bool
+	for _, item := range result.Events {
+		if item.Response == nil {
+			continue
+		}
+		toolResult = toolResult || item.Response.IsToolResultResponse()
+		for _, choice := range item.Choices {
+			final = final || strings.Contains(choice.Message.Content, "42")
+		}
+	}
+	if !toolResult || !final {
+		t.Fatalf("toolResult=%v final=%v events=%d", toolResult, final, len(result.Events))
+	}
+}
+
+func TestBundlesIsolateSameUserAndSessionAcrossTenants(t *testing.T) {
+	a, _ := NewBundle(runtimeSnapshot(t, "tenant-a", 1))
+	defer a.Close()
+	b, _ := NewBundle(runtimeSnapshot(t, "tenant-b", 1))
+	defer b.Close()
+	input := RunInput{RequestID: "request-a", UserID: "same-user", SessionID: "same-session", Text: "hello"}
+	if _, err := a.Run(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := b.services.Session.GetSession(context.Background(), session.Key{AppName: b.AppName(), UserID: input.UserID, SessionID: input.SessionID}); err != nil || found != nil {
+		t.Fatalf("tenant-b observed tenant-a session: %v %v", found, err)
+	}
+	if err := a.services.Memory.AddMemory(context.Background(), memory.UserKey{AppName: a.AppName(), UserID: input.UserID}, "tenant-a-memory", nil); err != nil {
+		t.Fatal(err)
+	}
+	memories, err := b.services.Memory.ReadMemories(context.Background(), memory.UserKey{AppName: b.AppName(), UserID: input.UserID}, 10)
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("tenant-b observed tenant-a memory: %v %v", memories, err)
+	}
+}
+
+func TestManagerKeepsOldBundleWhileNewVersionRuns(t *testing.T) {
+	manager, _ := NewManager(func(snapshot config.RuntimeSnapshot) (Runtime, error) { return NewBundle(snapshot) })
+	oldLease, err := manager.Acquire(runtimeSnapshot(t, "tenant-a", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newLease, err := manager.Acquire(runtimeSnapshot(t, "tenant-a", 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		lease   *Lease
+		request string
+	}{{oldLease, "old-request"}, {newLease, "new-request"}} {
+		if _, err := test.lease.Runtime.Run(context.Background(), RunInput{RequestID: test.request, UserID: "user", SessionID: test.request, Text: "hello"}); err != nil {
+			t.Fatalf("%s: %v", test.request, err)
+		}
+	}
+	oldLease.Release()
+	newLease.Release()
+	if err := manager.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type fakeRuntime struct{ closed atomic.Int32 }
+
+func (*fakeRuntime) Run(context.Context, RunInput) (RunResult, error) { return RunResult{}, nil }
+func (runtime *fakeRuntime) Close() error                             { runtime.closed.Add(1); return nil }
+
+func TestManagerConcurrentBuildAndVersionDrain(t *testing.T) {
+	var builds atomic.Int32
+	var mu sync.Mutex
+	var built []*fakeRuntime
+	manager, _ := NewManager(func(config.RuntimeSnapshot) (Runtime, error) {
+		builds.Add(1)
+		runtime := &fakeRuntime{}
+		mu.Lock()
+		built = append(built, runtime)
+		mu.Unlock()
+		return runtime, nil
+	})
+	v1 := runtimeSnapshot(t, "tenant-a", 1)
+	leases := make([]*Lease, 20)
+	var wg sync.WaitGroup
+	for i := range leases {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			lease, err := manager.Acquire(v1)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			leases[index] = lease
+		}(i)
+	}
+	wg.Wait()
+	if builds.Load() != 1 {
+		t.Fatalf("builds=%d", builds.Load())
+	}
+	v2lease, err := manager.Acquire(runtimeSnapshot(t, "tenant-a", 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built[0].closed.Load() != 0 {
+		t.Fatal("old runtime closed with active leases")
+	}
+	if _, err := manager.Acquire(v1); !errors.Is(err, ErrStaleSnapshot) {
+		t.Fatalf("stale Acquire() error=%v", err)
+	}
+	for _, lease := range leases {
+		lease.Release()
+		lease.Release()
+	}
+	if built[0].closed.Load() != 1 {
+		t.Fatalf("old closes=%d", built[0].closed.Load())
+	}
+	v2lease.Release()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if built[1].closed.Load() != 1 {
+		t.Fatalf("new closes=%d", built[1].closed.Load())
+	}
+}
+
+func TestManagerBuildsDifferentTenantsInParallel(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	manager, _ := NewManager(func(config.RuntimeSnapshot) (Runtime, error) {
+		started <- struct{}{}
+		<-release
+		return &fakeRuntime{}, nil
+	})
+	results := make(chan error, 2)
+	for _, snapshot := range []config.RuntimeSnapshot{runtimeSnapshot(t, "tenant-a", 1), runtimeSnapshot(t, "tenant-b", 1)} {
+		go func(snapshot config.RuntimeSnapshot) {
+			lease, err := manager.Acquire(snapshot)
+			if err == nil {
+				lease.Release()
+			}
+			results <- err
+		}(snapshot)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("tenant builds were serialized")
+		}
+	}
+	close(release)
+	for i := 0; i < 2; i++ {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := manager.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagerCloseWaitsForLeaseOrContext(t *testing.T) {
+	manager, _ := NewManager(func(config.RuntimeSnapshot) (Runtime, error) { return &fakeRuntime{}, nil })
+	lease, _ := manager.Acquire(runtimeSnapshot(t, "tenant-a", 1))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := manager.Close(ctx); err == nil {
+		t.Fatal("Close() error=nil with active lease")
+	}
+	lease.Release()
+	if err := manager.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type cancelRunner struct {
+	stream        chan *event.Event
+	closeOnCancel bool
+	canceled      atomic.Bool
+	once          sync.Once
+}
+
+func (run *cancelRunner) Run(context.Context, string, string, model.Message, ...trpcagent.RunOption) (<-chan *event.Event, error) {
+	return run.stream, nil
+}
+func (*cancelRunner) Close() error { return nil }
+func (run *cancelRunner) Cancel(string) bool {
+	run.canceled.Store(true)
+	if run.closeOnCancel {
+		run.once.Do(func() { close(run.stream) })
+	}
+	return true
+}
+func (*cancelRunner) RunStatus(string) (runner.RunStatus, bool) { return runner.RunStatus{}, false }
+
+func TestBundleCancelUsesManagedRunnerAndDrains(t *testing.T) {
+	controlled := &cancelRunner{stream: make(chan *event.Event), closeOnCancel: true}
+	bundle := &Bundle{appName: "tenant/a/app/b", runner: controlled, drainTimeout: time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := bundle.Run(ctx, RunInput{RequestID: "request", UserID: "user", SessionID: "session", Text: "hello"})
+	if err == nil || !controlled.canceled.Load() {
+		t.Fatalf("Run() error=%v canceled=%v", err, controlled.canceled.Load())
+	}
+}
+
+func TestBundleCancelHasBoundedDrain(t *testing.T) {
+	controlled := &cancelRunner{stream: make(chan *event.Event)}
+	bundle := &Bundle{appName: "tenant/a/app/b", runner: controlled, drainTimeout: 10 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := bundle.Run(ctx, RunInput{RequestID: "request", UserID: "user", SessionID: "session", Text: "hello"})
+	if !errors.Is(err, ErrDrainTimeout) {
+		t.Fatalf("Run() error=%v, want drain timeout", err)
+	}
+}
+
+func TestBundleRejectsEmptyUserText(t *testing.T) {
+	bundle, err := NewBundle(runtimeSnapshot(t, "tenant-a", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bundle.Close()
+	if _, err := bundle.Run(context.Background(), RunInput{RequestID: "request", UserID: "user", SessionID: "session"}); err == nil {
+		t.Fatal("empty text accepted")
+	}
+}
+
+type namedPlugin string
+
+func (value namedPlugin) Name() string        { return string(value) }
+func (namedPlugin) Register(*plugin.Registry) {}
+
+func TestNewBundleRejectsDuplicatePluginsWithoutPanic(t *testing.T) {
+	if _, err := NewBundle(runtimeSnapshot(t, "tenant-a", 1), namedPlugin("duplicate"), namedPlugin("duplicate")); err == nil {
+		t.Fatal("duplicate plugins accepted")
+	}
+}

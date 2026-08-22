@@ -62,10 +62,8 @@ tenants:
           summary:
             type: inmemory
           artifact:
-            type: local
-            endpoint: ./data/artifacts
+            type: inmemory
           knowledge:
             type: inmemory
           audit:
-            type: sqlite
-            endpoint: ./data/audit.db
+            type: inmemory

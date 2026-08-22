@@ -147,6 +147,16 @@ cd trpc-agent-service
 ./start.sh
 ```
 
+PR3 提供了无需模型密钥、数据库或网络的纵向链路示例，实际经过
+`LLMAgent -> Runner -> calculator Tool -> Session/Memory -> Event`：
+
+```bash
+go run ./examples/quickstart
+```
+
+控制面数据模型见 [`docs/data-model.md`](docs/data-model.md)，Runtime
+Bundle 的版本切换与生命周期约束见 [`docs/runtime.md`](docs/runtime.md)。
+
 停止服务：
 
 ```bash
