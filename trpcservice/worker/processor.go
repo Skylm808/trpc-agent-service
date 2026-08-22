@@ -395,7 +395,7 @@ func (projection *eventProjection) Observe(item *event.Event) {
 		base.CompletionTokens = item.Usage.CompletionTokens
 		base.TotalTokens = item.Usage.TotalTokens
 		projection.totalTokens = item.Usage.TotalTokens
-		if projection.onUsage != nil && projection.policyErr == nil {
+		if item.Usage.TotalTokens > 0 && projection.onUsage != nil && projection.policyErr == nil {
 			if err := projection.onUsage(int64(item.Usage.TotalTokens)); err != nil {
 				projection.policyErr = err
 				if projection.cancel != nil {

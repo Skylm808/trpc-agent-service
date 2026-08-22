@@ -50,7 +50,12 @@ func NewLocalComponent(parent context.Context, address string, file *config.File
 	}
 	redactor := servicelog.NewRedactor(nil, nil)
 	auditor := audit.NewMemoryStore(redactor)
-	policyEngine := &policy.Engine{Identity: policy.AuthenticatedIdentityAuthorizer{}, Budgets: policy.NewMemoryBudget(), Approvals: policy.NewMemoryApprovals()}
+	policyEngine := &policy.Engine{
+		Identity:           policy.AuthenticatedIdentityAuthorizer{},
+		Budgets:            policy.NewMemoryBudget(),
+		Approvals:          policy.NewMemoryApprovals(),
+		CostMicrosPerToken: 1, // deterministic local accounting for the mock model.
+	}
 	processor := &worker.Processor{WorkerID: "local-worker", Inbox: inbox, Coordinator: coordinator, Writes: writes, Runtimes: runtimes, Snapshots: gateway.FileSnapshotResolver{File: file}, Publisher: MultiPublisher{hub, registry}, Policy: policyEngine, Audit: auditor, Redactor: redactor, Telemetry: telemetry}
 	var dispatch *dispatcher.Dispatcher
 	dispatch, err = dispatcher.NewWithErrorHandler(parent, processor.Process, func(ctx context.Context, request gateway.RunRequest, _ error) {
