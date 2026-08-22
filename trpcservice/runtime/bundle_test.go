@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/policy"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
@@ -85,13 +87,55 @@ func TestBundleRunsPublicTRPCAgentChain(t *testing.T) {
 	}
 }
 
+type observingRunner struct {
+	release chan struct{}
+}
+
+func (runner *observingRunner) Run(context.Context, string, string, model.Message, ...trpcagent.RunOption) (<-chan *event.Event, error) {
+	stream := make(chan *event.Event)
+	go func() {
+		stream <- &event.Event{RequestID: "observe"}
+		<-runner.release
+		close(stream)
+	}()
+	return stream, nil
+}
+func (*observingRunner) Close() error { return nil }
+
+func TestBundleObserverReceivesEventBeforeRunCompletes(t *testing.T) {
+	release := make(chan struct{})
+	bundle := &Bundle{runner: &observingRunner{release: release}, drainTimeout: time.Second}
+	observed := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		_, err := bundle.Run(context.Background(), RunInput{RequestID: "observe", UserID: "u", SessionID: "s", Text: "hello", Observer: func(*event.Event) { observed <- struct{}{} }})
+		done <- err
+	}()
+	select {
+	case <-observed:
+	case <-time.After(time.Second):
+		t.Fatal("observer did not receive the live event")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Run completed before stream release: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBundleExecutesCalculatorThroughRunner(t *testing.T) {
 	bundle, err := NewBundle(runtimeSnapshot(t, "tenant-a", 1))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer bundle.Close()
-	result, err := bundle.Run(context.Background(), RunInput{RequestID: "tool-request", UserID: "user", SessionID: "tool-session", Text: "calculate 6*7"})
+	request := policy.Request{TenantID: "tenant-a", AppID: "assistant", UserID: "user", RequestID: "tool-request", Policy: tenant.ToolPolicy{Allow: []string{"calculator"}}}
+	ctx := policy.WithRequest(context.Background(), &policy.Engine{Identity: policy.AuthenticatedIdentityAuthorizer{}}, request)
+	result, err := bundle.Run(ctx, RunInput{RequestID: "tool-request", UserID: "user", SessionID: "tool-session", Text: "calculate 6*7"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +151,63 @@ func TestBundleExecutesCalculatorThroughRunner(t *testing.T) {
 	}
 	if !toolResult || !final {
 		t.Fatalf("toolResult=%v final=%v events=%d", toolResult, final, len(result.Events))
+	}
+}
+
+func TestBundleResumesDangerousToolAfterApproval(t *testing.T) {
+	bundle, err := NewBundle(runtimeSnapshot(t, "tenant-a", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bundle.Close()
+	approvals := policy.NewMemoryApprovals()
+	engine := &policy.Engine{Identity: policy.AuthenticatedIdentityAuthorizer{}, Approvals: approvals}
+	request := policy.Request{TenantID: "tenant-a", AppID: "assistant", UserID: "user", RequestID: "approval-request", Policy: tenant.ToolPolicy{Allow: []string{"calculator"}, RequireApproval: []string{"calculator"}}}
+	controls, err := engine.Evaluate(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := policy.WithRequest(context.Background(), engine, request)
+	input := RunInput{RequestID: request.RequestID, UserID: request.UserID, SessionID: "approval-session", Text: "calculate 6*7", ToolFilter: controls.Visibility, ToolExecutionFilter: controls.Execution, ToolPermissionPolicy: controls.Permission}
+	first, err := bundle.Run(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var name, callID string
+	var arguments []byte
+	for _, item := range first.Events {
+		if item == nil || item.Response == nil || !item.Response.IsToolCallResponse() {
+			continue
+		}
+		for _, choice := range item.Choices {
+			if len(choice.Message.ToolCalls) > 0 {
+				call := choice.Message.ToolCalls[0]
+				name, callID, arguments = call.Function.Name, call.ID, call.Function.Arguments
+			}
+		}
+	}
+	if name != "calculator" || callID == "" {
+		t.Fatalf("pending tool name=%q callID=%q", name, callID)
+	}
+	if _, err := bundle.ResumeTool(ctx, ToolResume{Input: input, ToolName: name, ToolCallID: callID, Arguments: arguments}); !errors.Is(err, policy.ErrApprovalRequired) {
+		t.Fatalf("unapproved ResumeTool error=%v", err)
+	}
+	approvals.Grant(request.TenantID, request.RequestID, name)
+	resumed, err := bundle.ResumeTool(ctx, ToolResume{Input: input, ToolName: name, ToolCallID: callID, Arguments: arguments})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final bool
+	for _, item := range resumed.Events {
+		if item == nil || item.Response == nil {
+			continue
+		}
+		for _, choice := range item.Choices {
+			final = final || strings.Contains(choice.Message.Content, "42")
+		}
+	}
+	if !final {
+		t.Fatal("approved tool result did not resume the model")
 	}
 }
 

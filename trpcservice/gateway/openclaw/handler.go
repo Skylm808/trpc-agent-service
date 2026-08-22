@@ -14,6 +14,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	servicemetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -33,6 +34,7 @@ type Handler struct {
 	Approver   Approver
 	ClaimOwner string
 	ClaimTTL   time.Duration
+	Telemetry  *servicemetrics.Telemetry
 }
 
 // Routes returns the OpenClaw-compatible HTTP surface.
@@ -184,6 +186,11 @@ func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe 
 	if err != nil {
 		return MessageResponse{}, nil, http.StatusUnauthorized, errors.New("invalid gateway credential")
 	}
+	callbackStarted := time.Now()
+	parentCtx := handler.Telemetry.ExtractHTTP(request.Context(), request.Header)
+	callbackCtx, callbackSpan := handler.Telemetry.Start(parentCtx, "gateway.callback", servicemetrics.SpanFields{TenantID: route.TenantID, AppID: route.AppID, Channel: string(route.ChannelType)})
+	defer callbackSpan.End()
+	request = request.WithContext(callbackCtx)
 	var input MessageRequest
 	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
 	decoder.DisallowUnknownFields()
@@ -231,8 +238,10 @@ func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe 
 	if !validCorrelationID(traceID) {
 		traceID = newID()
 	}
-	inbound := gateway.InboundMessage{TenantID: route.TenantID, AppID: route.AppID, BindingID: route.BindingID, ExternalMessageID: input.MessageID, ExternalUserID: externalUserID, UserID: userID, SessionID: sessionID, Text: text, TraceID: traceID, ConfigVersion: route.ConfigVersion, ReceivedAt: time.Now().UTC()}
-	claim, won, err := handler.Inbox.Claim(request.Context(), inbound, handler.ClaimOwner, handler.claimTTL())
+	inbound := gateway.InboundMessage{TenantID: route.TenantID, AppID: route.AppID, BindingID: route.BindingID, ExternalMessageID: input.MessageID, ExternalUserID: externalUserID, UserID: userID, SessionID: sessionID, Text: text, TraceID: traceID, ConfigVersion: route.ConfigVersion, ReceivedAt: time.Now().UTC(), TraceContext: handler.Telemetry.Inject(request.Context())}
+	claimCtx, claimSpan := handler.Telemetry.Start(request.Context(), "inbox.claim", servicemetrics.SpanFields{TenantID: route.TenantID, AppID: route.AppID, Channel: string(route.ChannelType), RequestID: input.MessageID, TraceID: traceID})
+	claim, won, err := handler.Inbox.Claim(claimCtx, inbound, handler.ClaimOwner, handler.claimTTL())
+	claimSpan.End()
 	if err != nil {
 		return MessageResponse{}, nil, http.StatusServiceUnavailable, err
 	}
@@ -257,6 +266,7 @@ func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe 
 		_ = handler.Inbox.Fail(context.Background(), claim, err, time.Now().UTC().Add(time.Second))
 		return MessageResponse{}, nil, http.StatusServiceUnavailable, err
 	}
+	handler.Telemetry.Request(request.Context(), servicemetrics.Labels{TenantID: route.TenantID, AppID: route.AppID, Channel: string(route.ChannelType), Operation: "callback", Status: "accepted"}, time.Since(callbackStarted), 0, 0)
 	return response, events, http.StatusAccepted, nil
 }
 

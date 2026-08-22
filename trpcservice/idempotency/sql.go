@@ -30,6 +30,14 @@ func (store *SQLStore) Cancel(ctx context.Context, claim Claim) error {
 	return exactClaimResult(result, err)
 }
 
+func (store *SQLStore) Reject(ctx context.Context, claim Claim) error {
+	if err := validateSQLClaim(store, claim); err != nil {
+		return err
+	}
+	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='rejected', completed_at=$6, lease_until=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing'`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, store.now().UTC())
+	return exactClaimResult(result, err)
+}
+
 // Renew extends an unexpired SQL claim with an owner/token CAS.
 func (store *SQLStore) Renew(ctx context.Context, claim Claim, ttl time.Duration) (Claim, error) {
 	if err := validateSQLClaim(store, claim); err != nil {

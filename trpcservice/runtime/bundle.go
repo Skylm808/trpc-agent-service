@@ -3,6 +3,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -10,14 +11,18 @@ import (
 
 	serviceagent "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
+	servicemetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // ErrDrainTimeout indicates that a canceled Runner did not close its stream.
@@ -27,16 +32,33 @@ var ErrDrainTimeout = errors.New("runtime: event stream drain timeout")
 type RunInput struct {
 	RequestID, UserID, SessionID string
 	Text                         string
+	Observer                     func(*event.Event)
+	ToolFilter                   tool.FilterFunc
+	ToolExecutionFilter          tool.FilterFunc
+	ToolPermissionPolicy         tool.PermissionPolicy
 }
 
 // RunResult contains the complete event sequence emitted before closure.
 type RunResult struct{ Events []*event.Event }
+
+type ToolResume struct {
+	Input                RunInput
+	ToolName, ToolCallID string
+	Arguments            []byte
+}
+
+// ToolResumer completes a caller-managed dangerous tool and resumes the same Runner session.
+type ToolResumer interface {
+	ResumeTool(context.Context, ToolResume) (RunResult, error)
+}
 
 // Bundle owns one immutable tenant/app/config-version runtime.
 type Bundle struct {
 	tenantID, appID, appName string
 	version                  tenant.ConfigVersion
 	toolNames                []string
+	toolPolicy               tenant.ToolPolicy
+	tools                    map[string]tool.CallableTool
 	runner                   runner.Runner
 	services                 *storage.Services
 	drainTimeout             time.Duration
@@ -61,6 +83,7 @@ func NewBundle(snapshot config.RuntimeSnapshot, plugins ...plugin.Plugin) (*Bund
 
 // NewBundleWithServices assembles a Bundle with tenant-routed services owned by it.
 func NewBundleWithServices(snapshot config.RuntimeSnapshot, services *storage.Services, plugins ...plugin.Plugin) (*Bundle, error) {
+	servicelog.InstallUpstreamRedaction()
 	pluginNames := make(map[string]struct{}, len(plugins))
 	for _, candidate := range plugins {
 		if candidate == nil || candidate.Name() == "" {
@@ -83,12 +106,19 @@ func NewBundleWithServices(snapshot config.RuntimeSnapshot, services *storage.Se
 	if err != nil {
 		return nil, err
 	}
+	tools = servicetool.WrapAll(tools)
+	callableTools := make(map[string]tool.CallableTool, len(tools))
+	for _, candidate := range tools {
+		if callable, ok := candidate.(tool.CallableTool); ok && candidate.Declaration() != nil {
+			callableTools[candidate.Declaration().Name] = callable
+		}
+	}
 	if services == nil || services.Session == nil || services.Memory == nil || services.Artifact == nil {
 		return nil, errors.New("runtime: session, memory, and artifact services are required")
 	}
 	agent := llmagent.New(app.Name, llmagent.WithModel(serviceagent.MockModel{}), llmagent.WithInstruction(app.Config.Instruction), llmagent.WithTools(tools))
 	run := runner.NewRunner(appName, agent, runner.WithSessionService(services.Session), runner.WithMemoryService(services.Memory), runner.WithArtifactService(services.Artifact), runner.WithPlugins(plugins...))
-	return &Bundle{tenantID: snapshot.TenantID(), appID: snapshot.AppID(), appName: appName, version: snapshot.Version(), toolNames: append([]string(nil), toolNames...), runner: run, services: services, drainTimeout: time.Second}, nil
+	return &Bundle{tenantID: snapshot.TenantID(), appID: snapshot.AppID(), appName: appName, version: snapshot.Version(), toolNames: append([]string(nil), toolNames...), toolPolicy: app.Tools, tools: callableTools, runner: run, services: services, drainTimeout: time.Second}, nil
 }
 
 // Scope returns the immutable bundle identity.
@@ -113,11 +143,54 @@ func (bundle *Bundle) Run(ctx context.Context, input RunInput) (RunResult, error
 	if input.RequestID == "" || input.UserID == "" || input.SessionID == "" || input.Text == "" {
 		return RunResult{}, errors.New("runtime: request, user, session IDs, and text are required")
 	}
-	stream, err := bundle.runner.Run(ctx, input.UserID, input.SessionID, model.NewUserMessage(input.Text), trpcagent.WithRequestID(input.RequestID), trpcagent.WithAppName(bundle.appName))
+	return bundle.runMessage(ctx, input, model.NewUserMessage(input.Text))
+}
+
+// ResumeTool executes an approved external tool through its guarded handler and resumes the model with a Tool result.
+func (bundle *Bundle) ResumeTool(ctx context.Context, resume ToolResume) (RunResult, error) {
+	callable := bundle.tools[resume.ToolName]
+	if callable == nil || resume.ToolCallID == "" {
+		return RunResult{}, errors.New("runtime: resumable tool and call ID are required")
+	}
+	result, err := callable.Call(ctx, resume.Arguments)
 	if err != nil {
 		return RunResult{}, err
 	}
-	var result RunResult
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return RunResult{}, err
+	}
+	return bundle.runMessage(ctx, resume.Input, model.NewToolMessage(resume.ToolCallID, resume.ToolName, string(payload)))
+}
+
+func (bundle *Bundle) runMessage(ctx context.Context, input RunInput, message model.Message) (result RunResult, runErr error) {
+	if telemetry, ok := servicemetrics.FromContext(ctx); ok {
+		started := time.Now()
+		modelCtx, modelSpan := telemetry.Telemetry.Start(ctx, "model.stream", telemetry.Fields)
+		ctx = modelCtx
+		defer func() {
+			modelSpan.End()
+			status := "success"
+			if runErr != nil {
+				status = "failed"
+			}
+			telemetry.Telemetry.Request(modelCtx, servicemetrics.Labels{TenantID: telemetry.Fields.TenantID, AppID: telemetry.Fields.AppID, Channel: telemetry.Fields.Channel, Operation: "model", Status: status}, time.Since(started), 0, 0)
+		}()
+	}
+	options := []trpcagent.RunOption{trpcagent.WithRequestID(input.RequestID), trpcagent.WithAppName(bundle.appName)}
+	if input.ToolFilter != nil {
+		options = append(options, trpcagent.WithToolFilter(input.ToolFilter))
+	}
+	if input.ToolExecutionFilter != nil {
+		options = append(options, trpcagent.WithToolExecutionFilter(input.ToolExecutionFilter))
+	}
+	if input.ToolPermissionPolicy != nil {
+		options = append(options, trpcagent.WithToolPermissionPolicy(input.ToolPermissionPolicy))
+	}
+	stream, err := bundle.runner.Run(ctx, input.UserID, input.SessionID, message, options...)
+	if err != nil {
+		return RunResult{}, err
+	}
 	var canceled bool
 	var drain <-chan time.Time
 	for {
@@ -131,6 +204,9 @@ func (bundle *Bundle) Run(ctx context.Context, input RunInput) (RunResult, error
 			}
 			if item != nil {
 				result.Events = append(result.Events, item)
+				if input.Observer != nil {
+					input.Observer(item)
+				}
 			}
 		case <-ctx.Done():
 			if !canceled {

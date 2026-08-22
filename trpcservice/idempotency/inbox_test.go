@@ -84,6 +84,24 @@ func TestRetryWaitsUntilScheduledTime(t *testing.T) {
 	}
 }
 
+func TestRejectedInboxIsTerminal(t *testing.T) {
+	store := NewMemoryStore()
+	message := testMessage("tenant-a")
+	message.BindingID = "binding"
+	message.ExternalMessageID = "denied"
+	claim, won, err := store.Claim(context.Background(), message, "worker", time.Minute)
+	if err != nil || !won {
+		t.Fatalf("claim=%+v won=%v err=%v", claim, won, err)
+	}
+	if err := store.Reject(context.Background(), claim); err != nil {
+		t.Fatal(err)
+	}
+	duplicate, won, err := store.Claim(context.Background(), message, "other", time.Minute)
+	if err != nil || won || duplicate.Status != StatusRejected {
+		t.Fatalf("duplicate=%+v won=%v err=%v", duplicate, won, err)
+	}
+}
+
 func TestRenewPreventsReclaimAndRejectsStaleOwner(t *testing.T) {
 	store := NewMemoryStore()
 	now := time.Unix(100, 0)

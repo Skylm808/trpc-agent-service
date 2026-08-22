@@ -22,6 +22,7 @@ const (
 	StatusCompleted  Status = "completed"
 	StatusRetry      Status = "retry"
 	StatusCanceled   Status = "canceled"
+	StatusRejected   Status = "rejected"
 )
 
 // Claim is one Inbox ownership attempt.
@@ -39,8 +40,20 @@ type Store interface {
 	Claim(context.Context, gateway.InboundMessage, string, time.Duration) (Claim, bool, error)
 	Renew(context.Context, Claim, time.Duration) (Claim, error)
 	Cancel(context.Context, Claim) error
+	Reject(context.Context, Claim) error
 	Complete(context.Context, Claim) error
 	Fail(context.Context, Claim, error, time.Time) error
+}
+
+func (store *MemoryStore) Reject(_ context.Context, claim Claim) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	item := store.records[claim.InboxID]
+	if item == nil || item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing {
+		return ErrClaimOwner
+	}
+	item.claim.Status = StatusRejected
+	return nil
 }
 
 // Cancel marks an explicitly canceled active claim terminal.
@@ -106,7 +119,7 @@ func (store *MemoryStore) Claim(_ context.Context, message gateway.InboundMessag
 	id := InboxID(message)
 	existing := store.records[id]
 	if existing != nil {
-		if existing.claim.Status == StatusCompleted || existing.claim.Status == StatusCanceled {
+		if existing.claim.Status == StatusCompleted || existing.claim.Status == StatusCanceled || existing.claim.Status == StatusRejected {
 			return existing.claim, false, nil
 		}
 		if existing.claim.Status == StatusProcessing && now.Before(existing.claim.LeaseUntil) {

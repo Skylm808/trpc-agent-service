@@ -16,10 +16,15 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/dispatcher"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	servicemetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/policy"
 	serviceruntime "github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/sessioncoord"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type captureSubmitter struct {
@@ -136,6 +141,18 @@ func TestStaticRoutesAllowTenantScopedBindingIDs(t *testing.T) {
 }
 
 func TestTwoTenantTwoWorkerEndToEndToolMemoryOutboxAndTrace(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	oldProvider := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	defer func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(oldProvider)
+	}()
+	telemetry, err := servicemetrics.New("openclaw-e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
 	file := testConfig(t)
 	writes := sessioncoord.NewMemoryWriteStore()
 	coordinator, _ := sessioncoord.NewCoordinator(writes)
@@ -144,8 +161,8 @@ func TestTwoTenantTwoWorkerEndToEndToolMemoryOutboxAndTrace(t *testing.T) {
 	defer manager.Close(context.Background())
 	hub := NewHub()
 	processors := []*worker.Processor{
-		{WorkerID: "worker-a", Inbox: inbox, Coordinator: coordinator, Writes: writes, Runtimes: manager, Snapshots: gateway.FileSnapshotResolver{File: file}, Publisher: hub},
-		{WorkerID: "worker-b", Inbox: inbox, Coordinator: coordinator, Writes: writes, Runtimes: manager, Snapshots: gateway.FileSnapshotResolver{File: file}, Publisher: hub},
+		{WorkerID: "worker-a", Inbox: inbox, Coordinator: coordinator, Writes: writes, Runtimes: manager, Snapshots: gateway.FileSnapshotResolver{File: file}, Publisher: hub, Policy: &policy.Engine{Identity: policy.AuthenticatedIdentityAuthorizer{}}, Telemetry: telemetry},
+		{WorkerID: "worker-b", Inbox: inbox, Coordinator: coordinator, Writes: writes, Runtimes: manager, Snapshots: gateway.FileSnapshotResolver{File: file}, Publisher: hub, Policy: &policy.Engine{Identity: policy.AuthenticatedIdentityAuthorizer{}}, Telemetry: telemetry},
 	}
 	var next atomic.Uint32
 	dispatch, _ := dispatcher.New(context.Background(), func(ctx context.Context, request gateway.RunRequest) error {
@@ -156,7 +173,7 @@ func TestTwoTenantTwoWorkerEndToEndToolMemoryOutboxAndTrace(t *testing.T) {
 		Route{TenantID: "tenant-a", AppID: "assistant", BindingID: "binding-a", ChannelType: tenant.ChannelTypeHTTP, ConfigVersion: 1, Credential: "secret-a"},
 		Route{TenantID: "tenant-b", AppID: "assistant", BindingID: "binding-b", ChannelType: tenant.ChannelTypeHTTP, ConfigVersion: 1, Credential: "secret-b"},
 	)
-	handler := (&Handler{Routes: routes, Inbox: inbox, Submitter: dispatch, Hub: hub, ClaimOwner: "gateway", ClaimTTL: time.Minute}).RoutesHandler()
+	handler := (&Handler{Routes: routes, Inbox: inbox, Submitter: dispatch, Hub: hub, ClaimOwner: "gateway", ClaimTTL: time.Minute, Telemetry: telemetry}).RoutesHandler()
 	body := `{"channel":"http","from":"same-user","message_id":"same-message","text":"calculate 6*7"}`
 	for _, input := range []struct{ binding, secret, trace string }{{"binding-a", "secret-a", "trace-a"}, {"binding-b", "secret-b", "trace-b"}} {
 		response := request(t, handler, "/v1/gateway/messages", input.binding, input.secret, input.trace, body)
@@ -190,13 +207,32 @@ func TestTwoTenantTwoWorkerEndToEndToolMemoryOutboxAndTrace(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
 	stream := response.Body.String()
-	for _, required := range []string{"event: run.started", "event: tool", "event: message.delta", "event: run.completed", "trace-stream", "42"} {
+	for _, required := range []string{"event: run.started", "event: run.progress", "running_tool", "event: message.completed", "event: run.completed", "trace-stream", "42"} {
 		if !strings.Contains(stream, required) {
 			t.Fatalf("stream missing %q:\n%s", required, stream)
 		}
 	}
 	key := gateway.SessionKey{TenantID: "tenant-a", AppID: "assistant", UserID: "http/binding-a/same-user", SessionID: "dm/binding-a/same-user"}
 	waitFor(t, func() bool { head, _, _, _ := writes.Snapshot(key); return head.LastEventSeq == 2 })
+	time.Sleep(50 * time.Millisecond)
+	byTrace := make(map[string]map[string]bool)
+	for _, span := range exporter.GetSpans() {
+		traceID := span.SpanContext.TraceID().String()
+		if byTrace[traceID] == nil {
+			byTrace[traceID] = make(map[string]bool)
+		}
+		byTrace[traceID][span.Name] = true
+	}
+	for _, names := range byTrace {
+		complete := true
+		for _, required := range []string{"gateway.callback", "inbox.claim", "worker.run", "session.lease", "runner.execute", "model.stream", "tool.call", "session.write", "memory.summary.write", "outbox.write"} {
+			complete = complete && names[required]
+		}
+		if complete {
+			return
+		}
+	}
+	t.Fatalf("no trace covered the full callback-to-outbox chain: %+v", byTrace)
 }
 
 func testConfig(t *testing.T) *config.File {
