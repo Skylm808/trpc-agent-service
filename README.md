@@ -175,6 +175,12 @@ Bundle 的版本切换与生命周期约束见 [`docs/runtime.md`](docs/runtime.
 Inbox/fencing/Outbox 与 OpenClaw HTTP 链路见
 [`docs/message-runtime.md`](docs/message-runtime.md)。
 
+Docker 可用时，可真实验证 PostgreSQL migration 的首次 up、重复 up、down 和再次 up：
+
+```bash
+./scripts/postgres_migrations_test.sh
+```
+
 停止服务：
 
 ```bash

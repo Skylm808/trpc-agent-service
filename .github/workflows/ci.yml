@@ -18,3 +18,4 @@ jobs:
           cache: true
       - run: go mod download
       - run: ./check.sh
+      - run: ./scripts/postgres_migrations_test.sh

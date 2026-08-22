@@ -42,6 +42,6 @@ The minimal Admin HTTP surface is mounted by `admin.Handler`:
 
 It deliberately does not implement authentication. A deployment must put the
 handler behind an authenticated tenant-scoping middleware before exposing it.
-The current migration contract tests verify required schema clauses and
-idempotent execution calls; executing the DDL against ephemeral PostgreSQL is
-reserved for the deployment integration suite.
+The unit contract tests verify required schema clauses. CI also runs
+`scripts/postgres_migrations_test.sh` against ephemeral PostgreSQL 16 and
+verifies first up, repeated up, down, an empty public schema, and up again.

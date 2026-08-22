@@ -90,7 +90,7 @@ func (store *SQLStore) Claim(ctx context.Context, message gateway.InboundMessage
 			return Claim{}, false, err
 		}
 		existing := Claim{InboxID: InboxID(stored), Owner: existingOwner.String, ClaimToken: existingToken.String, Attempt: attempt, InboxSeq: inboxSeq, Status: status, LeaseUntil: leaseUntil.Time, Message: stored}
-		if status == StatusCompleted || status == StatusCanceled || (status == StatusProcessing && leaseUntil.Valid && now.Before(leaseUntil.Time)) || (status == StatusRetry && nextAttempt.Valid && now.Before(nextAttempt.Time)) {
+		if status == StatusCompleted || status == StatusCanceled || status == StatusRejected || (status == StatusProcessing && leaseUntil.Valid && now.Before(leaseUntil.Time)) || (status == StatusRetry && nextAttempt.Valid && now.Before(nextAttempt.Time)) {
 			if err := tx.Commit(); err != nil {
 				return Claim{}, false, err
 			}
