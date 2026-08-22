@@ -62,8 +62,8 @@ func (file *File) Validate() error {
 	}
 
 	tenantIDs := make(map[string]struct{}, len(file.Tenants))
-	bindingIDs := make(map[string]struct{})
 	for tenantIndex := range file.Tenants {
+		bindingIDs := make(map[string]struct{})
 		current := &file.Tenants[tenantIndex]
 		path := fmt.Sprintf("tenants[%d]", tenantIndex)
 		if err := validateID(path+".tenant_id", current.ID); err != nil {

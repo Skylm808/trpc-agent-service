@@ -213,3 +213,17 @@ func TestExampleConfigurationLoads(t *testing.T) {
 		t.Fatalf("example tenant ID = %q", file.Tenants[0].ID)
 	}
 }
+
+func TestValidateAllowsSameBindingIDAcrossTenants(t *testing.T) {
+	file, err := Load(strings.NewReader(validYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := file.Tenants[0].Clone()
+	second.ID = "tenant-b"
+	second.Name = "Tenant B"
+	file.Tenants = append(file.Tenants, second)
+	if err := file.Validate(); err != nil {
+		t.Fatalf("Validate() cross-tenant binding error = %v", err)
+	}
+}
