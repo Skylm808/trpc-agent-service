@@ -102,9 +102,11 @@ type ChannelBinding struct {
 	ID                string      `json:"binding_id" yaml:"binding_id"`
 	Type              ChannelType `json:"type" yaml:"type"`
 	ProviderAccountID string      `json:"provider_account_id" yaml:"provider_account_id"`
+	ProviderAppID     string      `json:"provider_app_id,omitempty" yaml:"provider_app_id,omitempty"`
 	WebhookURL        string      `json:"webhook_url,omitempty" yaml:"webhook_url,omitempty"`
 	Token             SecretRef   `json:"token,omitempty" yaml:"token,omitempty"`
 	Secret            SecretRef   `json:"secret,omitempty" yaml:"secret,omitempty"`
+	EncryptionKey     SecretRef   `json:"encryption_key,omitempty" yaml:"encryption_key,omitempty"`
 	Enabled           bool        `json:"enabled" yaml:"enabled"`
 }
 

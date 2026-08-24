@@ -5,9 +5,12 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
 const signalHelperEnv = "TRPC_SERVICE_SIGNAL_TEST_HELPER"
@@ -35,6 +38,22 @@ func TestRunNonBlockingFlags(t *testing.T) {
 func TestGatewayTokenEnv(t *testing.T) {
 	if got := gatewayTokenEnv("demo-http.v2"); got != "TRPC_AGENT_GATEWAY_TOKEN_DEMO_HTTP_V2" {
 		t.Fatalf("gatewayTokenEnv=%q", got)
+	}
+}
+
+func TestResolveLocalSecretFromEnvAndFile(t *testing.T) {
+	t.Setenv("TEST_WECOM_SECRET", "env-value")
+	value, err := resolveLocalSecret(tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "TEST_WECOM_SECRET"})
+	if err != nil || value != "env-value" {
+		t.Fatalf("env value=%q err=%v", value, err)
+	}
+	path := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(path, []byte("file-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	value, err = resolveLocalSecret(tenant.SecretRef{Provider: tenant.SecretProviderFile, Key: path})
+	if err != nil || value != "file-value" {
+		t.Fatalf("file value=%q err=%v", value, err)
 	}
 }
 

@@ -173,7 +173,14 @@ Coordinator 和持久化队列。
 控制面数据模型见 [`docs/data-model.md`](docs/data-model.md)，Runtime
 Bundle 的版本切换与生命周期约束见 [`docs/runtime.md`](docs/runtime.md)，多节点
 Inbox/fencing/Outbox 与 OpenClaw HTTP 链路见
-[`docs/message-runtime.md`](docs/message-runtime.md)。
+[`docs/message-runtime.md`](docs/message-runtime.md)，企业微信回调验签、消息规范化和
+主动回复见 [`docs/wecom.md`](docs/wecom.md)。
+
+PR7 的企业微信协议测试不需要真实账号：
+
+```bash
+go test ./trpcservice/channels/wecom
+```
 
 Docker 可用时，可真实验证 PostgreSQL migration 的首次 up、重复 up、down 和再次 up：
 

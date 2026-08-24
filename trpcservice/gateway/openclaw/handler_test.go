@@ -185,7 +185,7 @@ func TestTwoTenantTwoWorkerEndToEndToolMemoryOutboxAndTrace(t *testing.T) {
 		inboxID := expected.tenantID + "/" + expected.binding + "/same-message"
 		waitFor(t, func() bool {
 			out, ok := writes.Outbox(expected.tenantID, "reply:"+inboxID)
-			return ok && strings.Contains(out.Text, "42") && out.TraceID == expected.trace
+			return ok && strings.Contains(out.Text, "42") && out.TraceID == expected.trace && out.ExternalUserID == "same-user"
 		})
 		key := gateway.SessionKey{TenantID: expected.tenantID, AppID: "assistant", UserID: "http/" + expected.binding + "/same-user", SessionID: "dm/" + expected.binding + "/same-user"}
 		head, events, summary, memories := writes.Snapshot(key)

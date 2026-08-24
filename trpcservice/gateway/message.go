@@ -2,6 +2,7 @@
 package gateway
 
 import (
+	"context"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -12,6 +13,7 @@ type InboundMessage struct {
 	TenantID, AppID, BindingID string
 	ExternalMessageID          string
 	ExternalUserID             string
+	ConversationID             string
 	UserID, SessionID          string
 	Text                       string
 	TraceID                    string
@@ -25,6 +27,8 @@ type RunRequest struct {
 	InboxID                    string
 	TenantID, AppID, BindingID string
 	ExternalMessageID          string
+	ExternalUserID             string
+	ConversationID             string
 	UserID, SessionID, Text    string
 	TraceID                    string
 	ConfigVersion              tenant.ConfigVersion
@@ -40,9 +44,25 @@ type OutboundMessage struct {
 	TenantID, AppID, BindingID   string
 	OutboxID, DedupeKey          string
 	UserID, SessionID            string
+	ExternalUserID               string
+	ConversationID               string
 	Text, TraceID                string
 	SourceInboxID, SourceEventID string
 	CreatedAt                    time.Time
+}
+
+// AcceptedMessage is the transport-neutral durable ingress acknowledgement.
+type AcceptedMessage struct {
+	RequestID string
+	SessionID string
+	TraceID   string
+	Duplicate bool
+}
+
+// InboundAcceptor persists an already authenticated and tenant-scoped message.
+// Channel adapters must verify their provider callback before calling it.
+type InboundAcceptor interface {
+	AcceptInbound(context.Context, InboundMessage) (AcceptedMessage, error)
 }
 
 // SessionKey is the complete tenant-scoped session identity.

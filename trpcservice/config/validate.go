@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -236,10 +237,19 @@ func validateChannel(path string, binding tenant.ChannelBinding) error {
 			return err
 		}
 	case tenant.ChannelTypeWeCom:
+		if strings.TrimSpace(binding.ProviderAppID) == "" {
+			return fmt.Errorf("config: %s.provider_app_id is required", path)
+		}
+		if agentID, err := strconv.ParseInt(binding.ProviderAppID, 10, 64); err != nil || agentID <= 0 {
+			return fmt.Errorf("config: %s.provider_app_id must be a positive integer", path)
+		}
 		if err := validateSecretRef(path+".token", binding.Token, true); err != nil {
 			return err
 		}
 		if err := validateSecretRef(path+".secret", binding.Secret, true); err != nil {
+			return err
+		}
+		if err := validateSecretRef(path+".encryption_key", binding.EncryptionKey, true); err != nil {
 			return err
 		}
 	case tenant.ChannelTypeTelegram:

@@ -38,13 +38,17 @@ tenants:
           - binding_id: demo-wecom
             type: wecom
             provider_account_id: replace-with-wecom-corp-id
+            provider_app_id: "1000002"
             webhook_url: https://example.invalid/channels/wecom/demo-wecom
             token:
               provider: env
-              key: WECOM_TOKEN
+              key: WECOM_CALLBACK_TOKEN
             secret:
               provider: env
-              key: WECOM_AES_KEY
+              key: WECOM_APP_SECRET
+            encryption_key:
+              provider: env
+              key: WECOM_ENCODING_AES_KEY
             enabled: false
           - binding_id: demo-telegram
             type: telegram

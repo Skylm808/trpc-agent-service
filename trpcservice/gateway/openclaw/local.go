@@ -3,6 +3,7 @@ package openclaw
 import (
 	"context"
 	"errors"
+	"net/http"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
@@ -26,8 +27,11 @@ type LocalComponent struct {
 	runtimes   *serviceruntime.Manager
 }
 
+// HandlerDecorator mounts a provider adapter around the shared local Gateway.
+type HandlerDecorator func(*Handler, http.Handler) (http.Handler, error)
+
 // NewLocalComponent wires the complete offline HTTP -> Runner -> Outbox chain.
-func NewLocalComponent(parent context.Context, address string, file *config.File, routes Routes) (*LocalComponent, error) {
+func NewLocalComponent(parent context.Context, address string, file *config.File, routes Routes, decorators ...HandlerDecorator) (*LocalComponent, error) {
 	if parent == nil || address == "" || file == nil || routes == nil {
 		return nil, errors.New("openclaw: context, address, config, and routes are required")
 	}
@@ -65,7 +69,19 @@ func NewLocalComponent(parent context.Context, address string, file *config.File
 		_ = runtimes.Close(context.Background())
 		return nil, err
 	}
-	handler := (&Handler{Routes: routes, Inbox: inbox, Submitter: dispatch, Hub: hub, Status: registry, Canceler: processor, Approver: policyEngine, ClaimOwner: "local-gateway", Telemetry: telemetry}).RoutesHandler()
+	core := &Handler{Routes: routes, Inbox: inbox, Submitter: dispatch, Hub: hub, Status: registry, Canceler: processor, Approver: policyEngine, ClaimOwner: "local-gateway", Telemetry: telemetry}
+	var handler http.Handler = core.RoutesHandler()
+	for _, decorate := range decorators {
+		if decorate == nil {
+			continue
+		}
+		handler, err = decorate(core, handler)
+		if err != nil {
+			_ = dispatch.Close(context.Background())
+			_ = runtimes.Close(context.Background())
+			return nil, err
+		}
+	}
 	return &LocalComponent{server: &Server{Address: address, Handler: handler}, dispatcher: dispatch, runtimes: runtimes}, nil
 }
 
@@ -77,7 +93,7 @@ func retryLocal(ctx context.Context, inbox *idempotency.MemoryStore, dispatch *d
 		return
 	case <-timer.C:
 	}
-	message := gateway.InboundMessage{TenantID: request.TenantID, AppID: request.AppID, BindingID: request.BindingID, ExternalMessageID: request.ExternalMessageID, UserID: request.UserID, SessionID: request.SessionID, Text: request.Text, TraceID: request.TraceID, ConfigVersion: request.ConfigVersion}
+	message := gateway.InboundMessage{TenantID: request.TenantID, AppID: request.AppID, BindingID: request.BindingID, ExternalMessageID: request.ExternalMessageID, ExternalUserID: request.ExternalUserID, ConversationID: request.ConversationID, UserID: request.UserID, SessionID: request.SessionID, Text: request.Text, TraceID: request.TraceID, ConfigVersion: request.ConfigVersion}
 	claim, won, err := inbox.Claim(ctx, message, request.ClaimOwner, 30*time.Second)
 	if err != nil || !won {
 		return

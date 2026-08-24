@@ -37,6 +37,51 @@ type Handler struct {
 	Telemetry  *servicemetrics.Telemetry
 }
 
+var _ gateway.InboundAcceptor = (*Handler)(nil)
+
+// AcceptInbound persists and schedules an already provider-authenticated
+// message. Channel adapters own signature verification and tenant binding;
+// this method owns the shared Inbox/queue durability boundary.
+func (handler *Handler) AcceptInbound(ctx context.Context, inbound gateway.InboundMessage) (gateway.AcceptedMessage, error) {
+	if handler == nil || handler.Inbox == nil || handler.Submitter == nil || handler.ClaimOwner == "" {
+		return gateway.AcceptedMessage{}, errors.New("gateway is not configured")
+	}
+	if inbound.TenantID == "" || inbound.AppID == "" || inbound.BindingID == "" || inbound.ExternalMessageID == "" || inbound.ExternalUserID == "" || inbound.UserID == "" || inbound.SessionID == "" || strings.TrimSpace(inbound.Text) == "" || inbound.ConfigVersion == 0 {
+		return gateway.AcceptedMessage{}, errors.New("complete verified inbound message is required")
+	}
+	if !validCorrelationID(inbound.TraceID) {
+		inbound.TraceID = newID()
+	}
+	if inbound.ReceivedAt.IsZero() {
+		inbound.ReceivedAt = time.Now().UTC()
+	}
+	if inbound.TraceContext == nil {
+		inbound.TraceContext = handler.Telemetry.Inject(ctx)
+	}
+	started := time.Now()
+	claimCtx, claimSpan := handler.Telemetry.Start(ctx, "inbox.claim", servicemetrics.SpanFields{TenantID: inbound.TenantID, AppID: inbound.AppID, Channel: inbound.BindingID, RequestID: inbound.ExternalMessageID, TraceID: inbound.TraceID})
+	claim, won, err := handler.Inbox.Claim(claimCtx, inbound, handler.ClaimOwner, handler.claimTTL())
+	claimSpan.End()
+	if err != nil {
+		return gateway.AcceptedMessage{}, err
+	}
+	accepted := gateway.AcceptedMessage{RequestID: claim.InboxID, SessionID: inbound.SessionID, TraceID: inbound.TraceID, Duplicate: !won}
+	if !won {
+		accepted.TraceID = claim.Message.TraceID
+		return accepted, nil
+	}
+	if handler.Status != nil {
+		handler.Status.Publish(gateway.RunEvent{Type: "run.accepted", RequestID: claim.InboxID, SessionID: inbound.SessionID, TraceID: inbound.TraceID})
+	}
+	run := gateway.RunRequest{InboxID: claim.InboxID, InboxSeq: claim.InboxSeq, TenantID: inbound.TenantID, AppID: inbound.AppID, BindingID: inbound.BindingID, ExternalMessageID: inbound.ExternalMessageID, ExternalUserID: inbound.ExternalUserID, ConversationID: inbound.ConversationID, UserID: inbound.UserID, SessionID: inbound.SessionID, Text: inbound.Text, TraceID: inbound.TraceID, TraceContext: inbound.TraceContext, ConfigVersion: inbound.ConfigVersion, ClaimOwner: claim.Owner, ClaimToken: claim.ClaimToken, ClaimAttempt: claim.Attempt, ClaimLeaseUntil: claim.LeaseUntil}
+	if err := handler.Submitter.Submit(run); err != nil {
+		_ = handler.Inbox.Fail(context.Background(), claim, err, time.Now().UTC().Add(time.Second))
+		return gateway.AcceptedMessage{}, err
+	}
+	handler.Telemetry.Request(ctx, servicemetrics.Labels{TenantID: inbound.TenantID, AppID: inbound.AppID, Channel: inbound.BindingID, Operation: "callback", Status: "accepted"}, time.Since(started), 0, 0)
+	return accepted, nil
+}
+
 // Routes returns the OpenClaw-compatible HTTP surface.
 func (handler *Handler) RoutesHandler() http.Handler {
 	mux := http.NewServeMux()
@@ -238,7 +283,7 @@ func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe 
 	if !validCorrelationID(traceID) {
 		traceID = newID()
 	}
-	inbound := gateway.InboundMessage{TenantID: route.TenantID, AppID: route.AppID, BindingID: route.BindingID, ExternalMessageID: input.MessageID, ExternalUserID: externalUserID, UserID: userID, SessionID: sessionID, Text: text, TraceID: traceID, ConfigVersion: route.ConfigVersion, ReceivedAt: time.Now().UTC(), TraceContext: handler.Telemetry.Inject(request.Context())}
+	inbound := gateway.InboundMessage{TenantID: route.TenantID, AppID: route.AppID, BindingID: route.BindingID, ExternalMessageID: input.MessageID, ExternalUserID: externalUserID, ConversationID: input.ConversationID, UserID: userID, SessionID: sessionID, Text: text, TraceID: traceID, ConfigVersion: route.ConfigVersion, ReceivedAt: time.Now().UTC(), TraceContext: handler.Telemetry.Inject(request.Context())}
 	claimCtx, claimSpan := handler.Telemetry.Start(request.Context(), "inbox.claim", servicemetrics.SpanFields{TenantID: route.TenantID, AppID: route.AppID, Channel: string(route.ChannelType), RequestID: input.MessageID, TraceID: traceID})
 	claim, won, err := handler.Inbox.Claim(claimCtx, inbound, handler.ClaimOwner, handler.claimTTL())
 	claimSpan.End()
@@ -258,7 +303,7 @@ func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe 
 	if subscribe && handler.Hub != nil {
 		events, unsubscribe = handler.Hub.Subscribe(claim.InboxID)
 	}
-	run := gateway.RunRequest{InboxID: claim.InboxID, InboxSeq: claim.InboxSeq, TenantID: route.TenantID, AppID: route.AppID, BindingID: route.BindingID, ExternalMessageID: input.MessageID, UserID: userID, SessionID: sessionID, Text: text, TraceID: traceID, TraceContext: inbound.TraceContext, ConfigVersion: route.ConfigVersion, ClaimOwner: claim.Owner, ClaimToken: claim.ClaimToken, ClaimAttempt: claim.Attempt, ClaimLeaseUntil: claim.LeaseUntil}
+	run := gateway.RunRequest{InboxID: claim.InboxID, InboxSeq: claim.InboxSeq, TenantID: route.TenantID, AppID: route.AppID, BindingID: route.BindingID, ExternalMessageID: input.MessageID, ExternalUserID: externalUserID, ConversationID: input.ConversationID, UserID: userID, SessionID: sessionID, Text: text, TraceID: traceID, TraceContext: inbound.TraceContext, ConfigVersion: route.ConfigVersion, ClaimOwner: claim.Owner, ClaimToken: claim.ClaimToken, ClaimAttempt: claim.Attempt, ClaimLeaseUntil: claim.LeaseUntil}
 	if err := handler.Submitter.Submit(run); err != nil {
 		if unsubscribe != nil {
 			unsubscribe()

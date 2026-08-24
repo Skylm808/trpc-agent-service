@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
 const validYAML = `schema_version: 1
@@ -211,6 +213,29 @@ func TestExampleConfigurationLoads(t *testing.T) {
 	}
 	if file.Tenants[0].ID != "demo" {
 		t.Fatalf("example tenant ID = %q", file.Tenants[0].ID)
+	}
+}
+
+func TestValidateWeComRequiresAppAndEncryptionReferences(t *testing.T) {
+	file, err := Load(strings.NewReader(validYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := &file.Tenants[0].Apps[0].Channels[0]
+	binding.Type = tenant.ChannelTypeWeCom
+	binding.ProviderAccountID = "ww-corp"
+	binding.Token = tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "WECOM_TOKEN"}
+	binding.Secret = tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "WECOM_APP_SECRET"}
+	if err := file.Validate(); err == nil || !strings.Contains(err.Error(), "provider_app_id") {
+		t.Fatalf("missing provider_app_id error=%v", err)
+	}
+	binding.ProviderAppID = "1000002"
+	if err := file.Validate(); err == nil || !strings.Contains(err.Error(), "encryption_key") {
+		t.Fatalf("missing encryption_key error=%v", err)
+	}
+	binding.EncryptionKey = tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "WECOM_ENCODING_AES_KEY"}
+	if err := file.Validate(); err != nil {
+		t.Fatalf("valid WeCom binding error=%v", err)
 	}
 }
 
