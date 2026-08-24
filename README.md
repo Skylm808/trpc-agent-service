@@ -170,7 +170,9 @@ curl -H 'Authorization: Bearer local-secret' \
 生产环境不能使用这个本地组合器；需要注入 PostgreSQL Inbox/WriteStore、Redis
 Coordinator 和持久化队列。
 
-控制面数据模型见 [`docs/data-model.md`](docs/data-model.md)，Runtime
+总体设计从 [`docs/architecture.md`](docs/architecture.md) 开始，生产风险与缓解措施见
+[`docs/risks.md`](docs/risks.md)。控制面数据模型见
+[`docs/data-model.md`](docs/data-model.md)，Runtime
 Bundle 的版本切换与生命周期约束见 [`docs/runtime.md`](docs/runtime.md)，多节点
 Inbox/fencing/Outbox 与 OpenClaw HTTP 链路见
 [`docs/message-runtime.md`](docs/message-runtime.md)，企业微信回调验签、消息规范化和

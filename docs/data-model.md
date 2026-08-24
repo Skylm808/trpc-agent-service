@@ -2,7 +2,8 @@
 
 PostgreSQL is the production control-plane system of record. Every primary key,
 unique key, foreign-key path, and operational index starts with `tenant_id`.
-The in-memory repository exists only for unit tests and the offline quickstart.
+Process-local test doubles are not storage backends and must not be selected by
+a production composition.
 
 `tenants.current_config_version` is the optimistic publication head.
 `config_versions` is immutable: publishing uses a row lock and compare-and-swap;

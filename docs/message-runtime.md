@@ -23,7 +23,7 @@ OpenClaw/IM callback
   -> Inbox completed
 ```
 
-进程内 `MemoryStore`、`Coordinator` 和 `MemoryWriteStore` 是离线示例与确定性测试实现。
+进程内 `MemoryStore`、`Coordinator` 和 `MemoryWriteStore` 只是确定性测试替身，不是部署选项。
 生产部署必须使用 `SQLStore` 的 PostgreSQL claim、`RedisCoordinator`，以及
 `SQLWriteStore`（或等价的 `WriteStore + FenceValidator` 共享事务后端）。`FencedSessionService` 的
 “校验后调用 delegate”只适用于同一原子后端；生产 Session Adapter 必须在同一数据库
