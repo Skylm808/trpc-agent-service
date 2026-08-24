@@ -82,3 +82,19 @@ func TestCanonicalIdentifiersRejectInvalidInput(t *testing.T) {
 		})
 	}
 }
+
+func TestParseCanonicalAppName(t *testing.T) {
+	name, err := CanonicalAppName("tenant/a", "assistant b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenantID, appID, err := ParseCanonicalAppName(name)
+	if err != nil || tenantID != "tenant/a" || appID != "assistant b" {
+		t.Fatalf("ParseCanonicalAppName(%q) = %q, %q, %v", name, tenantID, appID, err)
+	}
+	for _, invalid := range []string{"", "tenant/a", "tenant/a/app/b/extra", "other/a/app/b", "tenant/%ZZ/app/b"} {
+		if _, _, err := ParseCanonicalAppName(invalid); err == nil {
+			t.Fatalf("ParseCanonicalAppName(%q) error = nil", invalid)
+		}
+	}
+}

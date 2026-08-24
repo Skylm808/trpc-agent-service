@@ -27,8 +27,9 @@ func run(args []string) int {
 	flags := flag.NewFlagSet("trpc-service", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	showVersion := flags.Bool("version", false, "print version and exit")
-	configPath := flags.String("config", "", "validated tenant config for the local gateway")
-	listenAddress := flags.String("listen", "127.0.0.1:8080", "local OpenClaw HTTP listen address")
+	migrateOnly := flags.Bool("migrate-only", false, "apply PostgreSQL migrations and exit")
+	configPath := flags.String("config", "", "validated tenant config for the gateway")
+	listenAddress := flags.String("listen", "127.0.0.1:8080", "OpenClaw HTTP listen address")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -50,12 +51,20 @@ func run(args []string) int {
 		syscall.SIGTERM,
 	)
 	defer stop()
+	if *migrateOnly {
+		if err := migrateSchema(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "migrate database: %v\n", err)
+			return 1
+		}
+		fmt.Println("database migrations applied")
+		return 0
+	}
 
 	var options []trpcservice.Option
 	if *configPath != "" {
-		component, err := localGateway(ctx, *configPath, *listenAddress)
+		component, err := gatewayComponent(ctx, *configPath, *listenAddress)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "initialize local gateway: %v\n", err)
+			fmt.Fprintf(os.Stderr, "initialize gateway: %v\n", err)
 			return 1
 		}
 		options = append(options, trpcservice.WithComponents(component))
@@ -74,7 +83,7 @@ func run(args []string) int {
 	return 0
 }
 
-func localGateway(ctx context.Context, path, address string) (*openclaw.LocalComponent, error) {
+func gatewayComponent(ctx context.Context, path, address string) (trpcservice.Component, error) {
 	fileHandle, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -144,7 +153,7 @@ func localGateway(ctx context.Context, path, address string) (*openclaw.LocalCom
 			return mux, nil
 		})
 	}
-	return openclaw.NewLocalComponent(ctx, address, file, routes, decorators...)
+	return newDurableComponent(ctx, address, file, routes, decorators...)
 }
 
 func resolveLocalSecret(ref tenant.SecretRef) (string, error) {

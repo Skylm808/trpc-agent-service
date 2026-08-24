@@ -7,3 +7,4 @@
 - [Runtime Bundle](runtime.md)：tRPC-Agent-Go Runner 的构建、版本和生命周期。
 - [治理、审计与可观测性](governance.md)：权限、预算、审批、脱敏和 tracing。
 - [企业微信 Adapter](wecom.md)：回调协议、身份映射和主动发送。
+- [PostgreSQL + Redis 部署](deployment.md)：Compose 启动、验证、密钥和生产拓扑边界。

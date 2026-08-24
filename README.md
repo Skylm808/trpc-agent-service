@@ -143,23 +143,13 @@
 git clone https://github.com/liuzengh/trpc-agent-service.git
 cd trpc-agent-service
 
-./build.sh
-./start.sh
+docker compose up --build
 ```
 
-PR3 提供了无需模型密钥、数据库或网络的纵向链路示例，实际经过
-`LLMAgent -> Runner -> calculator Tool -> Session/Memory -> Event`：
+Compose 会启动 PostgreSQL、Redis、一次性 migration 和服务进程。默认 HTTP token 是
+`local-secret`，仅用于本机联调：
 
 ```bash
-go run ./examples/quickstart
-```
-
-启动 PR5 的本地 OpenClaw HTTP 纵向链路（仅开发环境，状态保存在进程内）：
-
-```bash
-export TRPC_AGENT_GATEWAY_TOKEN_DEMO_HTTP=local-secret
-go run ./cmd/trpc-service --config ./configs/example.yaml --listen 127.0.0.1:8080
-
 curl -H 'Authorization: Bearer local-secret' \
   -H 'X-Channel-Binding: demo-http' \
   -H 'Content-Type: application/json' \
@@ -167,8 +157,9 @@ curl -H 'Authorization: Bearer local-secret' \
   http://127.0.0.1:8080/v1/gateway/messages
 ```
 
-生产环境不能使用这个本地组合器；需要注入 PostgreSQL Inbox/WriteStore、Redis
-Coordinator 和持久化队列。
+直接运行二进制时需要设置 `TRPC_AGENT_POSTGRES_DSN`、`TRPC_AGENT_REDIS_URL` 和通道
+凭据，再执行 `./start.sh`。PR3 的确定性 Runner 示例仍可用
+`go run ./examples/quickstart` 单独运行，它不代表服务部署方式。
 
 总体设计从 [`docs/architecture.md`](docs/architecture.md) 开始，生产风险与缓解措施见
 [`docs/risks.md`](docs/risks.md)。控制面数据模型见
@@ -177,6 +168,8 @@ Bundle 的版本切换与生命周期约束见 [`docs/runtime.md`](docs/runtime.
 Inbox/fencing/Outbox 与 OpenClaw HTTP 链路见
 [`docs/message-runtime.md`](docs/message-runtime.md)，企业微信回调验签、消息规范化和
 主动回复见 [`docs/wecom.md`](docs/wecom.md)。
+PostgreSQL + Redis 的 Compose 启动、验证和生产拓扑边界见
+[`docs/deployment.md`](docs/deployment.md)。
 
 PR7 的企业微信协议测试不需要真实账号：
 
@@ -190,8 +183,8 @@ Docker 可用时，可真实验证 PostgreSQL migration 的首次 up、重复 up
 ./scripts/postgres_migrations_test.sh
 ```
 
-停止服务：
+停止 Compose：
 
 ```bash
-./stop.sh
+docker compose down
 ```

@@ -29,12 +29,14 @@ var (
 	)
 	artifactBackends = backendSet(
 		tenant.BackendInMemory,
+		tenant.BackendPostgres,
 		tenant.BackendLocal,
 		tenant.BackendS3,
 		tenant.BackendCOS,
 	)
 	knowledgeBackends = backendSet(
 		tenant.BackendInMemory,
+		tenant.BackendPostgres,
 		tenant.BackendQdrant,
 		tenant.BackendMilvus,
 		tenant.BackendElasticsearch,

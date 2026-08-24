@@ -30,6 +30,17 @@ type LocalComponent struct {
 // HandlerDecorator mounts a provider adapter around the shared local Gateway.
 type HandlerDecorator func(*Handler, http.Handler) (http.Handler, error)
 
+// ComponentDependencies selects durable stores without coupling the HTTP
+// protocol package to concrete database clients.
+type ComponentDependencies struct {
+	Inbox          idempotency.Store
+	Coordinator    sessioncoord.LeaseCoordinator
+	Writes         worker.PlatformStore
+	RuntimeFactory serviceruntime.Factory
+	Audit          audit.Store
+	EventBus       EventBus
+}
+
 // NewLocalComponent wires the complete offline HTTP -> Runner -> Outbox chain.
 func NewLocalComponent(parent context.Context, address string, file *config.File, routes Routes, decorators ...HandlerDecorator) (*LocalComponent, error) {
 	if parent == nil || address == "" || file == nil || routes == nil {
@@ -41,11 +52,30 @@ func NewLocalComponent(parent context.Context, address string, file *config.File
 		return nil, err
 	}
 	inbox := idempotency.NewMemoryStore()
-	runtimes, err := serviceruntime.NewManager(worker.RuntimeFactory(writes))
+	redactor := servicelog.NewRedactor(nil, nil)
+	return NewComponent(parent, address, file, routes, ComponentDependencies{
+		Inbox: inbox, Coordinator: coordinator, Writes: writes,
+		RuntimeFactory: worker.TestRuntimeFactory(writes), Audit: audit.NewMemoryStore(redactor),
+	}, decorators...)
+}
+
+// NewComponent wires a single-process Gateway and Worker to injected durable
+// stores. The caller owns the database and Redis clients behind dependencies.
+func NewComponent(parent context.Context, address string, file *config.File, routes Routes, dependencies ComponentDependencies, decorators ...HandlerDecorator) (*LocalComponent, error) {
+	if parent == nil || address == "" || file == nil || routes == nil {
+		return nil, errors.New("openclaw: context, address, config, and routes are required")
+	}
+	if dependencies.Inbox == nil || dependencies.Coordinator == nil || dependencies.Writes == nil || dependencies.RuntimeFactory == nil || dependencies.Audit == nil {
+		return nil, errors.New("openclaw: inbox, coordinator, writes, runtime factory, and audit are required")
+	}
+	runtimes, err := serviceruntime.NewManager(dependencies.RuntimeFactory)
 	if err != nil {
 		return nil, err
 	}
-	hub := NewHub()
+	bus := dependencies.EventBus
+	if bus == nil {
+		bus = NewHub()
+	}
 	registry := NewRegistry()
 	telemetry, err := servicemetrics.New("trpc-agent-service")
 	if err != nil {
@@ -53,23 +83,22 @@ func NewLocalComponent(parent context.Context, address string, file *config.File
 		return nil, err
 	}
 	redactor := servicelog.NewRedactor(nil, nil)
-	auditor := audit.NewMemoryStore(redactor)
 	policyEngine := &policy.Engine{
 		Identity:           policy.AuthenticatedIdentityAuthorizer{},
 		Budgets:            policy.NewMemoryBudget(),
 		Approvals:          policy.NewMemoryApprovals(),
 		CostMicrosPerToken: 1, // deterministic local accounting for the mock model.
 	}
-	processor := &worker.Processor{WorkerID: "local-worker", Inbox: inbox, Coordinator: coordinator, Writes: writes, Runtimes: runtimes, Snapshots: gateway.FileSnapshotResolver{File: file}, Publisher: MultiPublisher{hub, registry}, Policy: policyEngine, Audit: auditor, Redactor: redactor, Telemetry: telemetry}
+	processor := &worker.Processor{WorkerID: "worker", Inbox: dependencies.Inbox, Coordinator: dependencies.Coordinator, Writes: dependencies.Writes, Runtimes: runtimes, Snapshots: gateway.FileSnapshotResolver{File: file}, Publisher: MultiPublisher{bus, registry}, Policy: policyEngine, Audit: dependencies.Audit, Redactor: redactor, Telemetry: telemetry}
 	var dispatch *dispatcher.Dispatcher
 	dispatch, err = dispatcher.NewWithErrorHandler(parent, processor.Process, func(ctx context.Context, request gateway.RunRequest, _ error) {
-		go retryLocal(ctx, inbox, dispatch, request)
+		go retryClaim(ctx, dependencies.Inbox, dispatch, request)
 	})
 	if err != nil {
 		_ = runtimes.Close(context.Background())
 		return nil, err
 	}
-	core := &Handler{Routes: routes, Inbox: inbox, Submitter: dispatch, Hub: hub, Status: registry, Canceler: processor, Approver: policyEngine, ClaimOwner: "local-gateway", Telemetry: telemetry}
+	core := &Handler{Routes: routes, Inbox: dependencies.Inbox, Submitter: dispatch, Hub: bus, Status: registry, Canceler: processor, Approver: policyEngine, ClaimOwner: "gateway", Telemetry: telemetry}
 	var handler http.Handler = core.RoutesHandler()
 	for _, decorate := range decorators {
 		if decorate == nil {
@@ -85,7 +114,7 @@ func NewLocalComponent(parent context.Context, address string, file *config.File
 	return &LocalComponent{server: &Server{Address: address, Handler: handler}, dispatcher: dispatch, runtimes: runtimes}, nil
 }
 
-func retryLocal(ctx context.Context, inbox *idempotency.MemoryStore, dispatch *dispatcher.Dispatcher, request gateway.RunRequest) {
+func retryClaim(ctx context.Context, inbox idempotency.Store, dispatch Submitter, request gateway.RunRequest) {
 	timer := time.NewTimer(time.Second)
 	defer timer.Stop()
 	select {

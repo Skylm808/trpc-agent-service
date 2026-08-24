@@ -66,10 +66,11 @@ type Bundle struct {
 	closeErr                 error
 }
 
-// NewBundle assembles LLMAgent, storage, tools, plugins, and Runner through public v1.11.2 APIs.
-func NewBundle(snapshot config.RuntimeSnapshot, plugins ...plugin.Plugin) (*Bundle, error) {
+// NewTestBundle assembles the deterministic fixture used by unit tests and the
+// standalone quickstart. Service entrypoints inject persistent services.
+func NewTestBundle(snapshot config.RuntimeSnapshot, plugins ...plugin.Plugin) (*Bundle, error) {
 	app := snapshot.App()
-	services, err := storage.NewInMemory(app.Storage)
+	services, err := storage.NewTestServices(app.Storage)
 	if err != nil {
 		return nil, err
 	}

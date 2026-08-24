@@ -59,7 +59,7 @@ tenants:
 }
 
 func TestBundleRunsPublicTRPCAgentChain(t *testing.T) {
-	bundle, err := NewBundle(runtimeSnapshot(t, "tenant-a", 1))
+	bundle, err := NewTestBundle(runtimeSnapshot(t, "tenant-a", 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestBundleObserverReceivesEventBeforeRunCompletes(t *testing.T) {
 }
 
 func TestBundleExecutesCalculatorThroughRunner(t *testing.T) {
-	bundle, err := NewBundle(runtimeSnapshot(t, "tenant-a", 1))
+	bundle, err := NewTestBundle(runtimeSnapshot(t, "tenant-a", 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestBundleExecutesCalculatorThroughRunner(t *testing.T) {
 }
 
 func TestBundleResumesDangerousToolAfterApproval(t *testing.T) {
-	bundle, err := NewBundle(runtimeSnapshot(t, "tenant-a", 1))
+	bundle, err := NewTestBundle(runtimeSnapshot(t, "tenant-a", 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,9 +212,9 @@ func TestBundleResumesDangerousToolAfterApproval(t *testing.T) {
 }
 
 func TestBundlesIsolateSameUserAndSessionAcrossTenants(t *testing.T) {
-	a, _ := NewBundle(runtimeSnapshot(t, "tenant-a", 1))
+	a, _ := NewTestBundle(runtimeSnapshot(t, "tenant-a", 1))
 	defer a.Close()
-	b, _ := NewBundle(runtimeSnapshot(t, "tenant-b", 1))
+	b, _ := NewTestBundle(runtimeSnapshot(t, "tenant-b", 1))
 	defer b.Close()
 	input := RunInput{RequestID: "request-a", UserID: "same-user", SessionID: "same-session", Text: "hello"}
 	if _, err := a.Run(context.Background(), input); err != nil {
@@ -233,7 +233,7 @@ func TestBundlesIsolateSameUserAndSessionAcrossTenants(t *testing.T) {
 }
 
 func TestManagerKeepsOldBundleWhileNewVersionRuns(t *testing.T) {
-	manager, _ := NewManager(func(snapshot config.RuntimeSnapshot) (Runtime, error) { return NewBundle(snapshot) })
+	manager, _ := NewManager(func(snapshot config.RuntimeSnapshot) (Runtime, error) { return NewTestBundle(snapshot) })
 	oldLease, err := manager.Acquire(runtimeSnapshot(t, "tenant-a", 1))
 	if err != nil {
 		t.Fatal(err)
@@ -414,7 +414,7 @@ func TestBundleCancelHasBoundedDrain(t *testing.T) {
 }
 
 func TestBundleRejectsEmptyUserText(t *testing.T) {
-	bundle, err := NewBundle(runtimeSnapshot(t, "tenant-a", 1))
+	bundle, err := NewTestBundle(runtimeSnapshot(t, "tenant-a", 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +430,7 @@ func (value namedPlugin) Name() string        { return string(value) }
 func (namedPlugin) Register(*plugin.Registry) {}
 
 func TestNewBundleRejectsDuplicatePluginsWithoutPanic(t *testing.T) {
-	if _, err := NewBundle(runtimeSnapshot(t, "tenant-a", 1), namedPlugin("duplicate"), namedPlugin("duplicate")); err == nil {
+	if _, err := NewTestBundle(runtimeSnapshot(t, "tenant-a", 1), namedPlugin("duplicate"), namedPlugin("duplicate")); err == nil {
 		t.Fatal("duplicate plugins accepted")
 	}
 }

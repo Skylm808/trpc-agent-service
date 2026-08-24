@@ -7,7 +7,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
-func TestNewInMemoryRejectsEveryNonMemoryDomain(t *testing.T) {
+func TestNewTestServicesRejectsEveryNonMemoryDomain(t *testing.T) {
 	base := tenant.StorageProfile{
 		Session: tenant.BackendConfig{Type: tenant.BackendInMemory}, Memory: tenant.BackendConfig{Type: tenant.BackendInMemory},
 		Summary: tenant.BackendConfig{Type: tenant.BackendInMemory}, Artifact: tenant.BackendConfig{Type: tenant.BackendInMemory},
@@ -28,10 +28,25 @@ func TestNewInMemoryRejectsEveryNonMemoryDomain(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			profile := base
 			test.mutate(&profile)
-			_, err := NewInMemory(profile)
+			_, err := NewTestServices(profile)
 			if err == nil || !strings.Contains(err.Error(), test.name) {
 				t.Fatalf("error=%v", err)
 			}
 		})
+	}
+}
+
+func TestValidatePostgresProfile(t *testing.T) {
+	profile := tenant.StorageProfile{
+		Session: tenant.BackendConfig{Type: tenant.BackendPostgres}, Memory: tenant.BackendConfig{Type: tenant.BackendPostgres},
+		Summary: tenant.BackendConfig{Type: tenant.BackendPostgres}, Artifact: tenant.BackendConfig{Type: tenant.BackendPostgres},
+		Knowledge: tenant.BackendConfig{Type: tenant.BackendPostgres}, Audit: tenant.BackendConfig{Type: tenant.BackendPostgres},
+	}
+	if err := ValidatePostgresProfile(profile); err != nil {
+		t.Fatal(err)
+	}
+	profile.Knowledge.Type = tenant.BackendRedis
+	if err := ValidatePostgresProfile(profile); err == nil || !strings.Contains(err.Error(), "knowledge") {
+		t.Fatalf("error = %v", err)
 	}
 }

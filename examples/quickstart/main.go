@@ -23,7 +23,7 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	bundle, err := serviceRuntime.NewBundle(snapshot)
+	bundle, err := serviceRuntime.NewTestBundle(snapshot)
 	if err != nil {
 		fatal(err)
 	}

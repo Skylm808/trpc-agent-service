@@ -21,6 +21,28 @@ func CanonicalAppName(tenantID, appID string) (string, error) {
 	return "tenant/" + tenantSegment + "/app/" + appSegment, nil
 }
 
+// ParseCanonicalAppName returns the tenant and application carried by an
+// AppName created with CanonicalAppName.
+func ParseCanonicalAppName(appName string) (string, string, error) {
+	parts := strings.Split(appName, "/")
+	if len(parts) != 4 || parts[0] != "tenant" || parts[2] != "app" {
+		return "", "", errors.New("invalid canonical app name")
+	}
+	tenantID, err := url.PathUnescape(parts[1])
+	if err != nil || tenantID == "" {
+		return "", "", errors.New("invalid canonical tenant ID")
+	}
+	appID, err := url.PathUnescape(parts[3])
+	if err != nil || appID == "" {
+		return "", "", errors.New("invalid canonical app ID")
+	}
+	canonical, err := CanonicalAppName(tenantID, appID)
+	if err != nil || canonical != appName {
+		return "", "", errors.New("non-canonical app name")
+	}
+	return tenantID, appID, nil
+}
+
 // CanonicalUserID scopes an external user to one channel binding.
 func CanonicalUserID(
 	channelType ChannelType,

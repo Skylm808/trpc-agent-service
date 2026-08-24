@@ -49,9 +49,24 @@ type PlatformStore interface {
 	sessioncoord.FenceValidator
 }
 
-func RuntimeFactory(writes PlatformStore) serviceruntime.Factory {
+// TestRuntimeFactory constructs the deterministic fixture used by protocol and
+// worker tests. Service entrypoints use RuntimeFactoryWithServices.
+func TestRuntimeFactory(writes PlatformStore) serviceruntime.Factory {
+	return RuntimeFactoryWithServices(writes, func(snapshot config.RuntimeSnapshot) (*storage.Services, error) {
+		return storage.NewTestServices(snapshot.App().Storage)
+	})
+}
+
+// ServicesFactory resolves the storage services owned by one immutable Bundle.
+type ServicesFactory func(config.RuntimeSnapshot) (*storage.Services, error)
+
+// RuntimeFactoryWithServices builds fenced runtimes from an injected backend.
+func RuntimeFactoryWithServices(writes PlatformStore, servicesFactory ServicesFactory) serviceruntime.Factory {
 	return func(snapshot config.RuntimeSnapshot) (serviceruntime.Runtime, error) {
-		services, err := storage.NewInMemory(snapshot.App().Storage)
+		if writes == nil || servicesFactory == nil {
+			return nil, errors.New("worker: platform store and services factory are required")
+		}
+		services, err := servicesFactory(snapshot)
 		if err != nil {
 			return nil, err
 		}

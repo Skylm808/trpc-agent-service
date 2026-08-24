@@ -17,10 +17,8 @@ when supported and continues draining with a bound, preventing a disconnected
 client from blocking the Runner. Bundle close is idempotent and closes the
 borrowed Session and Memory services after closing the Runner.
 
-The repository still contains a deterministic local builder for unit tests and
-the quickstart. It is not a production deployment path and is not counted as a
-storage backend. It rejects unsupported providers instead of silently falling
-back. A production composition must inject the shared PostgreSQL Session/Inbox/
-Outbox path, Redis coordination, the selected Memory/Knowledge/Artifact
-adapters, and a real model provider. Production configuration must never fall
-back to process-local state.
+The service entrypoint injects PostgreSQL Session, Memory, Artifact, Inbox,
+Outbox, and Audit services. Redis provides lease/fencing and the distributed
+run-event bus. The deterministic quickstart keeps a separate test fixture so it
+can run without external services. Unsupported storage profiles are rejected
+before the Gateway starts.

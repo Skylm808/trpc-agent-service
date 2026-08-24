@@ -2,6 +2,7 @@ package idempotency
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -70,7 +71,8 @@ func (store *SQLStore) Claim(ctx context.Context, message gateway.InboundMessage
 	}
 	defer tx.Rollback()
 	now := store.now().UTC()
-	scope := message.TenantID + "\x00" + message.AppID + "\x00" + message.UserID + "\x00" + message.SessionID
+	scopeDigest := sha256.Sum256([]byte(message.TenantID + "\x00" + message.AppID + "\x00" + message.UserID + "\x00" + message.SessionID))
+	scope := fmt.Sprintf("%x", scopeDigest)
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, scope); err != nil {
 		return Claim{}, false, err
 	}

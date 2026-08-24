@@ -191,7 +191,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 
 ## 7. 部署方案
 
-最小可运行环境使用 Docker Compose：一个 Gateway/Worker 合并进程、PostgreSQL、Redis 和 OpenTelemetry Collector。企业微信通过公网反向代理进入 Adapter；模型、IM 和数据库密钥从挂载的 secret 文件读取。这个形态用来做协议联调和故障回放，不承诺单点容灾。
+最小可运行环境使用根目录的 Docker Compose：一个 Gateway/Worker 合并进程、PostgreSQL、Redis 和一次性 migration。企业微信通过公网反向代理进入 Adapter；模型、IM 和数据库密钥从挂载的 secret 文件读取。这个形态用来做协议联调和故障回放，不承诺单点容灾。启动与验证命令见 [PostgreSQL + Redis 部署](deployment.md)。
 
 生产环境使用 Kubernetes：Gateway、Worker、Channel Adapter、Outbox Worker 和 Admin API 分别部署，按队列等待、活跃 Runner 和投递积压独立扩容；PostgreSQL、Redis、对象存储和向量库使用托管或高可用集群。Pod 不挂载会话本地盘，也不依赖 sticky session。配置发布先进入少量租户，指标越过阈值即停止灰度并发布回滚版本。数据库迁移由独立 Job 串行执行，不能放在每个应用 Pod 启动流程中并发运行。
 
@@ -205,4 +205,4 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、租户成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、Inbox/fencing/Outbox、治理审计、OpenTelemetry 链路和企业微信 Adapter。Telegram Adapter、生产后端组合器、Outbox 消费进程及 Compose/Kubernetes 部署仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。
+当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、治理审计、OpenTelemetry 链路、Compose 最小部署和企业微信 Adapter。Telegram Adapter、持久队列、Outbox 消费进程及 Kubernetes manifest 仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。

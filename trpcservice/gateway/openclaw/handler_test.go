@@ -157,7 +157,7 @@ func TestTwoTenantTwoWorkerEndToEndToolMemoryOutboxAndTrace(t *testing.T) {
 	writes := sessioncoord.NewMemoryWriteStore()
 	coordinator, _ := sessioncoord.NewCoordinator(writes)
 	inbox := idempotency.NewMemoryStore()
-	manager, _ := serviceruntime.NewManager(worker.RuntimeFactory(writes))
+	manager, _ := serviceruntime.NewManager(worker.TestRuntimeFactory(writes))
 	defer manager.Close(context.Background())
 	hub := NewHub()
 	processors := []*worker.Processor{

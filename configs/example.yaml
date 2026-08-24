@@ -59,15 +59,21 @@ tenants:
             enabled: false
         storage:
           session:
-            type: inmemory
+            type: postgres
+            endpoint: postgres://postgres:5432/trpc_agent
             namespace: demo-assistant
           memory:
-            type: inmemory
+            type: postgres
+            endpoint: postgres://postgres:5432/trpc_agent
           summary:
-            type: inmemory
+            type: postgres
+            endpoint: postgres://postgres:5432/trpc_agent
           artifact:
-            type: inmemory
+            type: postgres
+            endpoint: postgres://postgres:5432/trpc_agent
           knowledge:
-            type: inmemory
+            type: postgres
+            endpoint: postgres://postgres:5432/trpc_agent
           audit:
-            type: inmemory
+            type: postgres
+            endpoint: postgres://postgres:5432/trpc_agent

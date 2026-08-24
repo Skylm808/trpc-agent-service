@@ -28,7 +28,9 @@ for file in \
   000001_control_plane.up.sql \
   000001_control_plane.down.sql \
   000002_message_runtime.up.sql \
-  000002_message_runtime.down.sql; do
+  000002_message_runtime.down.sql \
+  000003_persistent_runtime.up.sql \
+  000003_persistent_runtime.down.sql; do
   docker cp "$ROOT/migrations/$file" "$CONTAINER:/tmp/$file" >/dev/null
 done
 
@@ -39,9 +41,11 @@ psql_file() {
 up() {
   psql_file 000001_control_plane.up.sql
   psql_file 000002_message_runtime.up.sql
+  psql_file 000003_persistent_runtime.up.sql
 }
 
 down() {
+  psql_file 000003_persistent_runtime.down.sql
   psql_file 000002_message_runtime.down.sql
   psql_file 000001_control_plane.down.sql
 }
@@ -49,7 +53,7 @@ down() {
 up
 up
 
-expected_tables=$'agent_apps\naudit_logs\nchannel_bindings\nconfig_versions\nderived_jobs\nidentity_mappings\ninbox_messages\nmemory_entries\nmessage_events\nmigration_jobs\noutbox_messages\nsession_heads\nsession_summaries\ntenants'
+expected_tables=$'agent_apps\naudit_logs\nchannel_bindings\nconfig_versions\nderived_jobs\nidentity_mappings\ninbox_messages\nmemory_entries\nmessage_events\nmigration_jobs\noutbox_messages\nruntime_app_states\nruntime_artifacts\nruntime_knowledge_documents\nruntime_memories\nruntime_session_events\nruntime_session_states\nruntime_session_summaries\nruntime_session_track_events\nruntime_user_states\nsession_heads\nsession_summaries\ntenants'
 actual_tables="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name")"
 if [[ "$actual_tables" != "$expected_tables" ]]; then
   echo "unexpected PostgreSQL tables:" >&2

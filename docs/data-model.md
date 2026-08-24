@@ -21,6 +21,16 @@ tenant -> audit_log
 tenant -> migration_job
 ```
 
+`000003_persistent_runtime` pins the PostgreSQL table contract used by the
+tRPC-Agent-Go v1.11.0 Session and Memory adapters and adds
+`runtime_artifacts` plus `runtime_knowledge_documents`. Runtime adapters start
+with database initialization disabled; schema changes are owned by the
+standalone migration command. Artifact revisions use
+`(tenant_id, app_id, user_id, session_id, filename, revision)` as the primary
+key. Canonical `app_name` includes tenant and App scope. The knowledge table is
+a reserved persistence contract; a Knowledge repository and Runner wiring are
+not part of this minimum executable path.
+
 `session_heads.last_event_seq`, `last_fence`, and `state_version` are the CAS
 coordinates used by PR4. A future fenced writer must update the head, append the
 event, and publish its state delta in one transaction. Summary jobs may only
