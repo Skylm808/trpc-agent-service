@@ -19,6 +19,9 @@ borrowed Session and Memory services after closing the Runner.
 
 The service entrypoint injects PostgreSQL Session, Memory, Artifact, Inbox,
 Outbox, and Audit services. Redis provides lease/fencing and the distributed
-run-event bus. The deterministic quickstart keeps a separate test fixture so it
-can run without external services. Unsupported storage profiles are rejected
-before the Gateway starts.
+run-event bus. Production model profiles (`deepseek`, `openai`, and
+`openai-compatible`) use tRPC-Agent-Go's public OpenAI-compatible Model. API
+credentials are resolved from `SecretRef` once per immutable Bundle and are not
+copied into snapshots, logs, traces, or errors. The deterministic quickstart
+keeps a separate mock fixture; production startup rejects it. Unsupported
+storage profiles are rejected before the Gateway starts.

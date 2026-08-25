@@ -19,6 +19,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/sessioncoord"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -142,6 +143,12 @@ func validatePersistentProfiles(file *config.File) error {
 		}
 		for _, app := range currentTenant.Apps {
 			if app.Enabled {
+				if app.Model.Provider == "mock" {
+					return fmt.Errorf("tenant %q app %q: mock model is test-only", currentTenant.ID, app.ID)
+				}
+				if _, err := secret.ResolveLocal(app.Model.APIKey); err != nil {
+					return fmt.Errorf("tenant %q app %q: model credential is unavailable", currentTenant.ID, app.ID)
+				}
 				if err := storage.ValidatePostgresProfile(app.Storage); err != nil {
 					return fmt.Errorf("tenant %q app %q: %w", currentTenant.ID, app.ID, err)
 				}

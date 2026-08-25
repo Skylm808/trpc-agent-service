@@ -16,6 +16,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway/openclaw"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -157,23 +158,7 @@ func gatewayComponent(ctx context.Context, path, address string) (trpcservice.Co
 }
 
 func resolveLocalSecret(ref tenant.SecretRef) (string, error) {
-	var value string
-	switch ref.Provider {
-	case tenant.SecretProviderEnv:
-		value = os.Getenv(ref.Key)
-	case tenant.SecretProviderFile:
-		content, err := os.ReadFile(ref.Key)
-		if err != nil {
-			return "", errors.New("read local secret file")
-		}
-		value = strings.TrimRight(string(content), "\r\n")
-	default:
-		return "", fmt.Errorf("local secret provider %q is unsupported", ref.Provider)
-	}
-	if value == "" {
-		return "", errors.New("resolved local secret is empty")
-	}
-	return value, nil
+	return secret.ResolveLocal(ref)
 }
 
 func gatewayTokenEnv(bindingID string) string {

@@ -176,6 +176,11 @@ func validateModel(path string, model tenant.ModelProfile) error {
 	if strings.TrimSpace(model.Name) == "" {
 		return fmt.Errorf("config: %s.name is required", path)
 	}
+	switch model.Provider {
+	case "mock", "deepseek", "openai", "openai-compatible":
+	default:
+		return fmt.Errorf("config: %s.provider is unsupported", path)
+	}
 	if model.Provider != "mock" {
 		if err := validateSecretRef(path+".api_key", model.APIKey, true); err != nil {
 			return err
@@ -188,6 +193,9 @@ func validateModel(path string, model tenant.ModelProfile) error {
 	}
 	if model.MaxTokens < 0 {
 		return fmt.Errorf("config: %s.max_tokens must not be negative", path)
+	}
+	if model.Provider == "openai-compatible" && strings.TrimSpace(model.BaseURL) == "" {
+		return fmt.Errorf("config: %s.base_url is required for openai-compatible provider", path)
 	}
 	return validateHTTPURL(path+".base_url", model.BaseURL, false)
 }

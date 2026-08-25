@@ -1,5 +1,7 @@
 .git
 .github
+.env
+.env.*
 bin
 data
 coverage.out

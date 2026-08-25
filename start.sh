@@ -7,6 +7,7 @@ cd "$ROOT"
 mkdir -p "$ROOT/bin" "$ROOT/data"
 : "${TRPC_AGENT_POSTGRES_DSN:?TRPC_AGENT_POSTGRES_DSN is required}"
 : "${TRPC_AGENT_REDIS_URL:?TRPC_AGENT_REDIS_URL is required}"
+: "${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required by configs/example.yaml}"
 if [[ ! -x "$ROOT/bin/trpc-service" ]]; then
   "$ROOT/build.sh"
 fi

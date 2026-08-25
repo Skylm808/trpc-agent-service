@@ -146,7 +146,9 @@ cd trpc-agent-service
 docker compose up --build
 ```
 
-Compose 会启动 PostgreSQL、Redis、一次性 migration 和服务进程。默认 HTTP token 是
+启动前复制 `.env.example` 为 `.env`，并设置真实 `DEEPSEEK_API_KEY`。`.env` 已被
+Git 忽略，不能提交。Compose 会启动 PostgreSQL、Redis、一次性 migration 和使用
+DeepSeek OpenAI-compatible API 的服务进程。默认 HTTP token 是
 `local-secret`，仅用于本机联调：
 
 ```bash
@@ -157,8 +159,8 @@ curl -H 'Authorization: Bearer local-secret' \
   http://127.0.0.1:8080/v1/gateway/messages
 ```
 
-直接运行二进制时需要设置 `TRPC_AGENT_POSTGRES_DSN`、`TRPC_AGENT_REDIS_URL` 和通道
-凭据，再执行 `./start.sh`。PR3 的确定性 Runner 示例仍可用
+直接运行二进制时需要设置 `TRPC_AGENT_POSTGRES_DSN`、`TRPC_AGENT_REDIS_URL`、
+`DEEPSEEK_API_KEY` 和通道凭据，再执行 `./start.sh`。PR3 的确定性 Runner 示例仍可用
 `go run ./examples/quickstart` 单独运行，它不代表服务部署方式。
 
 总体设计从 [`docs/architecture.md`](docs/architecture.md) 开始，生产风险与缓解措施见

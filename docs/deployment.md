@@ -4,6 +4,10 @@
 
 根目录的 `docker-compose.yml` 启动四个组件：PostgreSQL、Redis、一次性 migration 和合并部署的 Gateway/Worker。服务启动时会把 `configs/example.yaml` 中的租户、App 和 Channel Binding 写入控制面表；配置文件版本和数据库已发布版本不一致时拒绝启动，避免节点使用未发布配置。
 
+首次启动前执行 `cp .env.example .env`，然后只在本机 `.env` 中填写
+`DEEPSEEK_API_KEY`。生产 Runtime 使用 tRPC-Agent-Go 的 OpenAI-compatible Model
+访问 DeepSeek；`mock` provider 会被生产组合拒绝。
+
 ```bash
 docker compose up --build -d
 docker compose ps
@@ -35,6 +39,7 @@ curl -H 'Authorization: Bearer local-secret' \
 
 - `TRPC_AGENT_POSTGRES_DSN`：完整 PostgreSQL DSN，只从环境或 Secret 挂载注入；
 - `TRPC_AGENT_REDIS_URL`：Redis URL；
+- `DEEPSEEK_API_KEY`：DeepSeek API Key，由模型配置中的 SecretRef 引用；
 - `TRPC_AGENT_GATEWAY_TOKEN_<BINDING_ID>`：HTTP Channel token；
 - 企业微信启用后，还需要配置文件所引用的 callback token、应用 Secret 和 EncodingAESKey。
 

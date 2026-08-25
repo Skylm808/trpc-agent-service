@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -54,6 +55,14 @@ func TestResolveLocalSecretFromEnvAndFile(t *testing.T) {
 	value, err = resolveLocalSecret(tenant.SecretRef{Provider: tenant.SecretProviderFile, Key: path})
 	if err != nil || value != "file-value" {
 		t.Fatalf("file value=%q err=%v", value, err)
+	}
+}
+
+func TestPersistentCompositionRejectsMockModel(t *testing.T) {
+	file := &config.File{Tenants: []tenant.Tenant{{ID: "tenant", Enabled: true, Apps: []tenant.AgentApp{{ID: "app", Enabled: true, Model: tenant.ModelProfile{Provider: "mock", Name: "fixture"}}}}}}
+	err := validatePersistentProfiles(file)
+	if err == nil || !strings.Contains(err.Error(), "test-only") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

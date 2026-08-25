@@ -18,8 +18,12 @@ tenants:
         config:
           instruction: You are a helpful assistant for the demo tenant.
         model:
-          provider: mock
-          name: deterministic-mock
+          provider: deepseek
+          name: deepseek-v4-flash
+          base_url: https://api.deepseek.com
+          api_key:
+            provider: env
+            key: DEEPSEEK_API_KEY
           temperature: 0
           max_tokens: 2048
         tools:

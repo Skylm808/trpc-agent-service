@@ -13,6 +13,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	servicemetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/modelprovider"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
@@ -96,8 +97,15 @@ func NewBundleWithServices(snapshot config.RuntimeSnapshot, services *storage.Se
 		pluginNames[candidate.Name()] = struct{}{}
 	}
 	app := snapshot.App()
-	if app.Model.Provider != "mock" {
-		return nil, fmt.Errorf("runtime: model provider %q is not available", app.Model.Provider)
+	var runtimeModel model.Model
+	if app.Model.Provider == "mock" {
+		runtimeModel = serviceagent.MockModel{}
+	} else {
+		resolved, err := modelprovider.New(app.Model)
+		if err != nil {
+			return nil, err
+		}
+		runtimeModel = resolved
 	}
 	appName, err := tenant.CanonicalAppName(snapshot.TenantID(), snapshot.AppID())
 	if err != nil {
@@ -117,7 +125,12 @@ func NewBundleWithServices(snapshot config.RuntimeSnapshot, services *storage.Se
 	if services == nil || services.Session == nil || services.Memory == nil || services.Artifact == nil {
 		return nil, errors.New("runtime: session, memory, and artifact services are required")
 	}
-	agent := llmagent.New(app.Name, llmagent.WithModel(serviceagent.MockModel{}), llmagent.WithInstruction(app.Config.Instruction), llmagent.WithTools(tools))
+	generation := model.GenerationConfig{Stream: true, Temperature: app.Model.Temperature}
+	if app.Model.MaxTokens > 0 {
+		maxTokens := app.Model.MaxTokens
+		generation.MaxTokens = &maxTokens
+	}
+	agent := llmagent.New(app.Name, llmagent.WithModel(runtimeModel), llmagent.WithInstruction(app.Config.Instruction), llmagent.WithTools(tools), llmagent.WithGenerationConfig(generation))
 	run := runner.NewRunner(appName, agent, runner.WithSessionService(services.Session), runner.WithMemoryService(services.Memory), runner.WithArtifactService(services.Artifact), runner.WithPlugins(plugins...))
 	return &Bundle{tenantID: snapshot.TenantID(), appID: snapshot.AppID(), appName: appName, version: snapshot.Version(), toolNames: append([]string(nil), toolNames...), toolPolicy: app.Tools, tools: callableTools, runner: run, services: services, drainTimeout: time.Second}, nil
 }
