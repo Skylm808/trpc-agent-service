@@ -128,3 +128,68 @@ func TestRenewPreventsReclaimAndRejectsStaleOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestClaimReadyRecoversExpiredLeaseAndRejectsOldToken(t *testing.T) {
+	store := NewMemoryStore()
+	now := time.Unix(100, 0)
+	store.now = func() time.Time { return now }
+	first, won, err := store.Claim(context.Background(), testMessage("tenant-a"), "gateway", time.Second)
+	if err != nil || !won {
+		t.Fatalf("claim=%+v won=%v err=%v", first, won, err)
+	}
+	now = now.Add(2 * time.Second)
+	ready, err := store.ClaimReady(context.Background(), "worker-b", time.Minute, 10)
+	if err != nil || len(ready) != 1 || ready[0].Attempt != 2 || ready[0].ClaimToken == first.ClaimToken {
+		t.Fatalf("ready=%+v err=%v", ready, err)
+	}
+	if err := store.Complete(context.Background(), first); !errors.Is(err, ErrClaimOwner) {
+		t.Fatalf("old completion error=%v", err)
+	}
+	if err := store.Complete(context.Background(), ready[0]); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClaimReadyPreservesSessionSequence(t *testing.T) {
+	store := NewMemoryStore()
+	now := time.Unix(100, 0)
+	store.now = func() time.Time { return now }
+	firstMessage := testMessage("tenant-a")
+	firstMessage.ExternalMessageID = "first"
+	firstMessage.ReceivedAt = now
+	first, _, _ := store.Claim(context.Background(), firstMessage, "gateway", time.Second)
+	secondMessage := firstMessage
+	secondMessage.ExternalMessageID = "second"
+	secondMessage.ReceivedAt = now.Add(time.Millisecond)
+	second, _, _ := store.Claim(context.Background(), secondMessage, "gateway", time.Second)
+	now = now.Add(2 * time.Second)
+	ready, err := store.ClaimReady(context.Background(), "worker", time.Minute, 10)
+	if err != nil || len(ready) != 1 || ready[0].InboxID != first.InboxID {
+		t.Fatalf("first ready=%+v second=%+v err=%v", ready, second, err)
+	}
+	if err := store.Complete(context.Background(), ready[0]); err != nil {
+		t.Fatal(err)
+	}
+	ready, err = store.ClaimReady(context.Background(), "worker", time.Minute, 10)
+	if err != nil || len(ready) != 1 || ready[0].InboxID != second.InboxID {
+		t.Fatalf("second ready=%+v err=%v", ready, err)
+	}
+}
+
+func TestClaimReadyMovesExhaustedWorkToDLQ(t *testing.T) {
+	store := NewMemoryStore()
+	store.maxAttempts = 1
+	now := time.Unix(100, 0)
+	store.now = func() time.Time { return now }
+	message := testMessage("tenant-a")
+	claim, _, _ := store.Claim(context.Background(), message, "gateway", time.Second)
+	now = now.Add(2 * time.Second)
+	ready, err := store.ClaimReady(context.Background(), "worker", time.Minute, 10)
+	if err != nil || len(ready) != 0 {
+		t.Fatalf("ready=%+v err=%v", ready, err)
+	}
+	duplicate, won, err := store.Claim(context.Background(), message, "other", time.Minute)
+	if err != nil || won || duplicate.Status != StatusDLQ || duplicate.ClaimToken != claim.ClaimToken {
+		t.Fatalf("duplicate=%+v won=%v err=%v", duplicate, won, err)
+	}
+}

@@ -92,6 +92,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 		RuntimeFactory: factory,
 		Audit:          &audit.SQLStore{DB: db, Redactor: redactor},
 		EventBus:       bus,
+		WorkerID:       nodeID(),
 	}, decorators...)
 	if err != nil {
 		return nil, err
@@ -99,6 +100,16 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	closeDB = false
 	closeRedis = false
 	return &durableComponent{inner: component, db: db, redis: redisBackend}, nil
+}
+
+func nodeID() string {
+	if configured := os.Getenv("TRPC_AGENT_NODE_ID"); configured != "" {
+		return configured
+	}
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		return hostname
+	}
+	return "worker"
 }
 
 func migrateSchema(ctx context.Context) error {

@@ -16,11 +16,13 @@ import (
 // Its advisory transaction lock allocates a per-session inbox_seq, while the
 // primary key enforces delivery idempotency across Gateway nodes.
 type SQLStore struct {
-	DB  *sql.DB
-	Now func() time.Time
+	DB          *sql.DB
+	Now         func() time.Time
+	MaxAttempts int
 }
 
 var _ Store = (*SQLStore)(nil)
+var _ ReadyStore = (*SQLStore)(nil)
 
 // Cancel marks an exact active SQL claim terminal.
 func (store *SQLStore) Cancel(ctx context.Context, claim Claim) error {
@@ -92,7 +94,17 @@ func (store *SQLStore) Claim(ctx context.Context, message gateway.InboundMessage
 			return Claim{}, false, err
 		}
 		existing := Claim{InboxID: InboxID(stored), Owner: existingOwner.String, ClaimToken: existingToken.String, Attempt: attempt, InboxSeq: inboxSeq, Status: status, LeaseUntil: leaseUntil.Time, Message: stored}
-		if status == StatusCompleted || status == StatusCanceled || status == StatusRejected || (status == StatusProcessing && leaseUntil.Valid && now.Before(leaseUntil.Time)) || (status == StatusRetry && nextAttempt.Valid && now.Before(nextAttempt.Time)) {
+		if terminal(status) || (status == StatusProcessing && leaseUntil.Valid && now.Before(leaseUntil.Time)) || (status == StatusRetry && nextAttempt.Valid && now.Before(nextAttempt.Time)) {
+			if err := tx.Commit(); err != nil {
+				return Claim{}, false, err
+			}
+			return existing, false, nil
+		}
+		if attempt >= store.maxAttempts() {
+			if _, err := tx.ExecContext(ctx, `UPDATE inbox_messages SET status='dlq', lease_until=NULL, next_attempt_at=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3`, message.TenantID, message.BindingID, message.ExternalMessageID); err != nil {
+				return Claim{}, false, err
+			}
+			existing.Status = StatusDLQ
 			if err := tx.Commit(); err != nil {
 				return Claim{}, false, err
 			}
@@ -128,6 +140,87 @@ func (store *SQLStore) Claim(ctx context.Context, message gateway.InboundMessage
 		return Claim{}, false, err
 	}
 	return Claim{InboxID: id, Owner: owner, ClaimToken: token, Attempt: 1, InboxSeq: seq, Status: StatusProcessing, LeaseUntil: until, Message: message}, true, nil
+}
+
+// ClaimReady atomically reclaims due retries and expired processing leases.
+// The NOT EXISTS guard keeps one session's inbox_seq ordered across workers.
+func (store *SQLStore) ClaimReady(ctx context.Context, owner string, ttl time.Duration, limit int) ([]Claim, error) {
+	if store == nil || store.DB == nil {
+		return nil, errors.New("idempotency: nil SQL database")
+	}
+	if owner == "" || ttl <= 0 || limit <= 0 {
+		return nil, errors.New("idempotency: owner, positive ttl, and limit are required")
+	}
+	tx, err := store.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	now := store.now().UTC()
+	readyPredicate := `((candidate.status='retry' AND (candidate.next_attempt_at IS NULL OR candidate.next_attempt_at<=$1)) OR (candidate.status='processing' AND (candidate.lease_until IS NULL OR candidate.lease_until<=$1)))`
+	if _, err := tx.ExecContext(ctx, `UPDATE inbox_messages AS candidate SET status='dlq',lease_until=NULL,next_attempt_at=NULL WHERE `+readyPredicate+` AND candidate.attempts>=$2`, now, store.maxAttempts()); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT candidate.inbox_id,candidate.status,candidate.attempts,candidate.inbox_seq,candidate.payload_json
+		FROM inbox_messages AS candidate
+		WHERE `+readyPredicate+` AND candidate.attempts<$2
+		AND NOT EXISTS (
+			SELECT 1 FROM inbox_messages AS earlier
+			WHERE earlier.tenant_id=candidate.tenant_id AND earlier.app_id=candidate.app_id
+			AND earlier.user_id=candidate.user_id AND earlier.session_id=candidate.session_id
+			AND earlier.inbox_seq<candidate.inbox_seq
+			AND earlier.status NOT IN ('completed','canceled','rejected','dlq')
+		)
+		ORDER BY candidate.created_at,candidate.inbox_seq
+		FOR UPDATE OF candidate SKIP LOCKED LIMIT $3`, now, store.maxAttempts(), limit)
+	if err != nil {
+		return nil, err
+	}
+	type candidate struct {
+		inboxID string
+		status  Status
+		attempt int
+		seq     uint64
+		message gateway.InboundMessage
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var item candidate
+		var payload []byte
+		if err := rows.Scan(&item.inboxID, &item.status, &item.attempt, &item.seq, &payload); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := json.Unmarshal(payload, &item.message); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	claims := make([]Claim, 0, len(candidates))
+	until := now.Add(ttl)
+	for _, item := range candidates {
+		attempt := item.attempt + 1
+		token := claimToken(item.inboxID, attempt, now)
+		result, err := tx.ExecContext(ctx, `UPDATE inbox_messages SET status='processing',attempts=$4,claim_owner=$5,claim_token=$6,lease_until=$7,claimed_at=$8,next_attempt_at=NULL,last_error=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3`, item.message.TenantID, item.message.BindingID, item.message.ExternalMessageID, attempt, owner, token, until, now)
+		if err != nil {
+			return nil, err
+		}
+		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+			if err != nil {
+				return nil, err
+			}
+			return nil, ErrClaimOwner
+		}
+		claims = append(claims, Claim{InboxID: item.inboxID, Owner: owner, ClaimToken: token, Attempt: attempt, InboxSeq: item.seq, Status: StatusProcessing, LeaseUntil: until, Message: item.message})
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return claims, nil
 }
 
 // Complete uses tenant scope, claim token, status, and lease in one CAS update.
@@ -183,4 +276,11 @@ func (store *SQLStore) now() time.Time {
 		return store.Now()
 	}
 	return time.Now()
+}
+
+func (store *SQLStore) maxAttempts() int {
+	if store.MaxAttempts > 0 {
+		return store.MaxAttempts
+	}
+	return 5
 }

@@ -12,6 +12,7 @@ cleanup() {
 trap cleanup EXIT
 
 docker run -d --name "$CONTAINER" \
+	-p 127.0.0.1::5432 \
   -e POSTGRES_PASSWORD=test-only \
   -e POSTGRES_DB="$DATABASE" \
   "$IMAGE" >/dev/null
@@ -30,7 +31,9 @@ for file in \
   000002_message_runtime.up.sql \
   000002_message_runtime.down.sql \
   000003_persistent_runtime.up.sql \
-  000003_persistent_runtime.down.sql; do
+  000003_persistent_runtime.down.sql \
+  000004_inbox_recovery.up.sql \
+  000004_inbox_recovery.down.sql; do
   docker cp "$ROOT/migrations/$file" "$CONTAINER:/tmp/$file" >/dev/null
 done
 
@@ -42,9 +45,11 @@ up() {
   psql_file 000001_control_plane.up.sql
   psql_file 000002_message_runtime.up.sql
   psql_file 000003_persistent_runtime.up.sql
+  psql_file 000004_inbox_recovery.up.sql
 }
 
 down() {
+  psql_file 000004_inbox_recovery.down.sql
   psql_file 000003_persistent_runtime.down.sql
   psql_file 000002_message_runtime.down.sql
   psql_file 000001_control_plane.down.sql
@@ -61,13 +66,21 @@ if [[ "$actual_tables" != "$expected_tables" ]]; then
   exit 1
 fi
 
-expected_indexes=$'idx_derived_jobs_ready\nuq_inbox_session_seq\nuq_inbox_tenant_id\nuq_message_events_tenant_inbox'
-actual_indexes="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname IN ('uq_message_events_tenant_inbox','uq_inbox_tenant_id','uq_inbox_session_seq','idx_derived_jobs_ready') ORDER BY indexname")"
+expected_indexes=$'idx_derived_jobs_ready\nidx_inbox_recovery_ready\nuq_inbox_session_seq\nuq_inbox_tenant_id\nuq_message_events_tenant_inbox'
+actual_indexes="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname IN ('uq_message_events_tenant_inbox','uq_inbox_tenant_id','uq_inbox_session_seq','idx_derived_jobs_ready','idx_inbox_recovery_ready') ORDER BY indexname")"
 if [[ "$actual_indexes" != "$expected_indexes" ]]; then
   echo "missing PostgreSQL migration indexes:" >&2
   echo "$actual_indexes" >&2
   exit 1
 fi
+
+postgres_port="$(docker port "$CONTAINER" 5432/tcp | sed 's/.*://')"
+(
+  cd "$ROOT"
+  TRPC_AGENT_POSTGRES_TEST_DSN="postgres://postgres:test-only@127.0.0.1:${postgres_port}/${DATABASE}?sslmode=disable" \
+    GOCACHE="${GOCACHE:-/private/tmp/trpc-agent-service-postgres-gocache}" \
+    go test ./trpcservice/idempotency -run TestSQLClaimReadyRecoveryConcurrencyOrderAndDLQ -count=1
+)
 
 down
 remaining="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")"
@@ -77,4 +90,4 @@ if [[ "$remaining" != "0" ]]; then
 fi
 
 up
-echo "PostgreSQL migrations: up/up/down/up passed"
+echo "PostgreSQL migrations and Inbox recovery: up/up/down/up passed"

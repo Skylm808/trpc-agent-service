@@ -138,6 +138,15 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 		}
 	}()
 	claim := idempotency.Claim{InboxID: request.InboxID, Owner: request.ClaimOwner, ClaimToken: request.ClaimToken, Attempt: request.ClaimAttempt, InboxSeq: request.InboxSeq, LeaseUntil: request.ClaimLeaseUntil, Message: gateway.InboundMessage{TenantID: request.TenantID, BindingID: request.BindingID, ExternalMessageID: request.ExternalMessageID}}
+	// A request can wait behind earlier work from the same session long enough
+	// for its Inbox lease to be reclaimed. Validate and extend ownership before
+	// acquiring the session lease so a stale queued copy never calls the model or
+	// a tool after another node has taken over the durable message.
+	claim, err := processor.Inbox.Renew(ctx, claim, processor.leaseTTL())
+	if err != nil {
+		return err
+	}
+	request.ClaimLeaseUntil = claim.LeaseUntil
 	completed := false
 	defer func() {
 		if !completed && runErr != nil {

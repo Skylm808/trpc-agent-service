@@ -21,8 +21,18 @@ var persistentRuntimeUp string
 //go:embed 000003_persistent_runtime.down.sql
 var persistentRuntimeDown string
 
+//go:embed 000004_inbox_recovery.up.sql
+var inboxRecoveryUp string
+
+//go:embed 000004_inbox_recovery.down.sql
+var inboxRecoveryDown string
+
 // Up returns SQL that creates or verifies the schema.
-func Up() string { return up + "\n" + messageRuntimeUp + "\n" + persistentRuntimeUp }
+func Up() string {
+	return up + "\n" + messageRuntimeUp + "\n" + persistentRuntimeUp + "\n" + inboxRecoveryUp
+}
 
 // Down returns destructive SQL intended only for tests and disaster recovery.
-func Down() string { return persistentRuntimeDown + "\n" + messageRuntimeDown + "\n" + down }
+func Down() string {
+	return inboxRecoveryDown + "\n" + persistentRuntimeDown + "\n" + messageRuntimeDown + "\n" + down
+}

@@ -73,7 +73,7 @@ func (handler *Handler) AcceptInbound(ctx context.Context, inbound gateway.Inbou
 	if handler.Status != nil {
 		handler.Status.Publish(gateway.RunEvent{Type: "run.accepted", RequestID: claim.InboxID, SessionID: inbound.SessionID, TraceID: inbound.TraceID})
 	}
-	run := gateway.RunRequest{InboxID: claim.InboxID, InboxSeq: claim.InboxSeq, TenantID: inbound.TenantID, AppID: inbound.AppID, BindingID: inbound.BindingID, ExternalMessageID: inbound.ExternalMessageID, ExternalUserID: inbound.ExternalUserID, ConversationID: inbound.ConversationID, UserID: inbound.UserID, SessionID: inbound.SessionID, Text: inbound.Text, TraceID: inbound.TraceID, TraceContext: inbound.TraceContext, ConfigVersion: inbound.ConfigVersion, ClaimOwner: claim.Owner, ClaimToken: claim.ClaimToken, ClaimAttempt: claim.Attempt, ClaimLeaseUntil: claim.LeaseUntil}
+	run := claim.RunRequest()
 	if err := handler.Submitter.Submit(run); err != nil {
 		_ = handler.Inbox.Fail(context.Background(), claim, err, time.Now().UTC().Add(time.Second))
 		return gateway.AcceptedMessage{}, err

@@ -3,7 +3,7 @@
 ## 组件边界
 
 `gateway/openclaw` 只负责认证、协议解析和服务端路由；`idempotency`
-负责持久化 Inbox claim；`dispatcher` 只提供单节点同 session 排队；
+负责持久化 Inbox claim；`InboxPoller` 在所有节点竞争恢复到期任务；`dispatcher` 只提供单节点同 session 排队；
 `sessioncoord` 负责跨节点 lease、fencing 和写入顺序；`worker` 才能取得固定版本的
 Runtime Bundle 并调用 tRPC-Agent-Go `Runner`。因此 Gateway 和 Worker 都可以水平扩展，
 不依赖负载均衡器 sticky session。
@@ -14,6 +14,7 @@ OpenClaw/IM callback
   -> canonical user/session
   -> PostgreSQL Inbox unique claim + inbox_seq
   -> fast HTTP 202
+  -> Inbox poller reclaims retry/expired claims with SKIP LOCKED
   -> per-session dispatcher
   -> Redis lease (INCR fencing token)
   -> Runtime Manager -> LLMAgent -> Tool -> Runner events
@@ -47,6 +48,11 @@ OpenClaw/IM callback
 5. Runtime 请求固定携带 ingress 时的 `config_version`。旧版本 Bundle 在已有请求释放
    lease 前不会关闭；新请求只进入新版本。固定版本已经被清除时请求失败并重试/进入
    DLQ，禁止悄悄使用当前版本。
+6. 每个生产节点运行一个带唯一 `TRPC_AGENT_NODE_ID` 的 Inbox poller。poller 使用
+   `FOR UPDATE SKIP LOCKED` 批量取得到期 retry 或 lease 已过期的 processing 消息，
+   按 `inbox_seq` 阻止同 session 后序消息越过前序消息；超过最大尝试次数后进入 DLQ。
+   Processor 在调用模型或工具前再次续租并校验 claim token，因此已被其他节点接管的
+   本地排队副本会直接退出，不会产生重复模型费用或工具副作用。
 
 ## OpenClaw 兼容 HTTP
 

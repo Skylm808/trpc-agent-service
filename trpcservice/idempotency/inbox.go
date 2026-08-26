@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ const (
 	StatusRetry      Status = "retry"
 	StatusCanceled   Status = "canceled"
 	StatusRejected   Status = "rejected"
+	StatusDLQ        Status = "dlq"
 )
 
 // Claim is one Inbox ownership attempt.
@@ -35,6 +37,20 @@ type Claim struct {
 	Message                    gateway.InboundMessage
 }
 
+// RunRequest reconstructs the exact durable Worker request owned by the claim.
+func (claim Claim) RunRequest() gateway.RunRequest {
+	message := claim.Message
+	return gateway.RunRequest{
+		InboxID: claim.InboxID, InboxSeq: claim.InboxSeq,
+		TenantID: message.TenantID, AppID: message.AppID, BindingID: message.BindingID,
+		ExternalMessageID: message.ExternalMessageID, ExternalUserID: message.ExternalUserID,
+		ConversationID: message.ConversationID, UserID: message.UserID, SessionID: message.SessionID,
+		Text: message.Text, TraceID: message.TraceID, TraceContext: message.TraceContext,
+		ConfigVersion: message.ConfigVersion, ClaimOwner: claim.Owner, ClaimToken: claim.ClaimToken,
+		ClaimAttempt: claim.Attempt, ClaimLeaseUntil: claim.LeaseUntil,
+	}
+}
+
 // Store claims duplicate deliveries and records terminal/retry state.
 type Store interface {
 	Claim(context.Context, gateway.InboundMessage, string, time.Duration) (Claim, bool, error)
@@ -43,6 +59,14 @@ type Store interface {
 	Reject(context.Context, Claim) error
 	Complete(context.Context, Claim) error
 	Fail(context.Context, Claim, error, time.Time) error
+}
+
+// ReadyStore atomically reclaims retryable or lease-expired Inbox work for a
+// background Worker. Implementations must not return later work from a session
+// while an earlier inbox_seq remains non-terminal.
+type ReadyStore interface {
+	Store
+	ClaimReady(context.Context, string, time.Duration, int) ([]Claim, error)
 }
 
 func (store *MemoryStore) Reject(_ context.Context, claim Claim) error {
@@ -92,15 +116,16 @@ type record struct {
 
 // MemoryStore is a concurrency-safe reference Inbox implementation.
 type MemoryStore struct {
-	mu        sync.Mutex
-	records   map[string]*record
-	sequences map[gateway.SessionKey]uint64
-	now       func() time.Time
+	mu          sync.Mutex
+	records     map[string]*record
+	sequences   map[gateway.SessionKey]uint64
+	now         func() time.Time
+	maxAttempts int
 }
 
 // NewMemoryStore creates an empty Inbox store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{records: make(map[string]*record), sequences: make(map[gateway.SessionKey]uint64), now: time.Now}
+	return &MemoryStore{records: make(map[string]*record), sequences: make(map[gateway.SessionKey]uint64), now: time.Now, maxAttempts: 5}
 }
 
 // InboxID returns a deterministic tenant-scoped delivery identity.
@@ -119,13 +144,17 @@ func (store *MemoryStore) Claim(_ context.Context, message gateway.InboundMessag
 	id := InboxID(message)
 	existing := store.records[id]
 	if existing != nil {
-		if existing.claim.Status == StatusCompleted || existing.claim.Status == StatusCanceled || existing.claim.Status == StatusRejected {
+		if terminal(existing.claim.Status) {
 			return existing.claim, false, nil
 		}
 		if existing.claim.Status == StatusProcessing && now.Before(existing.claim.LeaseUntil) {
 			return existing.claim, false, nil
 		}
 		if existing.claim.Status == StatusRetry && now.Before(existing.nextAttempt) {
+			return existing.claim, false, nil
+		}
+		if existing.claim.Attempt >= store.attemptLimit() {
+			existing.claim.Status = StatusDLQ
 			return existing.claim, false, nil
 		}
 		existing.claim.Owner = owner
@@ -141,6 +170,75 @@ func (store *MemoryStore) Claim(_ context.Context, message gateway.InboundMessag
 	claim := Claim{InboxID: id, Owner: owner, ClaimToken: fmt.Sprintf("%s#1#%d", id, now.UnixNano()), Attempt: 1, InboxSeq: store.sequences[key], Status: StatusProcessing, LeaseUntil: now.Add(ttl), Message: message}
 	store.records[id] = &record{claim: claim}
 	return claim, true, nil
+}
+
+// ClaimReady reclaims due work in deterministic session order.
+func (store *MemoryStore) ClaimReady(_ context.Context, owner string, ttl time.Duration, limit int) ([]Claim, error) {
+	if owner == "" || ttl <= 0 || limit <= 0 {
+		return nil, errors.New("idempotency: owner, positive ttl, and limit are required")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	now := store.now().UTC()
+	records := make([]*record, 0, len(store.records))
+	for _, item := range store.records {
+		if ready(item, now) && item.claim.Attempt >= store.attemptLimit() {
+			item.claim.Status = StatusDLQ
+			continue
+		}
+		if ready(item, now) {
+			records = append(records, item)
+		}
+	}
+	sort.Slice(records, func(i, j int) bool {
+		left, right := records[i].claim, records[j].claim
+		if left.Message.ReceivedAt.Equal(right.Message.ReceivedAt) {
+			return left.InboxID < right.InboxID
+		}
+		return left.Message.ReceivedAt.Before(right.Message.ReceivedAt)
+	})
+	claims := make([]Claim, 0, min(limit, len(records)))
+	for _, item := range records {
+		if len(claims) == limit || store.hasEarlierNonTerminal(item.claim) {
+			continue
+		}
+		item.claim.Attempt++
+		item.claim.Owner = owner
+		item.claim.ClaimToken = claimToken(item.claim.InboxID, item.claim.Attempt, now)
+		item.claim.Status = StatusProcessing
+		item.claim.LeaseUntil = now.Add(ttl)
+		item.nextAttempt = time.Time{}
+		item.lastError = ""
+		claims = append(claims, item.claim)
+	}
+	return claims, nil
+}
+
+func (store *MemoryStore) hasEarlierNonTerminal(candidate Claim) bool {
+	key := gateway.SessionKey{TenantID: candidate.Message.TenantID, AppID: candidate.Message.AppID, UserID: candidate.Message.UserID, SessionID: candidate.Message.SessionID}
+	for _, item := range store.records {
+		other := item.claim
+		otherKey := gateway.SessionKey{TenantID: other.Message.TenantID, AppID: other.Message.AppID, UserID: other.Message.UserID, SessionID: other.Message.SessionID}
+		if otherKey == key && other.InboxSeq < candidate.InboxSeq && !terminal(other.Status) {
+			return true
+		}
+	}
+	return false
+}
+
+func ready(item *record, now time.Time) bool {
+	return item != nil && ((item.claim.Status == StatusProcessing && !item.claim.LeaseUntil.After(now)) || (item.claim.Status == StatusRetry && !item.nextAttempt.After(now)))
+}
+
+func terminal(status Status) bool {
+	return status == StatusCompleted || status == StatusCanceled || status == StatusRejected || status == StatusDLQ
+}
+
+func (store *MemoryStore) attemptLimit() int {
+	if store.maxAttempts > 0 {
+		return store.maxAttempts
+	}
+	return 5
 }
 
 // Complete marks a claim terminal only for its current owner.

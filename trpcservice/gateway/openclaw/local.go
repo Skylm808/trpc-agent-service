@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
@@ -23,6 +22,7 @@ import (
 // Production should inject SQLStore, RedisCoordinator, SQLWriteStore, and a queue.
 type LocalComponent struct {
 	server     *Server
+	poller     *worker.InboxPoller
 	dispatcher *dispatcher.Dispatcher
 	runtimes   *serviceruntime.Manager
 }
@@ -33,12 +33,13 @@ type HandlerDecorator func(*Handler, http.Handler) (http.Handler, error)
 // ComponentDependencies selects durable stores without coupling the HTTP
 // protocol package to concrete database clients.
 type ComponentDependencies struct {
-	Inbox          idempotency.Store
+	Inbox          idempotency.ReadyStore
 	Coordinator    sessioncoord.LeaseCoordinator
 	Writes         worker.PlatformStore
 	RuntimeFactory serviceruntime.Factory
 	Audit          audit.Store
 	EventBus       EventBus
+	WorkerID       string
 }
 
 // NewLocalComponent wires the complete offline HTTP -> Runner -> Outbox chain.
@@ -56,6 +57,7 @@ func NewLocalComponent(parent context.Context, address string, file *config.File
 	return NewComponent(parent, address, file, routes, ComponentDependencies{
 		Inbox: inbox, Coordinator: coordinator, Writes: writes,
 		RuntimeFactory: worker.TestRuntimeFactory(writes), Audit: audit.NewMemoryStore(redactor),
+		WorkerID: "local-worker",
 	}, decorators...)
 }
 
@@ -67,6 +69,9 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 	}
 	if dependencies.Inbox == nil || dependencies.Coordinator == nil || dependencies.Writes == nil || dependencies.RuntimeFactory == nil || dependencies.Audit == nil {
 		return nil, errors.New("openclaw: inbox, coordinator, writes, runtime factory, and audit are required")
+	}
+	if dependencies.WorkerID == "" {
+		dependencies.WorkerID = "worker"
 	}
 	runtimes, err := serviceruntime.NewManager(dependencies.RuntimeFactory)
 	if err != nil {
@@ -89,16 +94,19 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 		Approvals:          policy.NewMemoryApprovals(),
 		CostMicrosPerToken: 1, // deterministic local accounting for the mock model.
 	}
-	processor := &worker.Processor{WorkerID: "worker", Inbox: dependencies.Inbox, Coordinator: dependencies.Coordinator, Writes: dependencies.Writes, Runtimes: runtimes, Snapshots: gateway.FileSnapshotResolver{File: file}, Publisher: MultiPublisher{bus, registry}, Policy: policyEngine, Audit: dependencies.Audit, Redactor: redactor, Telemetry: telemetry}
-	var dispatch *dispatcher.Dispatcher
-	dispatch, err = dispatcher.NewWithErrorHandler(parent, processor.Process, func(ctx context.Context, request gateway.RunRequest, _ error) {
-		go retryClaim(ctx, dependencies.Inbox, dispatch, request)
-	})
+	processor := &worker.Processor{WorkerID: dependencies.WorkerID, Inbox: dependencies.Inbox, Coordinator: dependencies.Coordinator, Writes: dependencies.Writes, Runtimes: runtimes, Snapshots: gateway.FileSnapshotResolver{File: file}, Publisher: MultiPublisher{bus, registry}, Policy: policyEngine, Audit: dependencies.Audit, Redactor: redactor, Telemetry: telemetry}
+	dispatch, err := dispatcher.New(parent, processor.Process)
 	if err != nil {
 		_ = runtimes.Close(context.Background())
 		return nil, err
 	}
-	core := &Handler{Routes: routes, Inbox: dependencies.Inbox, Submitter: dispatch, Hub: bus, Status: registry, Canceler: processor, Approver: policyEngine, ClaimOwner: "gateway", Telemetry: telemetry}
+	poller, err := worker.NewInboxPoller(parent, dependencies.Inbox, dispatch, worker.InboxPollerConfig{Owner: dependencies.WorkerID + ":inbox"})
+	if err != nil {
+		_ = dispatch.Close(context.Background())
+		_ = runtimes.Close(context.Background())
+		return nil, err
+	}
+	core := &Handler{Routes: routes, Inbox: dependencies.Inbox, Submitter: dispatch, Hub: bus, Status: registry, Canceler: processor, Approver: policyEngine, ClaimOwner: dependencies.WorkerID + ":gateway", Telemetry: telemetry}
 	var handler http.Handler = core.RoutesHandler()
 	for _, decorate := range decorators {
 		if decorate == nil {
@@ -106,30 +114,13 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 		}
 		handler, err = decorate(core, handler)
 		if err != nil {
+			_ = poller.Close(context.Background())
 			_ = dispatch.Close(context.Background())
 			_ = runtimes.Close(context.Background())
 			return nil, err
 		}
 	}
-	return &LocalComponent{server: &Server{Address: address, Handler: handler}, dispatcher: dispatch, runtimes: runtimes}, nil
-}
-
-func retryClaim(ctx context.Context, inbox idempotency.Store, dispatch Submitter, request gateway.RunRequest) {
-	timer := time.NewTimer(time.Second)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return
-	case <-timer.C:
-	}
-	message := gateway.InboundMessage{TenantID: request.TenantID, AppID: request.AppID, BindingID: request.BindingID, ExternalMessageID: request.ExternalMessageID, ExternalUserID: request.ExternalUserID, ConversationID: request.ConversationID, UserID: request.UserID, SessionID: request.SessionID, Text: request.Text, TraceID: request.TraceID, ConfigVersion: request.ConfigVersion}
-	claim, won, err := inbox.Claim(ctx, message, request.ClaimOwner, 30*time.Second)
-	if err != nil || !won {
-		return
-	}
-	request.InboxID, request.InboxSeq = claim.InboxID, claim.InboxSeq
-	request.ClaimToken, request.ClaimAttempt, request.ClaimLeaseUntil = claim.ClaimToken, claim.Attempt, claim.LeaseUntil
-	_ = dispatch.Submit(request)
+	return &LocalComponent{server: &Server{Address: address, Handler: handler}, poller: poller, dispatcher: dispatch, runtimes: runtimes}, nil
 }
 
 // Start starts the local HTTP gateway.
@@ -137,5 +128,5 @@ func (component *LocalComponent) Start(ctx context.Context) error { return compo
 
 // Close drains ingress, queued requests, and Runtime Bundles in dependency order.
 func (component *LocalComponent) Close(ctx context.Context) error {
-	return errors.Join(component.server.Close(ctx), component.dispatcher.Close(ctx), component.runtimes.Close(ctx))
+	return errors.Join(component.server.Close(ctx), component.poller.Close(ctx), component.dispatcher.Close(ctx), component.runtimes.Close(ctx))
 }
