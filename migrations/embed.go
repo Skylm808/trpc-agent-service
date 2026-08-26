@@ -27,12 +27,18 @@ var inboxRecoveryUp string
 //go:embed 000004_inbox_recovery.down.sql
 var inboxRecoveryDown string
 
+//go:embed 000005_outbox_delivery.up.sql
+var outboxDeliveryUp string
+
+//go:embed 000005_outbox_delivery.down.sql
+var outboxDeliveryDown string
+
 // Up returns SQL that creates or verifies the schema.
 func Up() string {
-	return up + "\n" + messageRuntimeUp + "\n" + persistentRuntimeUp + "\n" + inboxRecoveryUp
+	return up + "\n" + messageRuntimeUp + "\n" + persistentRuntimeUp + "\n" + inboxRecoveryUp + "\n" + outboxDeliveryUp
 }
 
 // Down returns destructive SQL intended only for tests and disaster recovery.
 func Down() string {
-	return inboxRecoveryDown + "\n" + persistentRuntimeDown + "\n" + messageRuntimeDown + "\n" + down
+	return outboxDeliveryDown + "\n" + inboxRecoveryDown + "\n" + persistentRuntimeDown + "\n" + messageRuntimeDown + "\n" + down
 }

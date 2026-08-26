@@ -33,7 +33,9 @@ for file in \
   000003_persistent_runtime.up.sql \
   000003_persistent_runtime.down.sql \
   000004_inbox_recovery.up.sql \
-  000004_inbox_recovery.down.sql; do
+  000004_inbox_recovery.down.sql \
+  000005_outbox_delivery.up.sql \
+  000005_outbox_delivery.down.sql; do
   docker cp "$ROOT/migrations/$file" "$CONTAINER:/tmp/$file" >/dev/null
 done
 
@@ -46,9 +48,11 @@ up() {
   psql_file 000002_message_runtime.up.sql
   psql_file 000003_persistent_runtime.up.sql
   psql_file 000004_inbox_recovery.up.sql
+  psql_file 000005_outbox_delivery.up.sql
 }
 
 down() {
+  psql_file 000005_outbox_delivery.down.sql
   psql_file 000004_inbox_recovery.down.sql
   psql_file 000003_persistent_runtime.down.sql
   psql_file 000002_message_runtime.down.sql
@@ -66,8 +70,8 @@ if [[ "$actual_tables" != "$expected_tables" ]]; then
   exit 1
 fi
 
-expected_indexes=$'idx_derived_jobs_ready\nidx_inbox_recovery_ready\nuq_inbox_session_seq\nuq_inbox_tenant_id\nuq_message_events_tenant_inbox'
-actual_indexes="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname IN ('uq_message_events_tenant_inbox','uq_inbox_tenant_id','uq_inbox_session_seq','idx_derived_jobs_ready','idx_inbox_recovery_ready') ORDER BY indexname")"
+expected_indexes=$'idx_derived_jobs_ready\nidx_inbox_recovery_ready\nidx_outbox_delivery_ready\nuq_inbox_session_seq\nuq_inbox_tenant_id\nuq_message_events_tenant_inbox'
+actual_indexes="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname IN ('uq_message_events_tenant_inbox','uq_inbox_tenant_id','uq_inbox_session_seq','idx_derived_jobs_ready','idx_inbox_recovery_ready','idx_outbox_delivery_ready') ORDER BY indexname")"
 if [[ "$actual_indexes" != "$expected_indexes" ]]; then
   echo "missing PostgreSQL migration indexes:" >&2
   echo "$actual_indexes" >&2
@@ -80,6 +84,9 @@ postgres_port="$(docker port "$CONTAINER" 5432/tcp | sed 's/.*://')"
   TRPC_AGENT_POSTGRES_TEST_DSN="postgres://postgres:test-only@127.0.0.1:${postgres_port}/${DATABASE}?sslmode=disable" \
     GOCACHE="${GOCACHE:-/private/tmp/trpc-agent-service-postgres-gocache}" \
     go test ./trpcservice/idempotency -run TestSQLClaimReadyRecoveryConcurrencyOrderAndDLQ -count=1
+  TRPC_AGENT_POSTGRES_TEST_DSN="postgres://postgres:test-only@127.0.0.1:${postgres_port}/${DATABASE}?sslmode=disable" \
+    GOCACHE="${GOCACHE:-/private/tmp/trpc-agent-service-postgres-gocache}" \
+    go test ./trpcservice/delivery -run TestSQLStoreClaimsOutboxAcrossWorkersAndRecovers -count=1
 )
 
 down
@@ -90,4 +97,4 @@ if [[ "$remaining" != "0" ]]; then
 fi
 
 up
-echo "PostgreSQL migrations and Inbox recovery: up/up/down/up passed"
+echo "PostgreSQL migrations, Inbox recovery, and Outbox delivery: up/up/down/up passed"
