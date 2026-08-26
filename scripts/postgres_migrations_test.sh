@@ -9,7 +9,15 @@ DATABASE="trpc_agent_service"
 cleanup() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 }
+
+diagnose() {
+  local line="$1"
+  echo "PostgreSQL integration test failed near line ${line}" >&2
+  docker logs --tail 80 "$CONTAINER" >&2 || true
+}
+
 trap cleanup EXIT
+trap 'diagnose "$LINENO"' ERR
 
 docker run -d --name "$CONTAINER" \
 	-p 127.0.0.1::5432 \
@@ -17,13 +25,23 @@ docker run -d --name "$CONTAINER" \
   -e POSTGRES_DB="$DATABASE" \
   "$IMAGE" >/dev/null
 
-for _ in $(seq 1 30); do
-  if docker exec "$CONTAINER" pg_isready -U postgres -d "$DATABASE" >/dev/null 2>&1; then
+ready=false
+for _ in $(seq 1 60); do
+  # The official image briefly starts an initialization postmaster and then
+  # replaces PID 1 with the final postgres process. pg_isready alone can race
+  # that handoff on a fresh GitHub runner, so require both the final PID 1 and
+  # a successful query against the requested database.
+  if docker exec "$CONTAINER" sh -c 'test "$(cat /proc/1/comm)" = postgres' >/dev/null 2>&1 && \
+    docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c 'SELECT 1' 2>/dev/null | grep -qx 1; then
+    ready=true
     break
   fi
   sleep 1
 done
-docker exec "$CONTAINER" pg_isready -U postgres -d "$DATABASE" >/dev/null
+if [[ "$ready" != true ]]; then
+  echo "PostgreSQL did not finish initialization within 60 seconds" >&2
+  exit 1
+fi
 
 for file in \
   000001_control_plane.up.sql \
