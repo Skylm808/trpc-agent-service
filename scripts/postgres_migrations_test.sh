@@ -100,10 +100,8 @@ postgres_port="$(docker port "$CONTAINER" 5432/tcp | sed 's/.*://')"
 (
   cd "$ROOT"
   TRPC_AGENT_POSTGRES_TEST_DSN="postgres://postgres:test-only@127.0.0.1:${postgres_port}/${DATABASE}?sslmode=disable" \
-    GOCACHE="${GOCACHE:-/private/tmp/trpc-agent-service-postgres-gocache}" \
     go test ./trpcservice/idempotency -run TestSQLClaimReadyRecoveryConcurrencyOrderAndDLQ -count=1
   TRPC_AGENT_POSTGRES_TEST_DSN="postgres://postgres:test-only@127.0.0.1:${postgres_port}/${DATABASE}?sslmode=disable" \
-    GOCACHE="${GOCACHE:-/private/tmp/trpc-agent-service-postgres-gocache}" \
     go test ./trpcservice/delivery -run TestSQLStoreClaimsOutboxAcrossWorkersAndRecovers -count=1
 )
 
