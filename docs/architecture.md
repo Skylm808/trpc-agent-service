@@ -205,4 +205,4 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、租户成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、治理审计、OpenTelemetry 链路、Compose 最小部署和企业微信 Adapter。Gateway 到 Worker 的即时快速路径仍是进程内 dispatcher，但丢失的任务可由任一节点从 PostgreSQL 恢复。Telegram Adapter、Outbox 消费进程、共享预算/审批/状态及 Kubernetes manifest 仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。
+当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis 跨节点限流、治理审计、OpenTelemetry 链路、Compose 最小部署和企业微信 Adapter/Sender。Gateway 到 Worker 的即时快速路径仍是进程内 dispatcher，但丢失的任务可由任一节点从 PostgreSQL 恢复。Telegram Adapter、共享预算/审批/状态、投递异常的 Admin 运维页及 Kubernetes manifest 仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。

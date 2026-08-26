@@ -83,9 +83,14 @@ trace 或错误信息。开发组合器支持 `env` 和挂载的 `file` SecretRe
 - Inbox / queue 暂时不可用返回 `503`，让企业微信按平台策略重试；重复 `MsgId` 返回
   `200 success`，但不会再次执行。
 - `Sender` 将 `-1`、`45009`、HTTP 429 / 5xx 标为可重试；`40014`、`42001` 会先使
-  access token 失效并刷新一次。生产 Outbox consumer 根据该分类执行指数退避和 DLQ。
+  access token 失效并刷新一次。生产 Delivery Worker 根据该分类执行带稳定 jitter 的
+  指数退避和 DLQ。
 - 企业微信对同一成员有平台频率限制，且文本最长 2048 字节。Adapter 负责分片，生产
-  Outbox consumer 仍须执行租户级限流。
+  Sender 在每个分片发送前使用 Redis 对 `tenant_id + binding_id` 做跨节点限流。
+- Outbox 使用 `pending -> claimed -> sending -> sent` 两阶段投递。`claimed` 节点崩溃后
+  可以安全抢回；一旦进入 `sending`，节点失联或 HTTP 结果不确定时转为 `uncertain`，
+  禁止自动重发。长消息已经成功发送部分分片后再失败，也进入 `uncertain`，避免用户
+  收到重复片段。确定的暂时错误进入 `retry`，永久错误或重试耗尽进入 `dlq`。
 
 ## 测试
 
@@ -112,6 +117,10 @@ https://<public-host>/channels/wecom/<binding_id>
 
 ## 当前限制
 
-本 PR 提供可执行的回调 Adapter 和 Outbox Sender。生产持久化 Outbox 的轮询、claim、
-租约、发送状态 CAS 和 DLQ 进程由生产部署 PR 统一装配；开发组合器暂不把进程内 Outbox
-自动发送到真实企业微信，避免把非持久化演示行为误当成生产投递保证。
+生产组合器已经装配 PostgreSQL Outbox 轮询、`SKIP LOCKED` claim、租约续期、发送状态
+CAS、指数退避、DLQ、`uncertain` 和 Redis 跨节点限流。启用 WeCom binding 后，Agent
+生成的 Outbox 会由现有 Sender 主动发送，不再需要修改 Runner 主链路。
+
+尚未完成的是实际企业账号联调，以及 `uncertain` / DLQ 的 Admin 运维页面。图片和文件
+目前只把安全元数据交给 Agent，不会自动下载或回传媒体；后续媒体能力需要独立的大小、
+MIME 和来源校验。真实联调前应先在测试企业启用应用，并准备公网 HTTPS 回调地址。

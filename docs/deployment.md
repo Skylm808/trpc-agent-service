@@ -42,7 +42,8 @@ curl -H 'Authorization: Bearer local-secret' \
 - `TRPC_AGENT_NODE_ID`：节点唯一标识；未设置时使用 hostname，Kubernetes 推荐注入 Pod UID；
 - `DEEPSEEK_API_KEY`：DeepSeek API Key，由模型配置中的 SecretRef 引用；
 - `TRPC_AGENT_GATEWAY_TOKEN_<BINDING_ID>`：HTTP Channel token；
-- 企业微信启用后，还需要配置文件所引用的 callback token、应用 Secret 和 EncodingAESKey。
+- 企业微信启用后，还需要配置文件所引用的 `WECOM_CALLBACK_TOKEN`、`WECOM_APP_SECRET`
+  和 `WECOM_ENCODING_AES_KEY`。Delivery Worker 会自动使用应用 Secret 获取 access token。
 
 Compose 中的默认数据库密码和 HTTP token 只供本地使用。共享环境应通过 `.env`、Docker Secret 或外部密钥系统覆盖，不能提交真实值。
 
@@ -55,9 +56,13 @@ Compose 中的默认数据库密码和 HTTP token 只供本地使用。共享环
 ACK 后、执行前崩溃，重启或其他节点可恢复任务。claim 使用 `SKIP LOCKED`，同 session
 按 `inbox_seq` 执行，超过最大尝试次数进入 DLQ；旧 token 在调用模型前会被拒绝。
 
+企业微信 Outbox 已装配 PostgreSQL 多节点 claim、租约、重试、DLQ、结果不确定隔离和
+Redis 跨节点限流。Compose 中它与 Gateway/Worker 合并运行；生产可使用相同 Store 和
+Sender 将 Delivery Worker 拆成独立 Deployment。
+
 仍未生产化的部分包括：Gateway 与 Worker 独立进程之间的即时共享队列、跨节点请求状态、
-共享预算与人工审批存储，以及 Outbox claim、重试、DLQ 投递进程。当前 Outbox 只持久化为
-`pending`；真实企业微信主动回复应在 Outbox 消费进程装配后验收。
+共享预算与人工审批存储，以及 `uncertain` / DLQ 的 Admin 运维页面。真实企业微信账号、
+公网 HTTPS 回调和平台 IP 白名单仍需部署方配置。
 
 停止环境但保留数据：
 

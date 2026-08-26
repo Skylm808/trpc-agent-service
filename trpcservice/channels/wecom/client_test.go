@@ -30,6 +30,18 @@ type tokenSource struct {
 	invalidated []string
 }
 
+type limiterCounter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (limiter *limiterCounter) Wait(context.Context, gateway.OutboundMessage) error {
+	limiter.mu.Lock()
+	limiter.calls++
+	limiter.mu.Unlock()
+	return nil
+}
+
 func (source *tokenSource) Token(context.Context) (string, error) {
 	source.mu.Lock()
 	defer source.mu.Unlock()
@@ -77,7 +89,8 @@ func TestSenderSplitsUTF8AndRefreshesRejectedToken(t *testing.T) {
 		return jsonResponse(http.StatusOK, `{"errcode":0}`), nil
 	})}
 	tokens := &tokenSource{tokens: []string{"stale", "fresh"}}
-	sender := &wecom.Sender{AgentID: 1000002, Tokens: tokens, BaseURL: "https://wecom.invalid", Client: client, MaxBytes: 7}
+	limiter := &limiterCounter{}
+	sender := &wecom.Sender{AgentID: 1000002, Tokens: tokens, BaseURL: "https://wecom.invalid", Client: client, MaxBytes: 7, Limiter: limiter}
 	if err := sender.SendText(context.Background(), gateway.OutboundMessage{ExternalUserID: "alice", Text: "你好abc世界"}); err != nil {
 		t.Fatal(err)
 	}
@@ -93,6 +106,9 @@ func TestSenderSplitsUTF8AndRefreshesRejectedToken(t *testing.T) {
 	}
 	if len(tokens.invalidated) != 1 || tokens.invalidated[0] != "stale" {
 		t.Fatalf("invalidated=%v", tokens.invalidated)
+	}
+	if limiter.calls != len(contents) {
+		t.Fatalf("limiter calls=%d chunks=%d", limiter.calls, len(contents))
 	}
 }
 
@@ -118,6 +134,23 @@ func TestCredentialTokenSourceDoesNotLeakSecret(t *testing.T) {
 	source := &wecom.CredentialTokenSource{CorpID: "corp", CorpSecret: "super-secret", BaseURL: "https://wecom.invalid", Client: client}
 	_, err := source.Token(context.Background())
 	if err == nil || strings.Contains(err.Error(), "super-secret") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestSenderMarksFailureAfterFirstChunkUncertain(t *testing.T) {
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return jsonResponse(http.StatusOK, `{"errcode":0}`), nil
+		}
+		return jsonResponse(http.StatusOK, `{"errcode":45009}`), nil
+	})}
+	sender := &wecom.Sender{AgentID: 1000002, Tokens: &tokenSource{tokens: []string{"token"}}, BaseURL: "https://wecom.invalid", Client: client, MaxBytes: 3}
+	err := sender.SendText(context.Background(), gateway.OutboundMessage{ExternalUserID: "alice", Text: "abcdef"})
+	var uncertain interface{ DeliveryOutcomeUncertain() bool }
+	if !errors.As(err, &uncertain) || !uncertain.DeliveryOutcomeUncertain() {
 		t.Fatalf("error=%v", err)
 	}
 }

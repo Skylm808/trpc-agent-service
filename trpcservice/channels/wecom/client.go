@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 )
 
@@ -126,6 +127,9 @@ type APIError struct {
 
 func (err *APIError) Error() string { return fmt.Sprintf("wecom: API error code %d", err.Code) }
 
+// DeliveryRetryable exposes the definitive WeCom response classification.
+func (err *APIError) DeliveryRetryable() bool { return err != nil && err.Retryable }
+
 // Sender delivers durable Outbox text through the WeCom application API.
 type Sender struct {
 	AgentID  int64
@@ -133,6 +137,15 @@ type Sender struct {
 	BaseURL  string
 	Client   *http.Client
 	MaxBytes int
+	Limiter  channels.SendLimiter
+}
+
+// SetDeliveryLimiter installs the shared limiter used before every provider
+// API call, including each chunk of a long reply.
+func (sender *Sender) SetDeliveryLimiter(limiter channels.SendLimiter) {
+	if sender != nil {
+		sender.Limiter = limiter
+	}
 }
 
 // SendText delivers direct replies with message/send and group replies with
@@ -148,8 +161,19 @@ func (sender *Sender) SendText(ctx context.Context, outbound gateway.OutboundMes
 	if err != nil {
 		return err
 	}
-	for _, chunk := range chunks {
+	for index, chunk := range chunks {
+		if sender.Limiter != nil {
+			if err := sender.Limiter.Wait(ctx, outbound); err != nil {
+				if index > 0 {
+					return &channels.UncertainError{Cause: fmt.Errorf("wecom: partial chunk delivery: %w", err)}
+				}
+				return err
+			}
+		}
 		if err := sender.sendChunk(ctx, outbound, chunk); err != nil {
+			if index > 0 && !isUncertain(err) {
+				return &channels.UncertainError{Cause: fmt.Errorf("wecom: partial chunk delivery: %w", err)}
+			}
 			return err
 		}
 	}
@@ -213,7 +237,7 @@ func (sender *Sender) post(ctx context.Context, token string, outbound gateway.O
 	request.Header.Set("Content-Type", "application/json")
 	response, err := sender.client().Do(request)
 	if err != nil {
-		return 0, fmt.Errorf("wecom: send message: %w", err)
+		return 0, &channels.UncertainError{Cause: fmt.Errorf("wecom: send message: %w", err)}
 	}
 	defer response.Body.Close()
 	if response.StatusCode/100 != 2 {
@@ -223,7 +247,7 @@ func (sender *Sender) post(ctx context.Context, token string, outbound gateway.O
 		ErrCode int `json:"errcode"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
-		return 0, errors.New("wecom: decode send response")
+		return 0, &channels.UncertainError{Cause: errors.New("wecom: decode send response")}
 	}
 	return result.ErrCode, nil
 }
@@ -277,4 +301,9 @@ func isTokenError(code int) bool { return code == 40014 || code == 42001 }
 
 func isRetryableCode(code int) bool {
 	return code == -1 || code == 45009 || isTokenError(code) || code == http.StatusTooManyRequests || code >= 500
+}
+
+func isUncertain(err error) bool {
+	var classified channels.OutcomeClassifier
+	return errors.As(err, &classified) && classified.DeliveryOutcomeUncertain()
 }

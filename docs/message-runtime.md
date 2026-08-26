@@ -53,6 +53,10 @@ OpenClaw/IM callback
    按 `inbox_seq` 阻止同 session 后序消息越过前序消息；超过最大尝试次数后进入 DLQ。
    Processor 在调用模型或工具前再次续租并校验 claim token，因此已被其他节点接管的
    本地排队副本会直接退出，不会产生重复模型费用或工具副作用。
+7. Delivery Worker 只 claim 本节点注册了 Sender 的 tenant binding。Outbox 使用
+   `pending/claimed/sending/sent/retry/dlq/uncertain` 状态机和独立 claim token；
+   `claimed` 超时可安全恢复，`sending` 超时转为 `uncertain`，避免企业微信 API 已成功
+   但本地尚未落库时产生重复回复。发送前和每个文本分片前都经过 Redis 共享限流。
 
 ## OpenClaw 兼容 HTTP
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode"
@@ -15,6 +16,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/delivery"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway/openclaw"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -96,6 +98,7 @@ func gatewayComponent(ctx context.Context, path, address string) (trpcservice.Co
 	}
 	var bindings []openclaw.Route
 	var weComBindings []wecom.Binding
+	var deliveryRoutes []delivery.Route
 	for _, currentTenant := range file.Tenants {
 		if !currentTenant.Enabled {
 			continue
@@ -129,7 +132,19 @@ func gatewayComponent(ctx context.Context, path, address string) (trpcservice.Co
 					if err != nil {
 						return nil, fmt.Errorf("initialize WeCom binding %q: %w", binding.ID, err)
 					}
+					appSecret, err := resolveLocalSecret(binding.Secret)
+					if err != nil {
+						return nil, fmt.Errorf("resolve WeCom application secret for binding %q: %w", binding.ID, err)
+					}
+					agentID, err := strconv.ParseInt(binding.ProviderAppID, 10, 64)
+					if err != nil || agentID <= 0 {
+						return nil, fmt.Errorf("initialize WeCom binding %q: invalid AgentID", binding.ID)
+					}
 					weComBindings = append(weComBindings, wecom.Binding{TenantID: currentTenant.ID, AppID: app.ID, BindingID: binding.ID, CorpID: binding.ProviderAccountID, AgentID: binding.ProviderAppID, ConfigVersion: currentTenant.ConfigVersion, Crypt: crypt})
+					deliveryRoutes = append(deliveryRoutes, delivery.Route{
+						Binding: delivery.BindingKey{TenantID: currentTenant.ID, BindingID: binding.ID},
+						Sender:  &wecom.Sender{AgentID: agentID, Tokens: &wecom.CredentialTokenSource{CorpID: binding.ProviderAccountID, CorpSecret: appSecret}},
+					})
 				}
 			}
 		}
@@ -154,7 +169,7 @@ func gatewayComponent(ctx context.Context, path, address string) (trpcservice.Co
 			return mux, nil
 		})
 	}
-	return newDurableComponent(ctx, address, file, routes, decorators...)
+	return newDurableComponent(ctx, address, file, routes, deliveryRoutes, decorators...)
 }
 
 func resolveLocalSecret(ref tenant.SecretRef) (string, error) {
