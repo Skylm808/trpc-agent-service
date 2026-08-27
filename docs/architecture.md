@@ -1,14 +1,12 @@
 # 多租户节点化 Agent 平台架构设计
 
-> 方案提交入口（2026-08-27）。本文给出总体设计、系统架构图、核心时序、最小数据模型、同步与幂等策略、多后端方案、预期效果和实施计划。配套材料包括[完整数据模型](data-model.md)、[多节点消息运行时](message-runtime.md)、[治理与可观测性](governance.md)、[生产风险清单](risks.md)、[企业微信接入](wecom.md)和[部署说明](deployment.md)。
+> 2026-08-27 方案提交入口。正文包含架构图、核心时序、数据模型、幂等、多后端、预期效果与排期。配套材料：[数据模型](data-model.md)、[消息运行时](message-runtime.md)、[治理与可观测性](governance.md)、[风险清单](risks.md)、[企业微信](wecom.md)和[部署说明](deployment.md)。
 
 ## 1. 目标与边界
 
-这个平台解决的是 Agent 从单进程示例走向企业服务后的几个实际问题：同一套集群要承载多个租户；用户可能从企业微信、Telegram 或 HTTP 入口发消息；Worker 可以随时扩缩容；会话、记忆、知识库和审计数据不能串租户；节点重启、IM 重投和配置发布不能造成重复执行或状态倒退。
+平台面向多租户、多 IM 入口和可扩缩 Worker，解决数据隔离、节点重启、IM 重投及配置发布时的重复执行和状态倒退问题。
 
 平台以 tRPC-Agent-Go 为执行内核，复用 `runner.Runner`、LLMAgent、Tool、Session、Memory、Artifact、Knowledge、Plugin 和 OpenTelemetry 接口。租户管理、消息幂等、节点调度、fencing、配置版本、后端路由、IM 账号绑定、审计与成本治理由平台层实现。
-
-Session、Inbox、Outbox、配置和审计通过共享存储协作；Redis、PostgreSQL、向量库和对象存储由各自 Adapter 接入。
 
 ## 2. 系统拓扑
 
@@ -118,7 +116,7 @@ Agent Gateway 和 Worker 都是无状态节点，不要求负载均衡器提供 
 
 隔离规则落实在接口和数据模型中：Repository 的每个方法都显式接收 `tenant_id`；SQL 的主键、唯一键、外键和索引以租户字段开头；Runtime Bundle 的键是 `(tenant_id, app_id, config_version)`；工具在展示和执行两个阶段都经过租户策略；模型密钥、IM token 和数据库凭据只保存 `SecretRef`，运行时从 Vault、KMS 或挂载文件解析。日志与 trace 禁止记录 secret value，消息内容是否进入审计由租户的 `AuditPolicy` 决定。
 
-用户身份也不能直接采用 IM 平台给出的裸 ID。单聊用户映射为 `{channel}/{binding_id}/{external_user_id}`；群聊 session 使用 `group/{binding_id}/{conversation_id}`；单聊使用 `dm/{binding_id}/{external_user_id}`。同一人在不同群、不同绑定或不同租户中得到不同作用域，不能借助客户端提交的 `session_id` 越界读取。
+用户身份和会话身份分别生成：`user_id = {channel_type}/{binding_id}/{external_user_id}`，企业微信的 `channel_type` 是 `wecom`；单聊 `session_id` 为 `dm/{binding_id}/{external_user_id}`，群聊为 `group/{binding_id}/{conversation_id}`，thread/topic 再追加 `/thread/{thread_id}`。`tenant_id` 和 `app_id` 来自服务端绑定，客户端不能自定义 `session_id`。因此同一人在不同群、绑定或租户中不会共享会话作用域。
 
 ## 4. 消息执行链路
 
@@ -149,7 +147,7 @@ sequenceDiagram
         G-->>C: 200 success
         Q->>W: 投递请求
         W->>W: 获取 Redis lease/fencing token
-        W->>R: Run(user_id,session_id,message)
+        W->>R: model.NewUserMessage(text)<br/>Runner.Run(user_id,session_id,message)
         R->>T: 工具可见性、审批和调用
         T-->>R: Tool Result
         R-->>W: Agent Events
@@ -163,6 +161,8 @@ sequenceDiagram
 ```
 
 `trace_id` 在回调时生成或从可信上游提取，随后写入 Inbox、RunRequest、Runner context、Tool span、Session/Memory 写入、Outbox 和审计日志。`request_id` 使用租户作用域的 Inbox ID。这样一次 IM 回调即使跨过 Gateway、队列、Worker 和发送节点，仍能在 trace 中还原。
+
+Adapter 把验签后的企业微信 XML 或 Telegram JSON 转成 `InboundMessage`。Runtime Bundle 用 `model.NewUserMessage(text)` 构造输入，再调用 `Runner.Run(ctx, user_id, session_id, message, WithRequestID, WithAppName)`。Agent Event 被投影成 `RunEvent`：delta 进入 SSE，最终文本写入 Outbox。企业微信当前只异步发送分片文本；卡片和 Telegram 编辑式回复尚未实现。
 
 同一 session 的并发写由 Redis fencing token 和 PostgreSQL session head 共同约束。Worker 取得 lease 后先推进 `last_fence`；提交时必须在同一事务中检查 token，并要求 `inbox_seq = last_event_seq + 1`。暂停后恢复的旧 Worker 即使继续运行，也会因 fence 过期而无法写入。
 
@@ -182,7 +182,7 @@ sequenceDiagram
 | 平台限制 | 文本按 UTF-8 字节分片，处理成员频率限制和 token 刷新 | 处理消息长度、Bot API 429 与 `retry_after`，群组隐私模式会影响可见消息 |
 | 当前状态 | Adapter、Sender、协议测试和生产组合器已完成，待真实企业账号联调 | 完成配置模型与接口设计，Adapter/Sender 尚未实现 |
 
-企业微信实现细节见[企业微信 Channel Adapter](wecom.md)。Telegram 后续只新增协议适配和 Sender，租户解析、canonical identity、Inbox/Outbox、Runner 与审计链路保持不变。
+企业微信的图片、文件和未识别语音转成元数据占位文本，不自动下载 `media_id`。撤回等事件只确认接收，不触发 Runner；未来若同步撤回状态，应追加 tombstone event，已发生的 Tool 副作用不能自动撤销。实现细节见[企业微信 Channel Adapter](wecom.md)。Telegram 后续只新增协议 Adapter 和 Sender，其他主链路不变。
 
 ## 5. 最小数据模型
 
@@ -204,11 +204,15 @@ sequenceDiagram
 
 Session/Event 的事实记录在 PostgreSQL 事务中提交。Summary、Memory、Knowledge 和 Artifact 是从已提交 event 派生的投影：投影失败不会回滚事实事件，而是保留任务和 checkpoint 后重试。这一划分避免向量库或对象存储的短暂故障拖住主会话事务。
 
+PostgreSQL Memory 提交后对其他 Worker 可见；外部 Memory 和向量索引采用最终一致，并用 source event、checkpoint 与索引水位跟踪进度。当前 turn 直接使用 Runner event，不等待异步投影。
+
 ## 6. 多后端适配
 
 平台使用按数据域拆分的 Adapter，不设计一个包办所有后端的通用 KV 接口。Session 需要顺序和事务，Knowledge 需要向量召回，Artifact 需要大对象读写；强行统一会丢失各后端真正需要的语义。
 
-租户配置发布后，`StorageRouter` 根据 `(tenant_id, app_id, config_version)` 生成不可变的 `StorageBundle`。Bundle 暴露按数据域区分的接口，业务代码不直接依赖 PostgreSQL、Redis 或某个向量库 SDK：
+`StorageRouter/StorageBundle` 是目标契约，不是现有 Go 类型。当前代码由 `storage.NewPostgres` 构造 `storage.Services`，向 Runner 注入 Session、Memory 和 Artifact；Event、Summary/Memory 投影、Outbox 与 Audit 使用各自 SQL Store。后续接入其他后端时，再收敛到按 `(tenant_id, app_id, config_version)` 选择实现的路由层。
+
+目标接口如下，业务代码不应直接依赖 PostgreSQL、Redis 或某个向量库 SDK：
 
 | 接口 | 最小能力 | 必须保留的语义 |
 | --- | --- | --- |
@@ -244,7 +248,18 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 
 配置灰度以租户或 App 为单位。新版本发布后，新消息固定进入新 Bundle，旧请求继续持有旧 Bundle lease，直到执行结束才关闭。回滚仍发布新配置版本。容量评估以四组数据为准：IM 回调峰值、每节点活跃 Runner 数、平均/高分位 token 与工具耗时、PostgreSQL/Redis/向量库 QPS。扩容信号优先看队列等待时间和 Outbox backlog，而不是只看 CPU。
 
-生产风险及缓解措施见 [生产风险清单](risks.md)。
+主链路上线前优先处理以下风险；完整的 17 项清单、监测项和演练方法见[生产风险清单](risks.md)。
+
+| 编号 | 生产风险 | 主要缓解措施 |
+| --- | --- | --- |
+| R1 | 旧 Worker 越权写入 | Redis fencing；PostgreSQL 校验 `last_fence` |
+| R2 | IM 重投触发重复执行 | Inbox 唯一键；仅首次 claim 入队 |
+| R4 | 数据库故障或热点锁竞争 | 有界超时、连接池限额、顺序消费和积压告警 |
+| R6 | 模型/Tool 卡住 goroutine | 传播 context、Cancel、有界排空 event channel |
+| R8 | IM 超时、限流或超长 | 快速 ACK；Outbox 分片、限流、退避、DLQ |
+| R9 | 密钥泄漏 | 只存 `SecretRef`；日志、trace、错误脱敏 |
+| R10 | 查询遗漏租户条件 | tenant 参数、复合键、向量 filter、双租户测试 |
+| R15 | 已发送但状态未落库 | 两阶段状态；未知结果进入 `uncertain` |
 
 ## 8. 部署方案
 
@@ -266,7 +281,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 
 ## 10. 预期效果与时间规划
 
-方案落地后，Gateway 和 Worker 可以独立扩容，同一用户不需要固定落到某台 Worker。IM 重投只生成一条 Inbox，旧 Worker 不能越过 fencing token 覆盖新状态；配置、Session、Memory、工具权限、密钥和审计记录都受租户边界约束。运维人员可以用同一个 `trace_id` 关联 IM 回调、模型、Tool、Session/Memory 和回复投递，并按租户统计 token、成本和错误率。
+目标是让 Gateway/Worker 无状态扩容，IM 重投不重复执行，旧 Worker 不能覆盖新状态。配置、数据、工具和密钥按租户隔离；`trace_id` 串起回调、模型、Tool、存储与回复，并支持租户成本统计。
 
 验收时使用以下结果判断链路是否成立：
 
@@ -288,4 +303,4 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | T2：第二通道与跨节点实时调度 | T0 后 3–5 个工作日 | Telegram Adapter/Sender、共享 command/event bus、跨节点 cancel/status | 规划中 |
 | T3：生产运维补强 | T0 后 5–8 个工作日 | Kubernetes manifests、共享预算/审批、DLQ/uncertain 管理接口、容量压测 | 规划中 |
 
-时间估算从依赖就绪时开始计算。企业微信管理员权限、公网域名、TLS 证书或平台审核造成的等待不计入开发工时。
+时间从依赖就绪后计算，不含企业微信权限、公网域名、TLS 证书或平台审核等待。
