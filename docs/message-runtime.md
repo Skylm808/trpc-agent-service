@@ -1,4 +1,4 @@
-# PR4/PR5：多节点消息运行时与 OpenClaw-compatible durable HTTP Gateway
+# 多节点消息运行时：数据同步与幂等
 
 ## 组件边界
 
@@ -57,6 +57,10 @@ OpenClaw/IM callback
    `pending/claimed/sending/sent/retry/dlq/uncertain` 状态机和独立 claim token；
    `claimed` 超时可安全恢复，`sending` 超时转为 `uncertain`，避免企业微信 API 已成功
    但本地尚未落库时产生重复回复。发送前和每个文本分片前都经过 Redis 共享限流。
+8. PostgreSQL Memory 写入在事务提交后对所有节点可见；当前请求以内存中的 Runner event
+   继续执行，不依赖异步投影做 read-your-writes。外部 Memory 服务或向量索引允许最终一致，
+   派生任务记录 source event 和 checkpoint；新节点只有在索引水位达到所需 event 后才把该
+   版本视为已同步，超时则降级为读取 PostgreSQL 事实或暂不召回。
 
 ## OpenClaw 兼容 HTTP
 
@@ -91,7 +95,7 @@ OpenClaw/IM callback
 
 ## 当前协议范围
 
-DTO 保留 `content_parts`、图片/文件 URL、model 和 extensions，PR5 的可执行输入仅接受
-文本。真正的企业微信/Telegram Adapter 应先验签，再转换成相同 `InboundMessage`；
-出站层从 Outbox 做平台长度切片、限流、失败退避和 DLQ。HTTP 层不会把图片/文件 URL
-直接交给模型或工具，以免形成 SSRF 通道。
+DTO 保留 `content_parts`、图片/文件 URL、model 和 extensions，当前 HTTP 可执行输入仅接受
+文本。Channel Adapter 先完成各平台的验签和身份解析，再转换成相同的 `InboundMessage`；
+企业微信 Adapter 已实现，Telegram Adapter 仍在规划中。出站层从 Outbox 做平台长度切片、
+限流、失败退避和 DLQ。HTTP 层不会把图片/文件 URL 直接交给模型或工具，以免形成 SSRF 通道。

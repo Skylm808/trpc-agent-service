@@ -1,4 +1,4 @@
-# PR6：租户治理、审计与可观测性
+# 租户治理、审计与可观测性
 
 运行时固定执行以下链路：binding 凭证认证、租户路由、canonical identity、Inbox
 幂等 claim、身份/预算校验、工具可见性、工具执行与审批、输出脱敏、租户审计。
@@ -26,3 +26,22 @@ lease、Runner、model stream、Tool、Session、Summary/Memory 和 Outbox。met
 tenant、app、channel、operation、status；request/user/session/message ID 只允许进入
 trace/audit。默认与 tenant redactor 会处理日志、SSE error、Inbox last_error、回复和
 审计 details，tRPC-Agent-Go 的上下文 logger 也在 Bundle 构建时安装脱敏包装。
+
+## 监控指标
+
+| 指标 | 建议维度 | 用途 |
+| --- | --- | --- |
+| `agent_requests_total`, `agent_errors_total` | tenant, app, channel, status | 请求量、租户错误率和灰度判断 |
+| `model_first_token_seconds`, `model_duration_seconds` | tenant, app, provider, model, status | 模型首包与完整调用耗时 |
+| `tool_duration_seconds`, `tool_calls_total` | tenant, app, tool, decision, status | Tool 性能、拒绝和审批比例 |
+| `im_callback_seconds`, `im_delivery_total` | tenant, channel, binding, status | 回调耗时、投递成功率和平台限流 |
+| `model_tokens_total`, `tenant_cost_micros_total` | tenant, app, provider, model | token 消耗、预算和租户成本 |
+| `storage_operation_seconds` | tenant, domain, backend, operation, status | Session/Memory/Storage 后端延迟 |
+| `inbox_backlog`, `outbox_backlog`, `dlq_total` | tenant, channel, status | 排队、投递和故障恢复状态 |
+| `stale_fence_rejections_total` | tenant, app | 检测 lease 转移和旧 Worker 写入 |
+
+`binding_id` 只有在绑定数量受控时才能作为 metrics 标签，否则只进入 trace。延迟指标使用 histogram，并按部署基线设置 p95/p99 告警；错误率、队列等待和成本同时按租户及全局聚合。
+
+## 审计字段
+
+每条审计记录至少包含 `tenant_id`、`channel`、`user_id`、`session_id`、`agent_name`、`tool_name`、`decision`、`latency_ms`、`error_type`、`cost` 和 `trace_id`，并建议保留 `request_id`、`event_id`、`config_version`、`policy_version` 与脱敏后的 `details_json`。密钥、Authorization header、Cookie、模型原始请求及未获授权的消息正文不得写入日志、trace 或错误报告。

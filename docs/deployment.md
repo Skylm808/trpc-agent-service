@@ -64,6 +64,18 @@ Sender 将 Delivery Worker 拆成独立 Deployment。
 共享预算与人工审批存储，以及 `uncertain` / DLQ 的 Admin 运维页面。真实企业微信账号、
 公网 HTTPS 回调和平台 IP 白名单仍需部署方配置。
 
+## 容量估算
+
+容量评估先用压测取得单次请求的模型等待时间、Tool 耗时、token 用量和数据库操作数，再按峰值而不是日均流量计算。单节点并发上限取以下约束中的最小值：Runner 内存/CPU 上限、模型 Provider 并发额度、Tool 连接池、PostgreSQL 连接池和租户限流额度。建议从 60% 目标利用率起步，给模型长尾和节点迁移预留余量。
+
+- 活跃 Runner 约等于 `峰值请求每秒 × p95 完整执行秒数`；再按租户预算和节点数分配。
+- 模型 token 吞吐约等于 `峰值请求每秒 × 每请求 p95 token`，输入和输出分别统计。
+- PostgreSQL QPS 按每个 turn 的 Inbox claim、Session/Event 事务、投影、Outbox 和审计写入次数估算，并单独压测热点 session 的行锁等待。
+- Redis QPS 至少包含 lease acquire/renew/release、fencing `INCR`、限流和 event bus；lease 续期间隔会明显放大 QPS。
+- IM 容量使用平台回调峰值、单账号发送额度和 Outbox backlog 估算，不能只看 Gateway HTTP 吞吐。
+
+扩容优先观察 queue wait、活跃 Runner、数据库连接池等待和 Outbox backlog。CPU 很低但模型请求大量等待时，仍可能需要增加 Worker；反过来，Provider 配额已经饱和时继续扩 Worker 不会提高吞吐。
+
 停止环境但保留数据：
 
 ```bash

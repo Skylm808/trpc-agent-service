@@ -1,6 +1,6 @@
 # 文档目录
 
-- [总体架构设计](architecture.md)：系统拓扑、核心时序、多租户隔离、多后端和框架边界。
+- [总体架构设计（方案提交入口）](architecture.md)：系统拓扑、核心时序、最小数据模型、多后端、预期效果和时间规划。
 - [生产风险清单](risks.md)：17 项生产风险、缓解措施和演练方法。
 - [数据模型](data-model.md)：PostgreSQL 表、配置版本和迁移约束。
 - [多节点消息运行时](message-runtime.md)：Inbox、fencing、提交顺序和 Outbox。

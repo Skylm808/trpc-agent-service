@@ -1,4 +1,4 @@
-# PR7：企业微信 Channel Adapter
+# 企业微信 Channel Adapter
 
 ## 交付边界
 

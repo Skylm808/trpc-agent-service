@@ -1,58 +1,67 @@
-# Data model
+# 数据模型设计
 
-PostgreSQL is the production control-plane system of record. Every primary key,
-unique key, foreign-key path, and operational index starts with `tenant_id`.
-Process-local test doubles are not storage backends and must not be selected by
-a production composition.
+PostgreSQL 是控制面和会话事实数据的系统记录（system of record）。所有业务主键、唯一键、外键路径和运维索引都以 `tenant_id` 开头；进程内测试替身不属于生产存储选项。
 
-`tenants.current_config_version` is the optimistic publication head.
-`config_versions` is immutable: publishing uses a row lock and compare-and-swap;
-rollback copies an old payload into a new version. Secret values are never
-stored in configuration payloads—only `SecretRef` provider/key pairs are.
+## 实体关系
 
-The runtime data model is event-oriented:
-
-```
-tenant -> agent_app -> session_head -> message_event
+```text
+tenant -> config_version
+       -> agent_app -> session_head -> message_event
                     |                -> session_summary(cutoff_event_seq)
                     -> memory_entry(source_event_seq, stable memory_id)
-channel_binding -> inbox_message -> outbox_message
+channel_binding -> identity_mapping
+                -> inbox_message -> outbox_message
 tenant -> audit_log
 tenant -> migration_job
 ```
 
-`000003_persistent_runtime` pins the PostgreSQL table contract used by the
-tRPC-Agent-Go v1.11.0 Session and Memory adapters and adds
-`runtime_artifacts` plus `runtime_knowledge_documents`. Runtime adapters start
-with database initialization disabled; schema changes are owned by the
-standalone migration command. Artifact revisions use
-`(tenant_id, app_id, user_id, session_id, filename, revision)` as the primary
-key. Canonical `app_name` includes tenant and App scope. The knowledge table is
-a reserved persistence contract; a Knowledge repository and Runner wiring are
-not part of this minimum executable path.
+`tenants.current_config_version` 是配置发布头。发布时锁定租户记录并比较 expected version，只有一个并发请求能够成功；`config_versions` 写入后不可修改。回滚会复制旧 payload 并创建新版本，不覆盖历史记录。配置正文只保存 `SecretRef` 的 provider/key，不保存模型 API key、IM token 或数据库密码。
 
-`session_heads.last_event_seq`, `last_fence`, and `state_version` are the CAS
-coordinates used by PR4. A future fenced writer must update the head, append the
-event, and publish its state delta in one transaction. Summary jobs may only
-replace a summary when their cutoff is newer. Memory writes use the stable
-`memory_id` plus tenant/user/app and the source event unique key for idempotency.
+## 最小逻辑表
 
-Inbox uniqueness is `(tenant_id, binding_id, external_message_id)`. Outbox
-uniqueness is `(tenant_id, dedupe_key)`. Audit rows contain channel, user,
-session, agent, tool, decision, latency, error, cost, and trace correlation.
+下表省略了通用时间戳和部分错误字段。实际 DDL 以 [`000001_control_plane.up.sql`](../migrations/000001_control_plane.up.sql)及后续增量迁移为准。
 
-The down migration is destructive and is intended for tests or an explicitly
-approved disaster-recovery procedure, never routine production rollback.
+| 表 | 最小字段 | 主键、唯一键与用途 |
+| --- | --- | --- |
+| `tenants` | `tenant_id`, `name`, `enabled`, `current_config_version` | PK `tenant_id`；配置发布头在此做 CAS |
+| `config_versions` | `tenant_id`, `version`, `config_yaml`, `config_sha256`, `status`, `rolled_back_from`, `created_by` | PK `(tenant_id, version)`；版本不可原地修改 |
+| `agent_apps` | `tenant_id`, `app_id`, `name`, `enabled`, `config_version` | PK `(tenant_id, app_id)`；关联同租户配置版本 |
+| `channel_bindings` | `tenant_id`, `app_id`, `binding_id`, `channel_type`, `provider_account_id`, `config_version` | PK `(tenant_id, binding_id)`；账号在租户/通道内唯一 |
+| `identity_mappings` | `tenant_id`, `binding_id`, `external_user_id`, `internal_user_id` | PK `(tenant_id, binding_id, external_user_id)` |
+| `session_heads` | `tenant_id`, `app_id`, `user_id`, `session_id`, `last_event_seq`, `last_fence`, `state_version`, `state_json` | PK `(tenant_id, app_id, user_id, session_id)`；保存顺序和 CAS 坐标 |
+| `message_events` | `tenant_id`, `app_id`, `user_id`, `session_id`, `event_id`, `inbox_id`, `event_seq`, `event_type`, `payload_json`, `state_delta_json`, `trace_id` | PK 以 session 和 `event_seq` 组成；`event_id`、`inbox_id` 在租户内唯一 |
+| `session_summaries` | `tenant_id`, `app_id`, `user_id`, `session_id`, `summary_version`, `cutoff_event_seq`, `content`, `metadata_json`, `status` | version 与 cutoff 分别唯一，用于摘要 CAS |
+| `memory_entries` | `tenant_id`, `app_id`, `user_id`, `memory_id`, `source_session_id`, `source_event_id`, `source_event_seq`, `version`, `content`, `metadata_json`, `status` | 稳定 memory ID；source event 在用户/App 作用域内唯一 |
+| `inbox_messages` | `tenant_id`, `binding_id`, `external_message_id`, `inbox_id`, `inbox_seq`, `session_id`, `config_version`, `status`, `attempts`, `next_attempt_at`, `trace_id` | 外部消息唯一键吸收 IM 重投；session seq 唯一 |
+| `outbox_messages` | `tenant_id`, `outbox_id`, `dedupe_key`, `binding_id`, `session_id`, `source_inbox_id`, `source_event_id`, `status`, `attempts`, `retry_at`, `payload_json` | PK `(tenant_id, outbox_id)`；UNIQUE `(tenant_id, dedupe_key)`；trace 通过来源事件和 payload 关联 |
+| `audit_logs` | `tenant_id`, `audit_id`, `channel`, `user_id`, `session_id`, `agent_name`, `tool_name`, `decision`, `latency_ms`, `error_type`, `cost`, `trace_id` | PK `(tenant_id, audit_id)`；按 tenant/trace/time 查询 |
+| `migration_jobs` | `tenant_id`, `job_id`, `app_id`, `domain`, `source_backend`, `target_backend`, `status`, `cursor_json`, `checkpoint_json`, `lease_owner`, `last_error` | PK `(tenant_id, job_id)`；checkpoint 支持断点续传 |
 
-The minimal Admin HTTP surface is mounted by `admin.Handler`:
+表之间不使用裸 `app_id`、`session_id` 或外部用户 ID 关联。应用、绑定、会话和事件的外键路径都带 `tenant_id`，Repository 方法也显式接收租户参数，因此两个租户可以安全使用相同的业务 ID。
+
+## 事件、状态和投影
+
+`message_events` 是平台会话事实流，`session_heads` 保存当前序号、fencing token 和 state 版本。一次 turn 在同一 PostgreSQL 事务中校验 `last_fence`、推进 head、追加 event 并更新 state。只有 `inbox_seq = last_event_seq + 1` 才能提交，乱序请求退避后重试。
+
+Summary、Memory、Knowledge 和 Artifact 是从已提交 event 派生的投影。Summary 使用 `(summary_version, cutoff_event_seq)` CAS，只接受更新的截断位置；Memory 使用 source event 唯一键去重。Knowledge 索引、Artifact 对象和外部 Memory 可以异步生成，但必须保存租户、来源 event 和版本，失败后从 checkpoint 重试。派生后端不可用时不会撤销已经提交的事实事件。
+
+Inbox 和 Outbox 分别处理入站与出站幂等。Inbox 唯一键是 `(tenant_id, binding_id, external_message_id)`；Outbox 唯一键是 `(tenant_id, dedupe_key)`。发送结果不确定时记录为 `uncertain`，不能把未知结果当作普通失败立即重发。
+
+## tRPC-Agent-Go 运行时表
+
+`000003_persistent_runtime` 固定 tRPC-Agent-Go PostgreSQL Session/Memory Adapter 的表契约，并增加 `runtime_artifacts` 与 `runtime_knowledge_documents`。平台表负责 Inbox、fencing、审计和可恢复执行；`runtime_session_*`、`runtime_memories` 保存 Runner 使用的具体状态。两组表职责不同，但都使用 canonical `app_name` 或显式 tenant/app 字段保持租户作用域。
+
+Artifact revision 的主键是 `(tenant_id, app_id, user_id, session_id, filename, revision)`。Knowledge 表目前只保留持久化契约，向量检索 Repository 和 Runner 装配不属于当前最小可执行链路。
+
+运行时 Adapter 关闭自动建表，所有 schema 变化由独立 migration 命令管理。CI 会在临时 PostgreSQL 16 中验证首次 up、重复 up、down、空 schema 和再次 up。down migration 会删除数据，只能用于测试或经过审批的灾备流程，不能作为日常生产回滚手段。
+
+## Admin 配置接口
+
+控制面的最小 HTTP 接口是：
 
 - `POST /v1/tenants/{tenant}/configs/validate`
 - `POST /v1/tenants/{tenant}/configs/publish?expected_version=N`
 - `GET /v1/tenants/{tenant}/configs`
 - `POST /v1/tenants/{tenant}/configs/rollback?expected_version=N&target_version=M`
 
-It deliberately does not implement authentication. A deployment must put the
-handler behind an authenticated tenant-scoping middleware before exposing it.
-The unit contract tests verify required schema clauses. CI also runs
-`scripts/postgres_migrations_test.sh` against ephemeral PostgreSQL 16 and
-verifies first up, repeated up, down, an empty public schema, and up again.
+Handler 本身不实现最终用户认证。部署时必须在外层加入认证和 tenant-scoping middleware，不能把 Admin API 直接暴露到公网。
