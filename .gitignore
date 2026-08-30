@@ -18,3 +18,5 @@ vendor/
 
 data/*
 !data/README.md
+
+configs/local.yaml

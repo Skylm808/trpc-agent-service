@@ -53,7 +53,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./configs/example.yaml:/etc/trpc-agent/config.yaml:ro
+      - ${TRPC_CONFIG_FILE:-./configs/example.yaml}:/etc/trpc-agent/config.yaml:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
       interval: 5s
