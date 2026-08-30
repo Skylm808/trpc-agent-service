@@ -47,7 +47,7 @@ func (store *SQLStore) PublishConfig(ctx context.Context, record ConfigRecord, e
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now().UTC()
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO config_versions (tenant_id, version, config_yaml, config_sha256, rolled_back_from, created_at) VALUES ($1,$2,$3,$4,$5,$6)`, record.TenantID, record.Version, record.Payload, record.SHA256, rollback, record.CreatedAt)
+	_, err = tx.ExecContext(ctx, `INSERT INTO config_versions (tenant_id, version, config_yaml, config_sha256, rolled_back_from, created_by, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`, record.TenantID, record.Version, record.Payload, record.SHA256, rollback, record.CreatedBy, record.CreatedAt)
 	if err != nil {
 		return ConfigRecord{}, fmt.Errorf("repository: insert config: %w", err)
 	}
@@ -88,7 +88,7 @@ func (store *SQLStore) PublishConfig(ctx context.Context, record ConfigRecord, e
 
 // ListConfigVersions lists only the requested tenant's versions.
 func (store *SQLStore) ListConfigVersions(ctx context.Context, tenantID string) ([]ConfigRecord, error) {
-	rows, err := store.db.QueryContext(ctx, `SELECT tenant_id, version, config_yaml, config_sha256, rolled_back_from, created_at FROM config_versions WHERE tenant_id=$1 ORDER BY version DESC`, tenantID)
+	rows, err := store.db.QueryContext(ctx, `SELECT tenant_id, version, config_yaml, config_sha256, rolled_back_from, created_by, created_at FROM config_versions WHERE tenant_id=$1 ORDER BY version DESC`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("repository: list configs: %w", err)
 	}
@@ -97,13 +97,15 @@ func (store *SQLStore) ListConfigVersions(ctx context.Context, tenantID string) 
 	for rows.Next() {
 		var record ConfigRecord
 		var rollback sql.NullInt64
-		if err := rows.Scan(&record.TenantID, &record.Version, &record.Payload, &record.SHA256, &rollback, &record.CreatedAt); err != nil {
+		var createdBy sql.NullString
+		if err := rows.Scan(&record.TenantID, &record.Version, &record.Payload, &record.SHA256, &rollback, &createdBy, &record.CreatedAt); err != nil {
 			return nil, fmt.Errorf("repository: scan config: %w", err)
 		}
 		if rollback.Valid {
 			value := tenant.ConfigVersion(rollback.Int64)
 			record.RolledBackFrom = &value
 		}
+		record.CreatedBy = createdBy.String
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
@@ -116,7 +118,8 @@ func (store *SQLStore) ListConfigVersions(ctx context.Context, tenantID string) 
 func (store *SQLStore) GetConfigVersion(ctx context.Context, tenantID string, version tenant.ConfigVersion) (ConfigRecord, error) {
 	var record ConfigRecord
 	var rollback sql.NullInt64
-	err := store.db.QueryRowContext(ctx, `SELECT tenant_id, version, config_yaml, config_sha256, rolled_back_from, created_at FROM config_versions WHERE tenant_id=$1 AND version=$2`, tenantID, version).Scan(&record.TenantID, &record.Version, &record.Payload, &record.SHA256, &rollback, &record.CreatedAt)
+	var createdBy sql.NullString
+	err := store.db.QueryRowContext(ctx, `SELECT tenant_id, version, config_yaml, config_sha256, rolled_back_from, created_by, created_at FROM config_versions WHERE tenant_id=$1 AND version=$2`, tenantID, version).Scan(&record.TenantID, &record.Version, &record.Payload, &record.SHA256, &rollback, &createdBy, &record.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ConfigRecord{}, ErrNotFound
 	}
@@ -127,5 +130,22 @@ func (store *SQLStore) GetConfigVersion(ctx context.Context, tenantID string, ve
 		value := tenant.ConfigVersion(rollback.Int64)
 		record.RolledBackFrom = &value
 	}
+	record.CreatedBy = createdBy.String
 	return record, nil
+}
+
+// GetCurrentConfig returns the tenant head with tenant scope in the predicate.
+func (store *SQLStore) GetCurrentConfig(ctx context.Context, tenantID string) (ConfigRecord, error) {
+	var version tenant.ConfigVersion
+	err := store.db.QueryRowContext(ctx, `SELECT current_config_version FROM tenants WHERE tenant_id=$1`, tenantID).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ConfigRecord{}, ErrNotFound
+	}
+	if err != nil {
+		return ConfigRecord{}, fmt.Errorf("repository: read tenant head: %w", err)
+	}
+	if version == 0 {
+		return ConfigRecord{}, ErrNotFound
+	}
+	return store.GetConfigVersion(ctx, tenantID, version)
 }

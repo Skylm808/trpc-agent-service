@@ -14,10 +14,15 @@ import (
 
 const callbackPathPrefix = "/channels/wecom/"
 
+// BindingProvider resolves one enabled callback binding at request time, so
+// control-plane publishes and disables take effect without a restart.
+type BindingProvider func(bindingID string) (Binding, bool)
+
 // Handler verifies WeCom callbacks and hands normalized messages to the shared
 // durable ingress pipeline. It never waits for Agent execution.
 type Handler struct {
 	bindings map[string]Binding
+	provider BindingProvider
 	acceptor gateway.InboundAcceptor
 	now      func() time.Time
 }
@@ -41,6 +46,14 @@ func NewHandler(acceptor gateway.InboundAcceptor, bindings ...Binding) (*Handler
 		return nil, errors.New("wecom: at least one binding is required")
 	}
 	return handler, nil
+}
+
+// NewDynamicHandler resolves bindings per callback from the control plane.
+func NewDynamicHandler(acceptor gateway.InboundAcceptor, provider BindingProvider) (*Handler, error) {
+	if acceptor == nil || provider == nil {
+		return nil, errors.New("wecom: inbound acceptor and binding provider are required")
+	}
+	return &Handler{provider: provider, acceptor: acceptor, now: time.Now}, nil
 }
 
 // ServeHTTP implements GET callback verification and POST message receipt.
@@ -72,6 +85,9 @@ func (handler *Handler) binding(path string) (Binding, bool) {
 	bindingID, err := url.PathUnescape(raw)
 	if err != nil {
 		return Binding{}, false
+	}
+	if handler.provider != nil {
+		return handler.provider(bindingID)
 	}
 	binding, ok := handler.bindings[bindingID]
 	return binding, ok

@@ -42,6 +42,7 @@ type RunRequest struct {
 // OutboundMessage is a durable reply awaiting channel delivery.
 type OutboundMessage struct {
 	TenantID, AppID, BindingID   string
+	ConfigVersion                tenant.ConfigVersion
 	OutboxID, DedupeKey          string
 	UserID, SessionID            string
 	ExternalUserID               string

@@ -26,6 +26,7 @@ type ConfigRecord struct {
 	SHA256         string
 	RolledBackFrom *tenant.ConfigVersion
 	Apps           []tenant.AgentApp
+	CreatedBy      string
 	CreatedAt      time.Time
 }
 
@@ -34,6 +35,8 @@ type Store interface {
 	PublishConfig(ctx context.Context, record ConfigRecord, expected tenant.ConfigVersion) (ConfigRecord, error)
 	ListConfigVersions(ctx context.Context, tenantID string) ([]ConfigRecord, error)
 	GetConfigVersion(ctx context.Context, tenantID string, version tenant.ConfigVersion) (ConfigRecord, error)
+	// GetCurrentConfig returns the tenant's published head version.
+	GetCurrentConfig(ctx context.Context, tenantID string) (ConfigRecord, error)
 }
 
 func cloneRecord(record ConfigRecord) ConfigRecord {

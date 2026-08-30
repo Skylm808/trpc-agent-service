@@ -2,7 +2,7 @@
 
 ## 最小可运行环境
 
-根目录的 `docker-compose.yml` 启动四个组件：PostgreSQL、Redis、一次性 migration 和合并部署的 Gateway/Worker。服务启动时会把 `configs/example.yaml` 中的租户、App 和 Channel Binding 写入控制面表；配置文件版本和数据库已发布版本不一致时拒绝启动，避免节点使用未发布配置。
+根目录的 `docker-compose.yml` 启动四个组件：PostgreSQL、Redis、一次性 migration 和合并部署的 Gateway/Worker。服务启动时把 `configs/example.yaml` 当作**种子**：租户在控制面还没有任何已发布版本时才写入 version 1；一旦通过 Admin API 发布过新版本，数据库就是唯一事实源，重启不再校验文件与数据库一致，也不要求重建环境。启动文件中的版本号超过数据库已发布版本时拒绝启动，避免节点使用未发布配置。
 
 首次启动前执行 `cp .env.example .env`，然后只在本机 `.env` 中填写
 `DEEPSEEK_API_KEY`。生产 Runtime 使用 tRPC-Agent-Go 的 OpenAI-compatible Model
@@ -33,6 +33,22 @@ curl -H 'Authorization: Bearer local-secret' \
 
 这条链路实际使用 PostgreSQL 保存 Inbox、tRPC-Agent-Go Session/Memory、平台 Event/Summary/Memory 投影、Artifact、Outbox 和 Audit；Redis 负责 lease、fencing token 和 SSE 事件总线。同一个 `message_id` 再次发送会命中 PostgreSQL 唯一键并返回 `duplicate=true`。
 
+## 配置发布（PR9 生产控制面）
+
+Admin API 与 Gateway 共用 HTTP 端口，所有 `/v1/tenants/{tenant_id}/configs*` 请求必须携带
+`TRPC_AGENT_ADMIN_TOKENS` 中配置的 Bearer 凭据，且凭据的租户 scope 必须覆盖 URL 中的租户
+（格式：`名称=令牌:租户-a,租户-b;ops=令牌2:*`；未配置时拒绝一切请求）。支持
+`validate`、`publish`（`expected_version` 乐观锁）、`list`、`current` 和 `rollback`
+（`expected_version` + `target_version`）。发布和回滚都创建新的不可变版本并写审计日志；
+响应只含版本元数据，不包含配置原文或 SecretRef 解析值。
+
+发布后无需 `docker compose down -v`、无需删除数据卷、无需修改启动文件：入站路由、
+企业微信回调绑定、Runtime 快照和出站 Delivery Sender 都从控制面数据库解析。新请求
+立即使用新版本 Bundle，处理中的请求和它产生的 Outbox 回复继续使用入口钉住的旧版本，
+旧 Bundle 在引用归零后被 drain 和 Close；disabled 租户、App 或 Binding 从下一个请求起
+被拒绝。新版本 Bundle 初始化失败时，该节点继续使用上一份成功激活的 Bundle，并在后续
+请求中重试初始化。
+
 ## 配置和密钥
 
 直接运行二进制需要设置：
@@ -42,6 +58,7 @@ curl -H 'Authorization: Bearer local-secret' \
 - `TRPC_AGENT_NODE_ID`：节点唯一标识；未设置时使用 hostname，Kubernetes 推荐注入 Pod UID；
 - `DEEPSEEK_API_KEY`：DeepSeek API Key，由模型配置中的 SecretRef 引用；
 - `TRPC_AGENT_GATEWAY_TOKEN_<BINDING_ID>`：HTTP Channel token；
+- `TRPC_AGENT_ADMIN_TOKENS`：Admin API 管理员凭据（`名称=令牌:租户列表`，`;` 分隔，`*` 表示全部租户）；未配置时 Admin API 拒绝一切请求；
 - 企业微信启用后，还需要配置文件所引用的 `WECOM_CALLBACK_TOKEN`、`WECOM_APP_SECRET`
   和 `WECOM_ENCODING_AES_KEY`。Delivery Worker 会自动使用应用 Secret 获取 access token。
 

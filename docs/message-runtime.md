@@ -97,5 +97,5 @@ OpenClaw/IM callback
 
 DTO 保留 `content_parts`、图片/文件 URL、model 和 extensions，当前 HTTP 可执行输入仅接受
 文本。Channel Adapter 先完成各平台的验签和身份解析，再转换成相同的 `InboundMessage`；
-企业微信 Adapter 已实现，Telegram Adapter 仍在规划中。出站层从 Outbox 做平台长度切片、
+企业微信 Adapter 已实现，飞书 Adapter 由 PR10 交付。出站层从 Outbox 做平台长度切片、
 限流、失败退避和 DLQ。HTTP 层不会把图片/文件 URL 直接交给模型或工具，以免形成 SSRF 通道。

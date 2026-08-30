@@ -14,7 +14,7 @@
 
 请设计一个基于 tRPC-Agent-Go 的多租户节点化 Agent 部署平台。平台需要支持多个租户创建和部署自己的 Agent，每个租户可以绑定不同 IM 通道、选择不同数据后端、配置不同工具权限和知识库，并允许多个 Agent 节点水平扩展。系统需要考虑跨节点会话路由、数据同步、后端适配、IM 消息接入、监控审计和故障恢复。
 
-本题以架构设计为主，可以包含少量关键 Go 伪代码、接口定义或数据模型示例。不要求实现完整系统，但方案必须足够具体，能指导后续工程落地。
+本项目的目标是按该设计完成完整工程实现，而不仅是提交架构设计。设计文档用于约束实现边界，仓库中的 Go 代码、迁移、Compose 部署和端到端链路必须与文档描述一致。
 
 ## 具体要求
 
@@ -28,7 +28,7 @@
 
 ### 数据同步与多后端支持
 
-- 支持不同租户选择不同数据后端，例如 InMemory、Redis、SQL、向量库、对象存储或外部 Memory 服务。tRPC-Agent-Go 已提供 Session（inmemory / redis / mysql / postgres / sqlite / mongodb 等）、Memory、Knowledge、Artifact 以及 `storage`（redis / mysql / postgres / s3 / qdrant / milvus 等）适配，方案需说明如何在平台层做租户级选择与路由。
+- 支持不同租户选择不同数据后端，例如 PostgreSQL、Redis、SQL、向量库、对象存储或外部 Memory 服务。tRPC-Agent-Go 已提供 Session（inmemory / redis / mysql / postgres / sqlite / mongodb 等）、Memory、Knowledge、Artifact 以及 `storage`（redis / mysql / postgres / s3 / qdrant / milvus 等）适配，方案需说明如何在平台层做租户级选择与路由。**生产运行时 Session / Memory 必须使用 PostgreSQL 等共享持久化后端**：多节点 Worker 依赖共享 Session / Memory 后端实现无状态运行；InMemory 只允许作为单元测试或离线开发辅助，不得作为生产方案、验收方案或多节点方案的默认值；生产配置缺少可识别的共享 Session 后端时服务必须启动失败，不允许静默回退到 tRPC-Agent-Go 的默认 InMemory Session。
 - 设计统一的数据访问抽象，说明 Session、Memory、Summary、Artifact、Knowledge、Audit Log 分别如何存储。
 - 设计数据同步策略，至少覆盖：
   - 多节点并发写入同一 session 的一致性。
@@ -41,7 +41,7 @@
 
 ### IM 软件接入
 
-- 设计 IM Channel Adapter，支持企业微信、微信客服、微信公众号、Telegram 或其他 IM 通道中的至少两类。可复用并扩展 tRPC-Agent-Go 的 OpenClaw Channel 模型。
+- 设计 IM Channel Adapter，支持企业微信和飞书两类 IM 通道（微信客服、微信公众号等可在此模型上继续扩展）。可复用并扩展 tRPC-Agent-Go 的 OpenClaw Channel 模型。
 - 说明外部 IM 消息如何转换为 tRPC-Agent-Go 的用户输入（`model.Message` / `runner.Runner.Run`），Agent Event 如何转换为 IM 回复、流式消息或卡片消息。
 - 设计 IM 账号和租户绑定方式，包括 webhook URL、token、secret、回调验签、消息去重、用户身份映射。
 - 说明群聊和单聊的 `session_id` 生成规则，以及用户跨群、跨租户时的隔离策略。
@@ -162,6 +162,68 @@ curl -H 'Authorization: Bearer local-secret' \
 直接运行二进制时需要设置 `TRPC_AGENT_POSTGRES_DSN`、`TRPC_AGENT_REDIS_URL`、
 `DEEPSEEK_API_KEY` 和通道凭据，再执行 `./start.sh`。PR3 的确定性 Runner 示例仍可用
 `go run ./examples/quickstart` 单独运行，它不代表服务部署方式。
+
+## 交付状态
+
+设计中的组件按以下状态区分，避免把规划能力误读为已交付能力。
+
+**已经实现并验证**：
+
+- 企业微信真实端到端链路：回调验签/解密 → Inbox 幂等 → tRPC-Agent-Go Runner → DeepSeek → PostgreSQL Session/Memory/Event → Outbox → 企业微信回复。
+- 多节点消息运行时：PostgreSQL Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis 跨节点限流与事件总线。
+- 控制面数据模型与不可变配置版本、治理审计、OpenTelemetry 链路、Compose 最小部署。
+
+**本 PR（PR9：生产控制面与动态配置发布）实现**：
+
+- 生产 Admin API：`validate` / `publish` / `list` / `current` / `rollback`，全部要求 Bearer 认证与显式租户 scope，客户端无法通过请求体或参数切换租户。
+- `expected_version` 乐观锁（并发发布只有一个成功，其余 409）、不可变版本（回滚创建新版本并记录 `rollback_of`、`created_by`、`content_hash`、`published_at`）。
+- 发布/回滚审计日志（tenant、actor、action、版本、decision、error_type、latency、trace_id、timestamp）。
+- 动态 Runtime Bundle 切换：入站路由、企业微信回调绑定、Runtime 快照和出站 Sender 都按请求钉住控制面版本；新请求使用新版本，旧请求及其 Outbox 回复继续使用旧版本，旧 Bundle 在引用归零后 drain 并 Close；切换失败沿用上一份有效配置并重试初始化。
+- disabled 租户 / App / Binding 立即拒绝新请求；生产配置缺少共享 PostgreSQL 后端时 fail fast，Admin 发布非持久化存储配置会被直接拒绝。
+- 配置发布后无需 `docker compose down -v`、无需删除数据卷、无需重建环境；启动文件只在首次启动时播种，之后数据库是唯一事实源。
+
+**后续计划**：
+
+- PR10：飞书 Channel Adapter 与 Sender（事件订阅回调验证、Encrypt Key / Verification Token、身份映射、卡片回复、与企业微信并存且租户隔离）。
+- PR11：真正的跨节点共享调度与控制。
+- PR12：多后端 Storage Router 与数据迁移 Worker。
+- PR13：Knowledge/RAG、MCP 与业务工具。
+- PR14：持久化治理、OpenTelemetry Collector、Prometheus/Grafana。
+- PR15：Kubernetes、容量测试、故障演练和生产验收。
+
+## Admin API
+
+生产 Admin API 与 Gateway 共用同一 HTTP 端口，由 `TRPC_AGENT_ADMIN_TOKENS`
+配置管理员凭据，格式为 `名称=令牌:租户列表`，多个凭据用 `;` 分隔，`*` 表示全部租户：
+
+```bash
+export TRPC_AGENT_ADMIN_TOKENS='ops=change-me:demo;root=another-secret:*'
+```
+
+未配置该变量时 Admin API 拒绝一切请求（fail closed）。所有接口的租户范围只来自
+URL 路径并校验凭据 scope：
+
+```bash
+# 校验配置（不在响应中返回配置原文或 SecretRef 真实值）
+curl -X POST -H "Authorization: Bearer change-me" \
+  --data-binary @tenant.yaml \
+  'http://127.0.0.1:8080/v1/tenants/demo/configs/validate'
+
+# 发布新版本（payload 中的 config_version 必须等于 expected_version + 1）
+curl -X POST -H "Authorization: Bearer change-me" \
+  --data-binary @tenant-v2.yaml \
+  'http://127.0.0.1:8080/v1/tenants/demo/configs/publish?expected_version=1'
+
+# 列出版本、查看当前发布版本、回滚到指定版本（创建新版本，不改写历史）
+curl -H "Authorization: Bearer change-me" http://127.0.0.1:8080/v1/tenants/demo/configs
+curl -H "Authorization: Bearer change-me" http://127.0.0.1:8080/v1/tenants/demo/configs/current
+curl -X POST -H "Authorization: Bearer change-me" \
+  'http://127.0.0.1:8080/v1/tenants/demo/configs/rollback?expected_version=2&target_version=1'
+```
+
+API 响应只包含版本元数据（`version`、`content_hash`、`created_by`、`published_at`、
+`rollback_of`），永不返回配置原文或 SecretRef 解析值。发布后新请求立即使用新版本，
+处理中的企业微信消息继续在旧 Bundle 上完成，不被中断。
 
 总体设计从 [`docs/architecture.md`](docs/architecture.md) 开始，生产风险与缓解措施见
 [`docs/risks.md`](docs/risks.md)。控制面数据模型见

@@ -99,7 +99,21 @@ func (manager *Manager) Acquire(snapshot config.RuntimeSnapshot) (*Lease, error)
 		manager.mu.Lock()
 		delete(manager.building, wanted)
 		if err != nil {
-			pending.err = fmt.Errorf("runtime: build bundle: %w", err)
+			buildErr := fmt.Errorf("runtime: build bundle: %w", err)
+			// A publication is visible before every process has necessarily
+			// constructed its Bundle. If the new Bundle cannot be built, keep
+			// serving the last successfully activated version for this scope.
+			// The failed version is not installed as the head, so a later
+			// request retries construction after the transient failure clears.
+			previousKey := key{tenantID: wanted.tenantID, appID: wanted.appID, version: manager.heads[wantedScope]}
+			if previous := manager.entries[previousKey]; previous != nil {
+				previous.refs++
+				close(pending.done)
+				manager.notifyChanged()
+				manager.mu.Unlock()
+				return &Lease{Runtime: previous.runtime, manager: manager, key: previousKey}, nil
+			}
+			pending.err = buildErr
 			close(pending.done)
 			manager.notifyChanged()
 			manager.mu.Unlock()

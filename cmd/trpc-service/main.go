@@ -5,19 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"unicode"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/delivery"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway/openclaw"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
@@ -86,6 +81,11 @@ func run(args []string) int {
 	return 0
 }
 
+// gatewayComponent seeds the control plane from the startup file and wires the
+// production component. Inbound routing, WeCom callback bindings, and runtime
+// snapshots and outbound senders all resolve from the control-plane database
+// at request time, so Admin API publishes take effect without restarting the
+// service.
 func gatewayComponent(ctx context.Context, path, address string) (trpcservice.Component, error) {
 	fileHandle, err := os.Open(path)
 	if err != nil {
@@ -96,80 +96,7 @@ func gatewayComponent(ctx context.Context, path, address string) (trpcservice.Co
 	if err != nil {
 		return nil, err
 	}
-	var bindings []openclaw.Route
-	var weComBindings []wecom.Binding
-	var deliveryRoutes []delivery.Route
-	for _, currentTenant := range file.Tenants {
-		if !currentTenant.Enabled {
-			continue
-		}
-		for _, app := range currentTenant.Apps {
-			if !app.Enabled {
-				continue
-			}
-			for _, binding := range app.Channels {
-				if !binding.Enabled {
-					continue
-				}
-				switch binding.Type {
-				case tenant.ChannelTypeHTTP:
-					envName := gatewayTokenEnv(binding.ID)
-					credential := os.Getenv(envName)
-					if credential == "" {
-						return nil, fmt.Errorf("enabled HTTP binding %q requires environment variable %s", binding.ID, envName)
-					}
-					bindings = append(bindings, openclaw.Route{TenantID: currentTenant.ID, AppID: app.ID, BindingID: binding.ID, ChannelType: binding.Type, ConfigVersion: currentTenant.ConfigVersion, Credential: credential})
-				case tenant.ChannelTypeWeCom:
-					token, err := resolveLocalSecret(binding.Token)
-					if err != nil {
-						return nil, fmt.Errorf("resolve WeCom callback token for binding %q: %w", binding.ID, err)
-					}
-					aesKey, err := resolveLocalSecret(binding.EncryptionKey)
-					if err != nil {
-						return nil, fmt.Errorf("resolve WeCom encryption key for binding %q: %w", binding.ID, err)
-					}
-					crypt, err := wecom.NewCrypt(token, aesKey, binding.ProviderAccountID)
-					if err != nil {
-						return nil, fmt.Errorf("initialize WeCom binding %q: %w", binding.ID, err)
-					}
-					appSecret, err := resolveLocalSecret(binding.Secret)
-					if err != nil {
-						return nil, fmt.Errorf("resolve WeCom application secret for binding %q: %w", binding.ID, err)
-					}
-					agentID, err := strconv.ParseInt(binding.ProviderAppID, 10, 64)
-					if err != nil || agentID <= 0 {
-						return nil, fmt.Errorf("initialize WeCom binding %q: invalid AgentID", binding.ID)
-					}
-					weComBindings = append(weComBindings, wecom.Binding{TenantID: currentTenant.ID, AppID: app.ID, BindingID: binding.ID, CorpID: binding.ProviderAccountID, AgentID: binding.ProviderAppID, ConfigVersion: currentTenant.ConfigVersion, Crypt: crypt})
-					deliveryRoutes = append(deliveryRoutes, delivery.Route{
-						Binding: delivery.BindingKey{TenantID: currentTenant.ID, BindingID: binding.ID},
-						Sender:  &wecom.Sender{AgentID: agentID, Tokens: &wecom.CredentialTokenSource{CorpID: binding.ProviderAccountID, CorpSecret: appSecret}},
-					})
-				}
-			}
-		}
-	}
-	if len(bindings) == 0 && len(weComBindings) == 0 {
-		return nil, errors.New("config has no enabled local channel bindings")
-	}
-	routes, err := openclaw.NewStaticRoutes(bindings...)
-	if err != nil {
-		return nil, err
-	}
-	var decorators []openclaw.HandlerDecorator
-	if len(weComBindings) > 0 {
-		decorators = append(decorators, func(core *openclaw.Handler, next http.Handler) (http.Handler, error) {
-			adapter, err := wecom.NewHandler(core, weComBindings...)
-			if err != nil {
-				return nil, err
-			}
-			mux := http.NewServeMux()
-			mux.Handle("/channels/wecom/", adapter)
-			mux.Handle("/", next)
-			return mux, nil
-		})
-	}
-	return newDurableComponent(ctx, address, file, routes, deliveryRoutes, decorators...)
+	return newDurableComponent(ctx, address, file)
 }
 
 func resolveLocalSecret(ref tenant.SecretRef) (string, error) {

@@ -18,11 +18,11 @@ func TestCanonicalIdentifiersAreScopedAndEscaped(t *testing.T) {
 		t.Fatalf("appA = %q", appA)
 	}
 
-	userID, err := CanonicalUserID(ChannelTypeTelegram, "binding/1", "user/42")
+	userID, err := CanonicalUserID(ChannelTypeFeishu, "binding/1", "user/42")
 	if err != nil {
 		t.Fatalf("CanonicalUserID() error = %v", err)
 	}
-	if userID != "telegram/binding%2F1/user%2F42" {
+	if userID != "feishu/binding%2F1/user%2F42" {
 		t.Fatalf("userID = %q", userID)
 	}
 

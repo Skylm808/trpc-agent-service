@@ -54,12 +54,16 @@ tenants:
               provider: env
               key: WECOM_ENCODING_AES_KEY
             enabled: false
-          - binding_id: demo-telegram
-            type: telegram
-            provider_account_id: replace-with-telegram-bot-id
-            token:
+          # 飞书通道由后续 PR 交付适配器；这里仅声明配置形状，保持 disabled。
+          - binding_id: demo-feishu
+            type: feishu
+            provider_account_id: replace-with-feishu-app-id
+            secret:
               provider: env
-              key: TELEGRAM_BOT_TOKEN
+              key: FEISHU_APP_SECRET
+            encryption_key:
+              provider: env
+              key: FEISHU_ENCRYPT_KEY
             enabled: false
         storage:
           session:

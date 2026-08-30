@@ -41,6 +41,7 @@ services:
       TRPC_AGENT_POSTGRES_DSN: postgres://trpc_agent:${POSTGRES_PASSWORD:-local-postgres-password}@postgres:5432/trpc_agent?sslmode=disable
       TRPC_AGENT_REDIS_URL: redis://redis:6379/0
       TRPC_AGENT_GATEWAY_TOKEN_DEMO_HTTP: ${TRPC_AGENT_GATEWAY_TOKEN_DEMO_HTTP:-local-secret}
+      TRPC_AGENT_ADMIN_TOKENS: ${TRPC_AGENT_ADMIN_TOKENS:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}
       WECOM_CALLBACK_TOKEN: ${WECOM_CALLBACK_TOKEN:-}
       WECOM_APP_SECRET: ${WECOM_APP_SECRET:-}

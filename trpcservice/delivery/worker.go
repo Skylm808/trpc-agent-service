@@ -25,7 +25,7 @@ type WorkerConfig struct {
 // Worker claims durable Outbox rows and sends them through registered routes.
 type Worker struct {
 	store     Store
-	router    *Router
+	router    RouteResolver
 	limiter   Limiter
 	telemetry *servicemetrics.Telemetry
 	config    WorkerConfig
@@ -39,12 +39,9 @@ type Worker struct {
 }
 
 // NewWorker constructs a stopped Delivery Worker.
-func NewWorker(store Store, router *Router, limiter Limiter, telemetry *servicemetrics.Telemetry, config WorkerConfig) (*Worker, error) {
+func NewWorker(store Store, router RouteResolver, limiter Limiter, telemetry *servicemetrics.Telemetry, config WorkerConfig) (*Worker, error) {
 	if store == nil || router == nil || limiter == nil || config.Owner == "" {
 		return nil, errors.New("delivery: store, router, limiter, and owner are required")
-	}
-	if len(router.Keys()) == 0 {
-		return nil, errors.New("delivery: router has no bindings")
 	}
 	if config.PollInterval <= 0 {
 		config.PollInterval = time.Second
@@ -64,7 +61,6 @@ func NewWorker(store Store, router *Router, limiter Limiter, telemetry *servicem
 	if config.RetryMax <= 0 {
 		config.RetryMax = 5 * time.Minute
 	}
-	router.configureLimiter(limiter)
 	return &Worker{store: store, router: router, limiter: limiter, telemetry: telemetry, config: config, sem: make(chan struct{}, config.MaxConcurrency)}, nil
 }
 
@@ -106,7 +102,11 @@ func (worker *Worker) poll(ctx context.Context) {
 	}
 	limit := min(worker.config.BatchSize, available)
 	started := time.Now()
-	claims, err := worker.store.ClaimReady(ctx, worker.router.Keys(), worker.config.Owner, worker.config.ClaimTTL, limit)
+	bindings := worker.router.Keys()
+	if len(bindings) == 0 {
+		return
+	}
+	claims, err := worker.store.ClaimReady(ctx, bindings, worker.config.Owner, worker.config.ClaimTTL, limit)
 	if err != nil {
 		worker.telemetry.Request(ctx, servicemetrics.Labels{Operation: "outbox_claim", Status: "failed"}, time.Since(started), 0, 0)
 		return
@@ -145,6 +145,9 @@ func (worker *Worker) deliver(parent context.Context, claim Claim) {
 
 	sender, err := worker.router.Resolve(message)
 	if err == nil {
+		if aware, ok := sender.(channels.RateLimitAware); ok {
+			aware.SetDeliveryLimiter(worker.limiter)
+		}
 		err = worker.limiter.Wait(sendCtx, message)
 	}
 	if err != nil {

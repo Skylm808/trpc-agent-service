@@ -5,7 +5,7 @@
 | 编号 | 风险与触发条件 | 影响 | 缓解措施 | 监测与演练 |
 | --- | --- | --- | --- | --- |
 | R1 | Worker 发生长时间 GC、网络分区或 lease 续约失败，旧节点恢复后继续执行 | 同一 session 被两个节点写入，状态倒退或重复回复 | Redis 生成单调 fencing token；Session/Event/Outbox 写入在事务内校验 `last_fence`；旧 token 一律拒绝 | 统计 stale-fence rejection；故障演练中暂停 Worker 后转移 lease |
-| R2 | 企业微信或 Telegram 因超时重复投递，同一消息被多个 Gateway 同时接收 | 模型与工具重复调用，产生重复费用或副作用 | Inbox 唯一键包含 `tenant_id + binding_id + external_message_id`；首次 claim 才能入队；事件消息使用稳定派生 ID | 监控 duplicate claim 比例；并发回放同一 MsgId |
+| R2 | 企业微信或飞书因超时重复投递，同一消息被多个 Gateway 同时接收 | 模型与工具重复调用，产生重复费用或副作用 | Inbox 唯一键包含 `tenant_id + binding_id + external_message_id`；首次 claim 才能入队；事件消息使用稳定派生 ID | 监控 duplicate claim 比例；并发回放同一 MsgId |
 | R3 | 同一 session 的多条消息在队列中乱序到达 | 后发消息覆盖前序 state，Summary 截断位置错误 | 入站分配单调 `inbox_seq`；提交要求等于 `last_event_seq + 1`；乱序请求退避重试 | `out_of_order` 指标和热点 session 告警；随机打乱队列消息测试 |
 | R4 | PostgreSQL 短暂不可用、连接池耗尽或热点 session 行锁竞争 | Gateway 无法 claim，Worker 无法提交，队列积压 | Gateway 快速返回可重试错误；连接池限额和超时；按租户限流；热点 session 串行消费；跨可用区主备 | 监控连接池等待、事务 p99、deadlock、Inbox backlog；主库切换演练 |
 | R5 | Redis 主从切换、数据丢失或集群不可用 | lease、命令总线或热点缓存失效，Worker 暂停调度 | Redis 开启 AOF 和多副本；fence 最终仍由 PostgreSQL 写入校验；Redis 不作为 Session 事实来源；不可安全取 lease 时停止执行 | 监控 failover、AOF 延迟和 lease renewal；断开 Redis 验证 fail-closed |

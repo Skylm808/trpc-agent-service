@@ -93,8 +93,9 @@ const (
 	ChannelTypeHTTP ChannelType = "http"
 	// ChannelTypeWeCom is the WeCom channel.
 	ChannelTypeWeCom ChannelType = "wecom"
-	// ChannelTypeTelegram is the Telegram channel.
-	ChannelTypeTelegram ChannelType = "telegram"
+	// ChannelTypeFeishu is the Feishu (Lark) channel. The adapter ships in a
+	// later PR; the type exists so configurations can already declare it.
+	ChannelTypeFeishu ChannelType = "feishu"
 )
 
 // ChannelBinding binds one provider account to a tenant application.

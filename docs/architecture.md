@@ -17,14 +17,14 @@ flowchart TB
     subgraph IM["1. 外部入口"]
         direction LR
         WC[企业微信]
-        TG[Telegram（设计覆盖）]
+        FS[飞书（PR10 交付）]
         HC[HTTP / OpenClaw Client]
     end
 
     subgraph EDGE["2. Channel Adapter 与 Gateway"]
         direction LR
         WCA[WeCom Adapter<br/>验签/解密/规范化]
-        TGA[Telegram Adapter（规划）<br/>Webhook/身份映射]
+        FSA[飞书 Adapter（PR10）<br/>事件订阅/身份映射]
         GW[Agent Gateway<br/>认证/租户路由/Inbox Claim]
     end
 
@@ -65,7 +65,7 @@ flowchart TB
         OUTBOX[(PostgreSQL Outbox)]
         OUT[Delivery Worker]
         WAPI[企业微信发送 API]
-        TAPI[Telegram Bot API（规划）]
+        FAPI[飞书 Open API（PR10）]
     end
 
     subgraph OBS["7. 可观测性"]
@@ -162,27 +162,27 @@ sequenceDiagram
 
 `trace_id` 在回调时生成或从可信上游提取，随后写入 Inbox、RunRequest、Runner context、Tool span、Session/Memory 写入、Outbox 和审计日志。`request_id` 使用租户作用域的 Inbox ID。这样一次 IM 回调即使跨过 Gateway、队列、Worker 和发送节点，仍能在 trace 中还原。
 
-Adapter 把验签后的企业微信 XML 或 Telegram JSON 转成 `InboundMessage`。Runtime Bundle 用 `model.NewUserMessage(text)` 构造输入，再调用 `Runner.Run(ctx, user_id, session_id, message, WithRequestID, WithAppName)`。Agent Event 被投影成 `RunEvent`：delta 进入 SSE，最终文本写入 Outbox。企业微信当前只异步发送分片文本；卡片和 Telegram 编辑式回复尚未实现。
+Adapter 把验签后的企业微信 XML 或飞书事件 JSON 转成 `InboundMessage`。Runtime Bundle 用 `model.NewUserMessage(text)` 构造输入，再调用 `Runner.Run(ctx, user_id, session_id, message, WithRequestID, WithAppName)`。Agent Event 被投影成 `RunEvent`：delta 进入 SSE，最终文本写入 Outbox。企业微信当前只异步发送分片文本；卡片和飞书交互式卡片回复尚未实现。
 
 同一 session 的并发写由 Redis fencing token 和 PostgreSQL session head 共同约束。Worker 取得 lease 后先推进 `last_fence`；提交时必须在同一事务中检查 token，并要求 `inbox_seq = last_event_seq + 1`。暂停后恢复的旧 Worker 即使继续运行，也会因 fence 过期而无法写入。
 
 提交顺序固定为：`message event + state` 原子提交，随后更新 Summary/Memory，接着创建 Outbox，最后把 Inbox 标记为 completed。Summary 使用 `(version, cutoff_event_seq)` CAS；Memory 以 source event 做幂等；Outbox 以 `(tenant_id, dedupe_key)` 去重。中间失败保留可重试状态，重跑不会多写 event、memory 或 IM 回复。详细约束见 [多节点消息运行时](message-runtime.md) 和 [数据模型](data-model.md)。
 
-### 4.1 企业微信与 Telegram 的接入差异
+### 4.1 企业微信与飞书的接入差异
 
 两种通道共用 `InboundMessage -> Inbox -> RunRequest -> Outbox` 主链路，但协议细节由各自 Adapter 处理，不能把外部用户 ID、重试规则或发送限制直接带进 Worker。
 
-| 项目 | 企业微信自建应用 | Telegram Bot |
+| 项目 | 企业微信自建应用 | 飞书自建应用 |
 | --- | --- | --- |
-| 入站格式 | XML 回调，SHA1 验签并使用 AES-CBC 解密 | JSON `Update`，校验 HTTPS webhook 与 secret token |
-| 幂等键 | 优先使用 `MsgId`；事件使用发送者、时间和事件字段派生稳定 ID | 使用单调的 `update_id` |
-| 身份与会话 | `FromUserName`、`ChatId/RoomId` 经过 binding 作用域映射 | `from.id`、`chat.id`、message thread ID 经过 bot binding 作用域映射 |
-| 回调处理 | 快速完成验签、Inbox claim 并返回 `200 success` | 快速返回 2xx，执行与回复仍走异步 Worker/Outbox |
-| 主动回复 | 获取 `access_token` 后调用 `message/send` 或 `appchat/send` | 使用 bot token 调用 `sendMessage`，需要更新式回复时可调用 `editMessageText` |
-| 平台限制 | 文本按 UTF-8 字节分片，处理成员频率限制和 token 刷新 | 处理消息长度、Bot API 429 与 `retry_after`，群组隐私模式会影响可见消息 |
-| 当前状态 | Adapter、Sender、协议测试和生产组合器已完成，待真实企业账号联调 | 完成配置模型与接口设计，Adapter/Sender 尚未实现 |
+| 入站格式 | XML 回调，SHA1 验签并使用 AES-CBC 解密 | JSON 事件订阅回调，校验 Encrypt Key 与 Verification Token |
+| 幂等键 | 优先使用 `MsgId`；事件使用发送者、时间和事件字段派生稳定 ID | 使用事件头 `event_id` 与消息 `message_id` |
+| 身份与会话 | `FromUserName`、`ChatId/RoomId` 经过 binding 作用域映射 | `open_id`、`chat_id`、thread/Topic 经过 app binding 作用域映射 |
+| 回调处理 | 快速完成验签、Inbox claim 并返回 `200 success` | URL 验证与挑战应答后快速返回 2xx，执行与回复仍走异步 Worker/Outbox |
+| 主动回复 | 获取 `access_token` 后调用 `message/send` 或 `appchat/send` | 使用 tenant_access_token 调用 `im/v1/messages`，支持文本与交互式卡片 |
+| 平台限制 | 文本按 UTF-8 字节分片，处理成员频率限制和 token 刷新 | 处理消息长度、频控与 token 缓存刷新，群聊需要 @机器人才触发事件 |
+| 当前状态 | Adapter、Sender、协议测试和生产组合器已完成，真实链路已联调通过 | 配置模型已就绪，Adapter/Sender 由 PR10 交付 |
 
-企业微信的图片、文件和未识别语音转成元数据占位文本，不自动下载 `media_id`。撤回等事件只确认接收，不触发 Runner；未来若同步撤回状态，应追加 tombstone event，已发生的 Tool 副作用不能自动撤销。实现细节见[企业微信 Channel Adapter](wecom.md)。Telegram 后续只新增协议 Adapter 和 Sender，其他主链路不变。
+企业微信的图片、文件和未识别语音转成元数据占位文本，不自动下载 `media_id`。撤回等事件只确认接收，不触发 Runner；未来若同步撤回状态，应追加 tombstone event，已发生的 Tool 副作用不能自动撤销。实现细节见[企业微信 Channel Adapter](wecom.md)。飞书后续只新增协议 Adapter 和 Sender（PR10），其他主链路不变。
 
 ## 5. 最小数据模型
 
@@ -277,7 +277,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、租户成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis 跨节点限流、治理审计、OpenTelemetry 链路、Compose 最小部署和企业微信 Adapter/Sender。Gateway 到 Worker 的即时快速路径仍是进程内 dispatcher，但丢失的任务可由任一节点从 PostgreSQL 恢复。Telegram Adapter、共享预算/审批/状态、投递异常的 Admin 运维页及 Kubernetes manifest 仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。
+当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis 跨节点限流、治理审计、OpenTelemetry 链路、Compose 最小部署和企业微信 Adapter/Sender。Gateway 到 Worker 的即时快速路径仍是进程内 dispatcher，但丢失的任务可由任一节点从 PostgreSQL 恢复。飞书 Adapter（PR10）、共享预算/审批/状态、投递异常的 Admin 运维页及 Kubernetes manifest 仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。
 
 ## 10. 预期效果与时间规划
 
@@ -299,8 +299,8 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 阶段 | 时间 | 交付内容 | 状态 |
 | --- | --- | --- | --- |
 | T0：方案与最小生产链路 | 2026 年 8 月 27 日 | 本文、两张图、数据模型、幂等/迁移策略、风险清单、Compose、PostgreSQL/Redis、真实模型 Provider | 已完成 |
-| T1：企业微信真实联调 | T0 后 1–2 个工作日 | 测试企业、HTTPS 回调、IP 白名单、真实收发、失败回放 | 代码已完成，等待账号与公网环境 |
-| T2：第二通道与跨节点实时调度 | T0 后 3–5 个工作日 | Telegram Adapter/Sender、共享 command/event bus、跨节点 cancel/status | 规划中 |
+| T1：企业微信真实联调 | T0 后 1–2 个工作日 | 测试企业、HTTPS 回调、IP 白名单、真实收发、失败回放 | 已完成并跑通真实链路 |
+| T2：第二通道与跨节点实时调度 | T0 后 3–5 个工作日 | 飞书 Adapter/Sender（PR10）、共享 command/event bus、跨节点 cancel/status | 规划中 |
 | T3：生产运维补强 | T0 后 5–8 个工作日 | Kubernetes manifests、共享预算/审批、DLQ/uncertain 管理接口、容量压测 | 规划中 |
 
 时间从依赖就绪后计算，不含企业微信权限、公网域名、TLS 证书或平台审核等待。

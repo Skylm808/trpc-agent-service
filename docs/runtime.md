@@ -8,9 +8,11 @@ request ID; the caller can provide only user text and cannot override role or
 RunOptions.
 
 The manager builds once per key, allows different tenants to build in parallel,
-rejects stale snapshots, and reference-counts leases. Publishing a new version
-retires the old Bundle, but it is closed only after all old leases finish. A
-caller must hold its lease for the entire run.
+rejects a stale snapshot from replacing an activated head, and reference-counts
+leases. Publishing a new version retires the old Bundle only after the new one
+builds successfully; a failed build leases the last valid Bundle and retries the
+new build on a later request. The old Bundle is closed only after all old leases
+finish. A caller must hold its lease for the entire run.
 
 The Bundle owns the event channel. On cancellation it calls `ManagedRunner.Cancel`
 when supported and continues draining with a bound, preventing a disconnected

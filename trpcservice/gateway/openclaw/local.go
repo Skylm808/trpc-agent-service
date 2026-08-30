@@ -40,6 +40,10 @@ type ComponentDependencies struct {
 	Audit          audit.Store
 	EventBus       EventBus
 	WorkerID       string
+	// Snapshots optionally resolves pinned published versions from the
+	// control-plane store. Nil falls back to the static startup file, which
+	// is only appropriate for offline development.
+	Snapshots gateway.SnapshotResolver
 }
 
 // NewLocalComponent wires the complete offline HTTP -> Runner -> Outbox chain.
@@ -94,7 +98,11 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 		Approvals:          policy.NewMemoryApprovals(),
 		CostMicrosPerToken: 1, // deterministic local accounting for the mock model.
 	}
-	processor := &worker.Processor{WorkerID: dependencies.WorkerID, Inbox: dependencies.Inbox, Coordinator: dependencies.Coordinator, Writes: dependencies.Writes, Runtimes: runtimes, Snapshots: gateway.FileSnapshotResolver{File: file}, Publisher: MultiPublisher{bus, registry}, Policy: policyEngine, Audit: dependencies.Audit, Redactor: redactor, Telemetry: telemetry}
+	snapshots := dependencies.Snapshots
+	if snapshots == nil {
+		snapshots = gateway.FileSnapshotResolver{File: file}
+	}
+	processor := &worker.Processor{WorkerID: dependencies.WorkerID, Inbox: dependencies.Inbox, Coordinator: dependencies.Coordinator, Writes: dependencies.Writes, Runtimes: runtimes, Snapshots: snapshots, Publisher: MultiPublisher{bus, registry}, Policy: policyEngine, Audit: dependencies.Audit, Redactor: redactor, Telemetry: telemetry}
 	dispatch, err := dispatcher.New(parent, processor.Process)
 	if err != nil {
 		_ = runtimes.Close(context.Background())

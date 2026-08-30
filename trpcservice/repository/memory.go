@@ -63,3 +63,14 @@ func (store *MemoryStore) GetConfigVersion(_ context.Context, tenantID string, v
 	}
 	return ConfigRecord{}, ErrNotFound
 }
+
+// GetCurrentConfig returns the tenant's newest published version.
+func (store *MemoryStore) GetCurrentConfig(_ context.Context, tenantID string) (ConfigRecord, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	versions := store.records[tenantID]
+	if len(versions) == 0 {
+		return ConfigRecord{}, ErrNotFound
+	}
+	return cloneRecord(versions[len(versions)-1]), nil
+}

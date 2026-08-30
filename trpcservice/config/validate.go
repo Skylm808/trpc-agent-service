@@ -262,11 +262,16 @@ func validateChannel(path string, binding tenant.ChannelBinding) error {
 		if err := validateSecretRef(path+".encryption_key", binding.EncryptionKey, true); err != nil {
 			return err
 		}
-	case tenant.ChannelTypeTelegram:
-		if err := validateSecretRef(path+".token", binding.Token, true); err != nil {
+	case tenant.ChannelTypeFeishu:
+		// The Feishu adapter arrives in a later PR; validate the declared
+		// credential shape so configurations are forward-compatible.
+		if err := validateSecretRef(path+".token", binding.Token, false); err != nil {
 			return err
 		}
-		if err := validateSecretRef(path+".secret", binding.Secret, false); err != nil {
+		if err := validateSecretRef(path+".secret", binding.Secret, true); err != nil {
+			return err
+		}
+		if err := validateSecretRef(path+".encryption_key", binding.EncryptionKey, false); err != nil {
 			return err
 		}
 	default:

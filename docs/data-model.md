@@ -64,4 +64,6 @@ Artifact revision 的主键是 `(tenant_id, app_id, user_id, session_id, filenam
 - `GET /v1/tenants/{tenant}/configs`
 - `POST /v1/tenants/{tenant}/configs/rollback?expected_version=N&target_version=M`
 
-Handler 本身不实现最终用户认证。部署时必须在外层加入认证和 tenant-scoping middleware，不能把 Admin API 直接暴露到公网。
+生产入口已在 Handler 外层挂载 Bearer 认证和 tenant-scoping middleware。租户范围只取自
+`/v1/tenants/{tenant_id}` 路径并与管理员凭据授权范围比较，不信任请求体、Header 或查询参数
+提供的 `tenant_id`；未配置管理员凭据时 fail closed。

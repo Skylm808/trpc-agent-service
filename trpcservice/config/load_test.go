@@ -47,12 +47,12 @@ tenants:
             type: http
             provider_account_id: local
             enabled: true
-          - binding_id: telegram-a
-            type: telegram
+          - binding_id: feishu-a
+            type: feishu
             provider_account_id: bot-a
-            token:
+            secret:
               provider: env
-              key: TELEGRAM_BOT_TOKEN
+              key: FEISHU_APP_SECRET
             enabled: true
         storage:
           session:
@@ -103,7 +103,7 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		},
 		{
 			name: "duplicate binding",
-			yaml: strings.Replace(validYAML, "binding_id: telegram-a", "binding_id: http-a", 1),
+			yaml: strings.Replace(validYAML, "binding_id: feishu-a", "binding_id: http-a", 1),
 			want: "duplicate binding_id",
 		},
 		{

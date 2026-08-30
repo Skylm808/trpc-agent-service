@@ -121,6 +121,7 @@ https://<public-host>/channels/wecom/<binding_id>
 CAS、指数退避、DLQ、`uncertain` 和 Redis 跨节点限流。启用 WeCom binding 后，Agent
 生成的 Outbox 会由现有 Sender 主动发送，不再需要修改 Runner 主链路。
 
-尚未完成的是实际企业账号联调，以及 `uncertain` / DLQ 的 Admin 运维页面。图片和文件
-目前只把安全元数据交给 Agent，不会自动下载或回传媒体；后续媒体能力需要独立的大小、
-MIME 和来源校验。真实联调前应先在测试企业启用应用，并准备公网 HTTPS 回调地址。
+企业微信测试账号、Cloudflare Tunnel、真实 DeepSeek 和 PostgreSQL 的收发链路已经联调
+通过。尚未完成的是 `uncertain` / DLQ 的 Admin 运维页面。图片和文件目前只把安全元数据
+交给 Agent，不会自动下载或回传媒体；后续媒体能力需要独立的大小、MIME 和来源校验。
+部署新企业账号时仍需在对应企业启用应用，并准备公网 HTTPS 回调地址。

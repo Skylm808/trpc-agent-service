@@ -14,6 +14,14 @@ type Route struct {
 	Sender  channels.TextSender
 }
 
+// RouteResolver supplies the currently claimable bindings and resolves the
+// sender pinned by an Outbox message. Production uses a control-plane-backed
+// resolver; Router remains the immutable fixture used by tests.
+type RouteResolver interface {
+	Keys() []BindingKey
+	Resolve(gateway.OutboundMessage) (channels.TextSender, error)
+}
+
 // Router resolves only explicitly registered tenant bindings.
 type Router struct {
 	senders map[BindingKey]channels.TextSender
@@ -59,10 +67,4 @@ func (router *Router) Resolve(message gateway.OutboundMessage) (channels.TextSen
 	return sender, nil
 }
 
-func (router *Router) configureLimiter(limiter Limiter) {
-	for _, sender := range router.senders {
-		if aware, ok := sender.(channels.RateLimitAware); ok {
-			aware.SetDeliveryLimiter(limiter)
-		}
-	}
-}
+var _ RouteResolver = (*Router)(nil)
