@@ -386,8 +386,9 @@ func wecomBindingProvider(db *sql.DB, published *config.PublishedCache) wecom.Bi
 
 // feishuBindingProvider resolves every enabled Feishu binding candidate for
 // one binding_id from the control plane at callback time. Multiple tenants
-// may declare the same binding_id; the adapter disambiguates them with the
-// server-owned Verification Token, so cross-tenant forgery is rejected.
+// may declare the same binding_id; the adapter narrows encrypted callbacks
+// with the server-owned Encrypt Key, then requires a unique Verification
+// Token and app_id match, so cross-tenant ambiguity fails closed.
 func feishuBindingProvider(db *sql.DB, published *config.PublishedCache) feishu.BindingProvider {
 	return func(bindingID string) []feishu.Binding {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

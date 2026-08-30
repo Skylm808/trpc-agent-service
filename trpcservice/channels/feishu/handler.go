@@ -1,7 +1,9 @@
 package feishu
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -66,7 +68,12 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	payload := body
 	encrypted := strings.TrimSpace(raw.Encrypt) != ""
 	if encrypted {
-		payload, ok = handler.decryptCandidates(candidates, raw.Encrypt)
+		candidates = signedCandidates(request, candidates, body)
+		if len(candidates) == 0 {
+			writeError(writer, http.StatusUnauthorized, "invalid callback signature")
+			return
+		}
+		payload, candidates, ok = handler.decryptCandidates(candidates, raw.Encrypt)
 		if !ok {
 			writeError(writer, http.StatusUnauthorized, "invalid encrypted callback")
 			return
@@ -116,19 +123,53 @@ func (handler *Handler) bindings(path string) ([]Binding, bool) {
 	return candidates, true
 }
 
-// decryptCandidates tries every candidate's Encrypt Key and returns the
-// plaintext plus the candidates that could actually decrypt the payload.
-func (handler *Handler) decryptCandidates(candidates []Binding, encoded string) ([]byte, bool) {
+// decryptCandidates tries the signature-matched candidates and returns the
+// plaintext plus only the candidates that decrypted to that exact payload.
+// Keeping the narrowed set prevents a token belonging to another tenant from
+// being selected after one candidate's Encrypt Key authenticated the body.
+func (handler *Handler) decryptCandidates(candidates []Binding, encoded string) ([]byte, []Binding, bool) {
+	var payload []byte
+	var matched []Binding
 	for _, binding := range candidates {
 		if binding.EncryptKey == "" {
 			continue
 		}
 		plain, err := decrypt(binding.EncryptKey, encoded)
-		if err == nil {
-			return plain, true
+		if err != nil {
+			continue
+		}
+		if payload == nil {
+			payload = plain
+		}
+		if subtle.ConstantTimeCompare(payload, plain) == 1 {
+			matched = append(matched, binding)
 		}
 	}
-	return nil, false
+	return payload, matched, payload != nil && len(matched) > 0
+}
+
+// signedCandidates verifies the official Feishu event signature over the raw
+// request body. A configured Encrypt Key never accepts a missing signature.
+// The result is also a tenant-candidate filter because the key is server-owned.
+func signedCandidates(request *http.Request, candidates []Binding, body []byte) []Binding {
+	timestamp := strings.TrimSpace(request.Header.Get("X-Lark-Request-Timestamp"))
+	nonce := strings.TrimSpace(request.Header.Get("X-Lark-Request-Nonce"))
+	signature := strings.TrimSpace(request.Header.Get("X-Lark-Signature"))
+	if timestamp == "" || nonce == "" || signature == "" {
+		return nil
+	}
+	var matched []Binding
+	for _, binding := range candidates {
+		if binding.EncryptKey == "" {
+			continue
+		}
+		digest := sha256.Sum256([]byte(timestamp + nonce + binding.EncryptKey + string(body)))
+		expected := hex.EncodeToString(digest[:])
+		if len(expected) == len(signature) && subtle.ConstantTimeCompare([]byte(expected), []byte(signature)) == 1 {
+			matched = append(matched, binding)
+		}
+	}
+	return matched
 }
 
 // plaintextCandidates keeps only bindings without an Encrypt Key.
@@ -150,7 +191,7 @@ func (handler *Handler) verifyURL(writer http.ResponseWriter, candidates []Bindi
 		writeError(writer, http.StatusBadRequest, "invalid verification body")
 		return
 	}
-	if matchCandidate(candidates, verification.Token) == nil {
+	if !hasTokenCandidate(candidates, verification.Token) {
 		writeError(writer, http.StatusUnauthorized, "invalid verification token")
 		return
 	}
@@ -166,7 +207,7 @@ func (handler *Handler) receive(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusBadRequest, "invalid callback body")
 		return
 	}
-	binding := matchCandidate(candidates, env.Header.Token)
+	binding := matchEventCandidate(candidates, env.Header.Token, env.Header.AppID)
 	if binding == nil {
 		writeError(writer, http.StatusUnauthorized, "invalid verification token")
 		return
@@ -193,20 +234,39 @@ func (handler *Handler) receive(writer http.ResponseWriter, request *http.Reques
 	writeAccepted(writer)
 }
 
-// matchCandidate picks the candidate whose Verification Token matches using
-// constant-time comparison. This is what separates tenants that share a
-// binding_id, and what rejects forged callbacks.
-func matchCandidate(candidates []Binding, token string) *Binding {
+// hasTokenCandidate authenticates a URL-verification challenge. Challenges do
+// not route tenant data, so one or more matching candidates are equally safe.
+func hasTokenCandidate(candidates []Binding, token string) bool {
 	if token == "" {
-		return nil
+		return false
 	}
-	for i := range candidates {
-		expected := candidates[i].VerificationToken
+	for _, candidate := range candidates {
+		expected := candidate.VerificationToken
 		if expected != "" && len(expected) == len(token) && subtle.ConstantTimeCompare([]byte(expected), []byte(token)) == 1 {
-			return &candidates[i]
+			return true
 		}
 	}
-	return nil
+	return false
+}
+
+// matchEventCandidate requires both the secret token and event app_id and
+// rejects ambiguity instead of routing to whichever database row came first.
+func matchEventCandidate(candidates []Binding, token, appID string) *Binding {
+	if token == "" || appID == "" {
+		return nil
+	}
+	var matched *Binding
+	for i := range candidates {
+		expected := candidates[i].VerificationToken
+		if candidates[i].FeishuAppID != appID || expected == "" || len(expected) != len(token) || subtle.ConstantTimeCompare([]byte(expected), []byte(token)) != 1 {
+			continue
+		}
+		if matched != nil {
+			return nil
+		}
+		matched = &candidates[i]
+	}
+	return matched
 }
 
 func writeAccepted(writer http.ResponseWriter) {

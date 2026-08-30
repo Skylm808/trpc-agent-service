@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -123,6 +124,19 @@ func post(adapter http.Handler, bindingID string, body []byte) *httptest.Respons
 	return response
 }
 
+func postSigned(adapter http.Handler, bindingID string, body []byte, encryptKey string) *httptest.ResponseRecorder {
+	const timestamp = "1788080000"
+	const nonce = "feishu-callback-nonce"
+	digest := sha256.Sum256([]byte(timestamp + nonce + encryptKey + string(body)))
+	request := httptest.NewRequest(http.MethodPost, "/channels/feishu/"+bindingID, strings.NewReader(string(body)))
+	request.Header.Set("X-Lark-Request-Timestamp", timestamp)
+	request.Header.Set("X-Lark-Request-Nonce", nonce)
+	request.Header.Set("X-Lark-Signature", hex.EncodeToString(digest[:]))
+	response := httptest.NewRecorder()
+	adapter.ServeHTTP(response, request)
+	return response
+}
+
 func TestURLVerificationReturnsChallenge(t *testing.T) {
 	acceptor := &acceptorStub{}
 	adapter, err := feishu.NewDynamicHandler(acceptor, staticProvider(testBinding("tenant-a")))
@@ -150,7 +164,8 @@ func TestEncryptedEventDecryptsAndEntersGateway(t *testing.T) {
 	acceptor := &acceptorStub{}
 	adapter, _ := feishu.NewDynamicHandler(acceptor, staticProvider(binding))
 	event := textEvent(testAppID, "evt-enc-1", "ou_alice", "p2p", "oc_dm", "hello agent", "@_user_1")
-	response := post(adapter, "feishu-a", encryptBody(t, testEncrypt, []byte(event)))
+	body := encryptBody(t, testEncrypt, []byte(event))
+	response := postSigned(adapter, "feishu-a", body, testEncrypt)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -167,7 +182,8 @@ func TestEncryptedCallbackRejectsWrongKeyAndPlaintext(t *testing.T) {
 	binding.EncryptKey = testEncrypt
 	adapter, _ := feishu.NewDynamicHandler(&acceptorStub{}, staticProvider(binding))
 	// Encrypted with a different key must be rejected.
-	response := post(adapter, "feishu-a", encryptBody(t, "another-key", []byte(textEvent(testAppID, "evt-x", "ou_a", "p2p", "oc", "hi"))))
+	body := encryptBody(t, "another-key", []byte(textEvent(testAppID, "evt-x", "ou_a", "p2p", "oc", "hi")))
+	response := postSigned(adapter, "feishu-a", body, testEncrypt)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong key status=%d", response.Code)
 	}
@@ -175,6 +191,60 @@ func TestEncryptedCallbackRejectsWrongKeyAndPlaintext(t *testing.T) {
 	response = post(adapter, "feishu-a", []byte(textEvent(testAppID, "evt-x", "ou_a", "p2p", "oc", "hi")))
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("plaintext status=%d", response.Code)
+	}
+}
+
+func TestEncryptedCallbackRequiresValidSignature(t *testing.T) {
+	binding := testBinding("tenant-a")
+	binding.EncryptKey = testEncrypt
+	adapter, _ := feishu.NewDynamicHandler(&acceptorStub{}, staticProvider(binding))
+	body := encryptBody(t, testEncrypt, []byte(textEvent(testAppID, "evt-sig", "ou_a", "p2p", "oc", "hi")))
+
+	if response := post(adapter, "feishu-a", body); response.Code != http.StatusUnauthorized {
+		t.Fatalf("missing signature status=%d", response.Code)
+	}
+	if response := postSigned(adapter, "feishu-a", body, "wrong-signature-key"); response.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid signature status=%d", response.Code)
+	}
+}
+
+func TestEncryptedCallbackNarrowsTenantByEncryptKey(t *testing.T) {
+	// These bindings deliberately share binding_id, app_id, and Verification
+	// Token. Only tenant-b owns the key that authenticates and decrypts the
+	// callback, so database row order must never route it to tenant-a.
+	bindingA := testBinding("tenant-a")
+	bindingA.EncryptKey = "tenant-a-encrypt-key"
+	bindingB := testBinding("tenant-b")
+	bindingB.EncryptKey = "tenant-b-encrypt-key"
+	acceptor := &acceptorStub{}
+	adapter, _ := feishu.NewDynamicHandler(acceptor, staticProvider(bindingA, bindingB))
+	event := textEvent(testAppID, "evt-key-scope", "ou_same", "p2p", "oc_dm", "hello")
+	body := encryptBody(t, bindingB.EncryptKey, []byte(event))
+
+	response := postSigned(adapter, "feishu-a", body, bindingB.EncryptKey)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(acceptor.messages) != 1 || acceptor.messages[0].TenantID != "tenant-b" {
+		t.Fatalf("messages=%+v", acceptor.messages)
+	}
+}
+
+func TestPlaintextCallbackRejectsAmbiguousTenant(t *testing.T) {
+	// Without an Encrypt Key, identical app_id and Verification Token values
+	// cannot prove which tenant owns the callback. Fail closed instead of
+	// choosing the first database row.
+	bindingA := testBinding("tenant-a")
+	bindingB := testBinding("tenant-b")
+	acceptor := &acceptorStub{}
+	adapter, _ := feishu.NewDynamicHandler(acceptor, staticProvider(bindingA, bindingB))
+
+	response := post(adapter, "feishu-a", []byte(textEvent(testAppID, "evt-ambiguous", "ou_same", "p2p", "oc_dm", "hello")))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(acceptor.messages) != 0 {
+		t.Fatalf("messages=%+v", acceptor.messages)
 	}
 }
 

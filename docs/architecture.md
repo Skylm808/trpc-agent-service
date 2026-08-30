@@ -174,7 +174,7 @@ Adapter 把验签后的企业微信 XML 或飞书事件 JSON 转成 `InboundMess
 
 | 项目 | 企业微信自建应用 | 飞书自建应用 |
 | --- | --- | --- |
-| 入站格式 | XML 回调，SHA1 验签并使用 AES-CBC 解密 | JSON 事件订阅回调，校验 Encrypt Key 与 Verification Token |
+| 入站格式 | XML 回调，SHA1 验签并使用 AES-CBC 解密 | JSON 事件订阅回调，校验 `X-Lark-Signature`、Encrypt Key、Verification Token 与 app_id |
 | 幂等键 | 优先使用 `MsgId`；事件使用发送者、时间和事件字段派生稳定 ID | 使用事件头 `event_id` 与消息 `message_id` |
 | 身份与会话 | `FromUserName`、`ChatId/RoomId` 经过 binding 作用域映射 | `open_id`、`chat_id`、thread/Topic 经过 app binding 作用域映射 |
 | 回调处理 | 快速完成验签、Inbox claim 并返回 `200 success` | URL 验证与挑战应答后快速返回 2xx，执行与回复仍走异步 Worker/Outbox |

@@ -5,7 +5,8 @@
 `trpcservice/channels/feishu` 实现飞书自建应用的双向协议边界，与企业微信并存且租户隔离：
 
 - `POST /channels/feishu/{binding_id}` 处理事件订阅回调：URL verification 挑战应答、
-  Verification Token 常量时间校验、Encrypt Key（AES-256-CBC，SHA-256 派生密钥）解密；
+  `X-Lark-Signature` 原始请求体签名校验、Verification Token 常量时间校验、
+  Encrypt Key（AES-256-CBC，SHA-256 派生密钥）解密；
 - 事件订阅 v2 的 `im.message.receive_v1` 转换为统一 `gateway.InboundMessage`；
 - `event_id` 进入共享 Inbox 唯一键，飞书重试和重复事件不会重复运行 Agent；
 - `Sender` 使用 `auth/v3/tenant_access_token/internal` 获取并缓存 token，通过
@@ -27,7 +28,7 @@ sequenceDiagram
     participant S as Feishu Sender
     U->>F: 发送消息（单聊/群聊）
     F->>A: 事件订阅 v2 回调（可加密）
-    A->>A: Encrypt Key 解密 + Verification Token + app_id 校验
+    A->>A: 请求签名 + Encrypt Key 解密 + Token + app_id 校验
     A->>I: tenant-scoped claim(event_id)
     A-->>F: 200 {"code":0}
     I->>R: RunRequest
@@ -69,8 +70,9 @@ channels:
 - `binding_id` 只用于查找服务端控制面配置；tenant、app、config_version 永远来自服务端
   当前发布版本，客户端无法在回调中指定。
 - 多个租户可以声明相同的 `binding_id` 或相同的飞书 `app_id`：Adapter 先按 binding_id
-  取出全部候选绑定，再用服务端 Verification Token 常量时间比较消歧，跨租户伪造会被
-  401 拒绝，不会串租户。
+  取出全部候选绑定。加密回调先用各候选的 Encrypt Key 校验 `X-Lark-Signature` 并解密，
+  再以 Verification Token 与 app_id 做唯一匹配；明文回调也必须唯一匹配。无法消歧时
+  返回 401，不按数据库行顺序选择租户。
 - 事件头 `app_id` 必须与绑定的 `provider_account_id` 一致，否则 401。
 - disabled 租户 / App / Binding 解析不到候选，返回 404，不泄露租户信息。
 
@@ -89,7 +91,7 @@ channels:
 - 图片和文件转为安全元数据占位文本：不携带 `image_key`/`file_key`，不访问任意外部
   URL。后续受控下载接入 `MediaDownloader` 扩展点，必须校验来源、大小和 MIME。
 - 不支持的事件和消息类型返回 200 ACK，避免飞书无限重试。
-- JSON 格式错误返回 400；Verification Token、解密、app_id 校验失败返回 401；
+- JSON 格式错误返回 400；请求签名、Verification Token、解密、app_id 校验失败返回 401；
   Inbox/PostgreSQL 临时失败返回 503 让飞书按平台策略重试；重复 `event_id` 返回 200
   但不会再次执行。
 - HTTP 错误不包含密钥、加密 payload 原文或完整用户消息。
@@ -124,8 +126,8 @@ go test ./trpcservice/delivery -run Feishu
 go test ./cmd/trpc-service -run Feishu
 ```
 
-覆盖 URL verification、错误 token、Encrypt Key 加解密、明文拒绝、app_id 隔离、404、
-event_id 幂等、共享 app_id/binding_id 的多租户消歧、单聊/群聊身份稳定、飞书与企业微信
+覆盖 URL verification、错误 token、`X-Lark-Signature` 缺失/伪造、Encrypt Key 加解密、
+明文拒绝、app_id 隔离、404、event_id 幂等、共享 app_id/binding_id 的多租户消歧、单聊/群聊身份稳定、飞书与企业微信
 隔离、文本/图片/文件转换、token 缓存与并发单飞刷新、失效重试一次、UTF-8 分片、错误
 分类、Outbox 集成、secret canary 脱敏和 v1→v2/rollback 的 Sender 切换。PostgreSQL 集成
 测试（`TRPC_AGENT_POSTGRES_TEST_DSN`）覆盖飞书 binding 的发布、禁用、回滚与租户隔离。

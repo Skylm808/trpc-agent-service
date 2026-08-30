@@ -184,8 +184,8 @@ curl -H 'Authorization: Bearer local-secret' \
 
 **本 PR（PR10：飞书 Channel Adapter 与 Sender）实现**：
 
-- 飞书事件订阅回调：URL verification 挑战应答、Verification Token 常量时间校验、Encrypt Key（AES-256-CBC）解密，事件订阅 v2 `im.message.receive_v1` 转换为统一 `gateway.InboundMessage`。
-- 多租户消歧：多个租户可共享飞书 app_id 或 binding_id，Adapter 用服务端 Verification Token 区分；事件头 app_id 与绑定不一致返回 401；disabled 租户/App/Binding 返回 404。
+- 飞书事件订阅回调：URL verification 挑战应答、`X-Lark-Signature` 原始请求体签名校验、Verification Token 常量时间校验、Encrypt Key（AES-256-CBC）解密，事件订阅 v2 `im.message.receive_v1` 转换为统一 `gateway.InboundMessage`。
+- 多租户消歧：多个租户可共享飞书 app_id 或 binding_id；加密回调以服务端 Encrypt Key 验签和解密后，再通过 Verification Token 与 app_id 唯一匹配，无法唯一匹配时返回 401；disabled 租户/App/Binding 返回 404。
 - 身份与 session：open_id 优先（union_id 兜底，不用昵称），`user_id` 带 channel + binding 范围，单聊/群聊 session 稳定，与企业微信相同外部 ID 永不冲突。
 - 消息解析：文本（剥离 @机器人提及占位）、图片/文件安全元数据（不含 image_key/file_key、不访问外部 URL，预留 `MediaDownloader` 扩展点），不支持的事件安全 ACK。
 - 飞书 Sender：tenant_access_token 并发安全缓存、提前一分钟刷新、失效强制刷新重试一次；单聊/群聊文本回复、4096 字节 UTF-8 安全分片；可重试/永久/uncertain 错误分类；完整复用 Outbox、Delivery Worker、Redis 限流、重试和 DLQ。
