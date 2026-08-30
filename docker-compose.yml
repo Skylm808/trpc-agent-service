@@ -46,6 +46,9 @@ services:
       WECOM_CALLBACK_TOKEN: ${WECOM_CALLBACK_TOKEN:-}
       WECOM_APP_SECRET: ${WECOM_APP_SECRET:-}
       WECOM_ENCODING_AES_KEY: ${WECOM_ENCODING_AES_KEY:-}
+      FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_ENCRYPT_KEY: ${FEISHU_ENCRYPT_KEY:-}
     depends_on:
       migrate:
         condition: service_completed_successfully

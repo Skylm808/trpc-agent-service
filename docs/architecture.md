@@ -24,7 +24,7 @@ flowchart TB
     subgraph EDGE["2. Channel Adapter 与 Gateway"]
         direction LR
         WCA[WeCom Adapter<br/>验签/解密/规范化]
-        FSA[飞书 Adapter（PR10）<br/>事件订阅/身份映射]
+        FSA[飞书 Adapter<br/>事件订阅/验签/身份映射]
         GW[Agent Gateway<br/>认证/租户路由/Inbox Claim]
     end
 
@@ -65,7 +65,7 @@ flowchart TB
         OUTBOX[(PostgreSQL Outbox)]
         OUT[Delivery Worker]
         WAPI[企业微信发送 API]
-        FAPI[飞书 Open API（PR10）]
+        FAPI[飞书 Open API]
     end
 
     subgraph OBS["7. 可观测性"]
@@ -180,9 +180,9 @@ Adapter 把验签后的企业微信 XML 或飞书事件 JSON 转成 `InboundMess
 | 回调处理 | 快速完成验签、Inbox claim 并返回 `200 success` | URL 验证与挑战应答后快速返回 2xx，执行与回复仍走异步 Worker/Outbox |
 | 主动回复 | 获取 `access_token` 后调用 `message/send` 或 `appchat/send` | 使用 tenant_access_token 调用 `im/v1/messages`，支持文本与交互式卡片 |
 | 平台限制 | 文本按 UTF-8 字节分片，处理成员频率限制和 token 刷新 | 处理消息长度、频控与 token 缓存刷新，群聊需要 @机器人才触发事件 |
-| 当前状态 | Adapter、Sender、协议测试和生产组合器已完成，真实链路已联调通过 | 配置模型已就绪，Adapter/Sender 由 PR10 交付 |
+| 当前状态 | Adapter、Sender、协议测试和生产组合器已完成，真实链路已联调通过 | Adapter/Sender/协议测试已完成（PR10），待真实飞书账号联调 |
 
-企业微信的图片、文件和未识别语音转成元数据占位文本，不自动下载 `media_id`。撤回等事件只确认接收，不触发 Runner；未来若同步撤回状态，应追加 tombstone event，已发生的 Tool 副作用不能自动撤销。实现细节见[企业微信 Channel Adapter](wecom.md)。飞书后续只新增协议 Adapter 和 Sender（PR10），其他主链路不变。
+企业微信的图片、文件和未识别语音转成元数据占位文本，不自动下载 `media_id`。撤回等事件只确认接收，不触发 Runner；未来若同步撤回状态，应追加 tombstone event，已发生的 Tool 副作用不能自动撤销。实现细节见[企业微信 Channel Adapter](wecom.md)。飞书 Adapter 与 Sender 已由 PR10 交付，与企业微信共用同一主链路；细节见[飞书 Channel Adapter](feishu.md)。
 
 ## 5. 最小数据模型
 
@@ -277,7 +277,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、租户成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis 跨节点限流、治理审计、OpenTelemetry 链路、Compose 最小部署和企业微信 Adapter/Sender。Gateway 到 Worker 的即时快速路径仍是进程内 dispatcher，但丢失的任务可由任一节点从 PostgreSQL 恢复。飞书 Adapter（PR10）、共享预算/审批/状态、投递异常的 Admin 运维页及 Kubernetes manifest 仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。
+当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis 跨节点限流、治理审计、OpenTelemetry 链路、Compose 最小部署、生产 Admin 控制面与动态 Bundle 切换，以及企业微信和飞书两个 Channel Adapter/Sender。Gateway 到 Worker 的即时快速路径仍是进程内 dispatcher，但丢失的任务可由任一节点从 PostgreSQL 恢复。共享预算/审批/状态、投递异常的 Admin 运维页及 Kubernetes manifest 仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。
 
 ## 10. 预期效果与时间规划
 
@@ -300,7 +300,8 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | --- | --- | --- | --- |
 | T0：方案与最小生产链路 | 2026 年 8 月 27 日 | 本文、两张图、数据模型、幂等/迁移策略、风险清单、Compose、PostgreSQL/Redis、真实模型 Provider | 已完成 |
 | T1：企业微信真实联调 | T0 后 1–2 个工作日 | 测试企业、HTTPS 回调、IP 白名单、真实收发、失败回放 | 已完成并跑通真实链路 |
-| T2：第二通道与跨节点实时调度 | T0 后 3–5 个工作日 | 飞书 Adapter/Sender（PR10）、共享 command/event bus、跨节点 cancel/status | 规划中 |
+| T2a：飞书通道（PR10） | 已完成 | 飞书 Adapter/Sender、事件验签解密、身份映射、动态配置接入 | 代码已完成，待真实飞书账号联调 |
+| T2b：跨节点实时调度 | T0 后 3–5 个工作日 | 共享 command/event bus、跨节点 cancel/status | 规划中 |
 | T3：生产运维补强 | T0 后 5–8 个工作日 | Kubernetes manifests、共享预算/审批、DLQ/uncertain 管理接口、容量压测 | 规划中 |
 
 时间从依赖就绪后计算，不含企业微信权限、公网域名、TLS 证书或平台审核等待。

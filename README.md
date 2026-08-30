@@ -182,9 +182,18 @@ curl -H 'Authorization: Bearer local-secret' \
 - disabled 租户 / App / Binding 立即拒绝新请求；生产配置缺少共享 PostgreSQL 后端时 fail fast，Admin 发布非持久化存储配置会被直接拒绝。
 - 配置发布后无需 `docker compose down -v`、无需删除数据卷、无需重建环境；启动文件只在首次启动时播种，之后数据库是唯一事实源。
 
+**本 PR（PR10：飞书 Channel Adapter 与 Sender）实现**：
+
+- 飞书事件订阅回调：URL verification 挑战应答、Verification Token 常量时间校验、Encrypt Key（AES-256-CBC）解密，事件订阅 v2 `im.message.receive_v1` 转换为统一 `gateway.InboundMessage`。
+- 多租户消歧：多个租户可共享飞书 app_id 或 binding_id，Adapter 用服务端 Verification Token 区分；事件头 app_id 与绑定不一致返回 401；disabled 租户/App/Binding 返回 404。
+- 身份与 session：open_id 优先（union_id 兜底，不用昵称），`user_id` 带 channel + binding 范围，单聊/群聊 session 稳定，与企业微信相同外部 ID 永不冲突。
+- 消息解析：文本（剥离 @机器人提及占位）、图片/文件安全元数据（不含 image_key/file_key、不访问外部 URL，预留 `MediaDownloader` 扩展点），不支持的事件安全 ACK。
+- 飞书 Sender：tenant_access_token 并发安全缓存、提前一分钟刷新、失效强制刷新重试一次；单聊/群聊文本回复、4096 字节 UTF-8 安全分片；可重试/永久/uncertain 错误分类；完整复用 Outbox、Delivery Worker、Redis 限流、重试和 DLQ。
+- 动态配置：飞书 binding 的发布、禁用、回滚即时生效；Outbox 按入口钉住的 config_version 解析旧 Sender；canary secret 不出现在响应、日志、错误或审计中。
+- 真实飞书端到端联调尚未执行：缺少飞书测试账号、公网回调域名与平台事件订阅配置，步骤见 [docs/feishu.md](docs/feishu.md)；本 PR 不声明真实 E2E 已通过。
+
 **后续计划**：
 
-- PR10：飞书 Channel Adapter 与 Sender（事件订阅回调验证、Encrypt Key / Verification Token、身份映射、卡片回复、与企业微信并存且租户隔离）。
 - PR11：真正的跨节点共享调度与控制。
 - PR12：多后端 Storage Router 与数据迁移 Worker。
 - PR13：Knowledge/RAG、MCP 与业务工具。
@@ -231,14 +240,15 @@ API 响应只包含版本元数据（`version`、`content_hash`、`created_by`�
 Bundle 的版本切换与生命周期约束见 [`docs/runtime.md`](docs/runtime.md)，多节点
 Inbox/fencing/Outbox 与 OpenClaw HTTP 链路见
 [`docs/message-runtime.md`](docs/message-runtime.md)，企业微信回调验签、消息规范化和
-主动回复见 [`docs/wecom.md`](docs/wecom.md)。
+主动回复见 [`docs/wecom.md`](docs/wecom.md)，飞书事件订阅验签解密、身份映射和
+Sender 见 [`docs/feishu.md`](docs/feishu.md)。
 PostgreSQL + Redis 的 Compose 启动、验证和生产拓扑边界见
 [`docs/deployment.md`](docs/deployment.md)。
 
-PR7 的企业微信协议测试不需要真实账号：
+PR7 的企业微信协议测试和 PR10 的飞书协议测试都不需要真实账号：
 
 ```bash
-go test ./trpcservice/channels/wecom
+go test ./trpcservice/channels/wecom ./trpcservice/channels/feishu
 ```
 
 Docker 可用时，可真实验证 PostgreSQL migration 的首次 up、重复 up、down 和再次 up：

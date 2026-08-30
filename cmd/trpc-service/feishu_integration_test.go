@@ -1,0 +1,122 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"os"
+	"testing"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/admin"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
+)
+
+// TestFeishuBindingPublishDisableRollbackAndIsolation drives the full
+// control-plane loop for Feishu bindings against a real PostgreSQL: publish,
+// provider resolution, disable, rollback, and two tenants sharing one
+// binding_id and one Feishu app_id without leaking across tenants.
+func TestFeishuBindingPublishDisableRollbackAndIsolation(t *testing.T) {
+	dsn := os.Getenv("TRPC_AGENT_POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set TRPC_AGENT_POSTGRES_TEST_DSN to run PostgreSQL integration tests")
+	}
+	t.Setenv("PR10_FEISHU_VERIFICATION_TOKEN", "verification-fixture")
+	t.Setenv("PR10_FEISHU_APP_SECRET", "app-secret-fixture")
+	t.Setenv("PR10_FEISHU_ENCRYPT_KEY", "encrypt-fixture")
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := repository.Migrate(ctx, func(ctx context.Context, script string) error {
+		_, err := db.ExecContext(ctx, script)
+		return err
+	}, repository.DirectionUp); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := repository.NewSQLStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := admin.NewService(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := config.NewPublishedCache(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tenantA, tenantB := "feishu-a-"+suffix, "feishu-b-"+suffix
+	provider := feishuBindingProvider(db, published)
+	payload := func(tenantID string, version int, enabled bool) []byte {
+		return feishuTenantPayload(tenantID, version, "cli_shared_app", enabled)
+	}
+	// The payload fixture uses the shared binding_id "feishu-a" for every
+	// tenant, which exercises cross-tenant disambiguation below.
+	if _, err := service.Publish(ctx, tenantA, 0, payload(tenantA, 1, true)); err != nil {
+		t.Fatal(err)
+	}
+	candidates := provider("feishu-a")
+	if len(candidates) != 1 || candidates[0].TenantID != tenantA {
+		t.Fatalf("candidates=%+v", candidates)
+	}
+	if candidates[0].VerificationToken != "verification-fixture" || candidates[0].EncryptKey != "encrypt-fixture" || candidates[0].FeishuAppID != "cli_shared_app" || candidates[0].ConfigVersion != 1 {
+		t.Fatalf("resolved=%+v", candidates[0])
+	}
+
+	// Disable: new callbacks resolve nothing.
+	if _, err := service.Publish(ctx, tenantA, 1, payload(tenantA, 2, false)); err != nil {
+		t.Fatal(err)
+	}
+	if got := provider("feishu-a"); len(got) != 0 {
+		t.Fatalf("disabled candidates=%+v", got)
+	}
+
+	// Rollback creates a new version and re-enables the binding.
+	rolled, err := service.Rollback(ctx, tenantA, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rolled.Version != 3 || rolled.RolledBackFrom == nil || *rolled.RolledBackFrom != 1 {
+		t.Fatalf("rolled=%+v", rolled)
+	}
+	candidates = provider("feishu-a")
+	if len(candidates) != 1 || candidates[0].ConfigVersion != 3 {
+		t.Fatalf("rollback candidates=%+v", candidates)
+	}
+
+	// A second tenant with the same binding_id and the same Feishu app_id is
+	// materialized independently; both candidates resolve with their own
+	// tenant scope.
+	if _, err := service.Publish(ctx, tenantB, 0, payload(tenantB, 1, true)); err != nil {
+		t.Fatal(err)
+	}
+	candidates = provider("feishu-a")
+	if len(candidates) != 2 {
+		t.Fatalf("shared binding candidates=%+v", candidates)
+	}
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		seen[candidate.TenantID] = true
+	}
+	if !seen[tenantA] || !seen[tenantB] {
+		t.Fatalf("tenant scope=%v", seen)
+	}
+
+	// The materialized row is tenant-scoped in PostgreSQL.
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_bindings WHERE tenant_id=$1 AND binding_id='feishu-a' AND channel_type='feishu'`, tenantA).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("channel_bindings count=%d err=%v", count, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_bindings WHERE tenant_id=$1`, tenantB).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("tenant-b bindings count=%d err=%v", count, err)
+	}
+}

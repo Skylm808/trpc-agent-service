@@ -54,10 +54,14 @@ tenants:
               provider: env
               key: WECOM_ENCODING_AES_KEY
             enabled: false
-          # 飞书通道由后续 PR 交付适配器；这里仅声明配置形状，保持 disabled。
+          # 飞书 Adapter 与 Sender 已由 PR10 交付；此处默认 disabled，填入真实
+          # App ID 并通过 Admin API 发布新版本即可启用，无需重启。
           - binding_id: demo-feishu
             type: feishu
             provider_account_id: replace-with-feishu-app-id
+            token:
+              provider: env
+              key: FEISHU_VERIFICATION_TOKEN
             secret:
               provider: env
               key: FEISHU_APP_SECRET

@@ -50,6 +50,9 @@ tenants:
           - binding_id: feishu-a
             type: feishu
             provider_account_id: bot-a
+            token:
+              provider: env
+              key: FEISHU_VERIFICATION_TOKEN
             secret:
               provider: env
               key: FEISHU_APP_SECRET

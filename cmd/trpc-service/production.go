@@ -16,6 +16,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/backend"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/delivery"
@@ -186,7 +187,7 @@ func (routes *publishedDeliveryRoutes) Keys() []delivery.BindingKey {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	rows, err := routes.db.QueryContext(ctx, `SELECT tenant_id,binding_id FROM channel_bindings WHERE channel_type=$1`, tenant.ChannelTypeWeCom)
+	rows, err := routes.db.QueryContext(ctx, `SELECT tenant_id,binding_id FROM channel_bindings WHERE channel_type IN ($1,$2)`, tenant.ChannelTypeWeCom, tenant.ChannelTypeFeishu)
 	if err != nil {
 		return nil
 	}
@@ -235,24 +236,32 @@ func (routes *publishedDeliveryRoutes) Resolve(message gateway.OutboundMessage) 
 	}
 	var selected *tenant.ChannelBinding
 	for _, binding := range snapshot.App().Channels {
-		if binding.ID == message.BindingID && binding.Type == tenant.ChannelTypeWeCom && binding.Enabled {
+		if binding.ID == message.BindingID && binding.Enabled && (binding.Type == tenant.ChannelTypeWeCom || binding.Type == tenant.ChannelTypeFeishu) {
 			copy := binding
 			selected = &copy
 			break
 		}
 	}
 	if selected == nil {
-		return nil, errors.New("delivery: published WeCom binding is unavailable")
+		return nil, errors.New("delivery: published channel binding is unavailable")
 	}
 	appSecret, err := secret.ResolveLocal(selected.Secret)
 	if err != nil {
-		return nil, errors.New("delivery: WeCom application secret is unavailable")
+		return nil, errors.New("delivery: channel application secret is unavailable")
 	}
-	agentID, err := strconv.ParseInt(selected.ProviderAppID, 10, 64)
-	if err != nil || agentID <= 0 {
-		return nil, errors.New("delivery: WeCom AgentID is invalid")
+	var sender channels.TextSender
+	switch selected.Type {
+	case tenant.ChannelTypeWeCom:
+		agentID, err := strconv.ParseInt(selected.ProviderAppID, 10, 64)
+		if err != nil || agentID <= 0 {
+			return nil, errors.New("delivery: WeCom AgentID is invalid")
+		}
+		sender = &wecom.Sender{AgentID: agentID, Tokens: &wecom.CredentialTokenSource{CorpID: selected.ProviderAccountID, CorpSecret: appSecret}}
+	case tenant.ChannelTypeFeishu:
+		sender = &feishu.Sender{Tokens: &feishu.AppTokenSource{AppID: selected.ProviderAccountID, AppSecret: appSecret}}
+	default:
+		return nil, errors.New("delivery: channel type is unsupported")
 	}
-	sender := &wecom.Sender{AgentID: agentID, Tokens: &wecom.CredentialTokenSource{CorpID: selected.ProviderAccountID, CorpSecret: appSecret}}
 	routes.mu.Lock()
 	if existing := routes.senders[key]; existing != nil {
 		routes.mu.Unlock()
@@ -265,8 +274,8 @@ func (routes *publishedDeliveryRoutes) Resolve(message gateway.OutboundMessage) 
 
 var _ delivery.RouteResolver = (*publishedDeliveryRoutes)(nil)
 
-// productionDecorators mounts the dynamic WeCom callback adapter and the
-// authenticated administration API around the gateway.
+// productionDecorators mounts the dynamic WeCom and Feishu callback adapters
+// and the authenticated administration API around the gateway.
 func productionDecorators(db *sql.DB, store repository.Store, published *config.PublishedCache, redactor *servicelog.Redactor) []openclaw.HandlerDecorator {
 	wecomDecorator := func(core *openclaw.Handler, next http.Handler) (http.Handler, error) {
 		adapter, err := wecom.NewDynamicHandler(core, wecomBindingProvider(db, published))
@@ -275,6 +284,16 @@ func productionDecorators(db *sql.DB, store repository.Store, published *config.
 		}
 		mux := http.NewServeMux()
 		mux.Handle("/channels/wecom/", adapter)
+		mux.Handle("/", next)
+		return mux, nil
+	}
+	feishuDecorator := func(core *openclaw.Handler, next http.Handler) (http.Handler, error) {
+		adapter, err := feishu.NewDynamicHandler(core, feishuBindingProvider(db, published))
+		if err != nil {
+			return nil, err
+		}
+		mux := http.NewServeMux()
+		mux.Handle("/channels/feishu/", adapter)
 		mux.Handle("/", next)
 		return mux, nil
 	}
@@ -304,7 +323,7 @@ func productionDecorators(db *sql.DB, store repository.Store, published *config.
 		mux.Handle("/", next)
 		return mux, nil
 	}
-	return []openclaw.HandlerDecorator{wecomDecorator, adminDecorator}
+	return []openclaw.HandlerDecorator{wecomDecorator, feishuDecorator, adminDecorator}
 }
 
 // expectedCredential resolves the server-owned credential for one published
@@ -362,6 +381,52 @@ func wecomBindingProvider(db *sql.DB, published *config.PublishedCache) wecom.Bi
 			CorpID: binding.ProviderAccountID, AgentID: binding.ProviderAppID,
 			ConfigVersion: version, Crypt: crypt,
 		}, true
+	}
+}
+
+// feishuBindingProvider resolves every enabled Feishu binding candidate for
+// one binding_id from the control plane at callback time. Multiple tenants
+// may declare the same binding_id; the adapter disambiguates them with the
+// server-owned Verification Token, so cross-tenant forgery is rejected.
+func feishuBindingProvider(db *sql.DB, published *config.PublishedCache) feishu.BindingProvider {
+	return func(bindingID string) []feishu.Binding {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		rows, err := db.QueryContext(ctx, bindingLookupQL, bindingID, tenant.ChannelTypeFeishu)
+		if err != nil {
+			return nil
+		}
+		defer rows.Close()
+		var candidates []feishu.Binding
+		for rows.Next() {
+			var tenantID, appID string
+			var version tenant.ConfigVersion
+			if err := rows.Scan(&tenantID, &appID, &version); err != nil {
+				return nil
+			}
+			binding, err := publishedBinding(published, ctx, tenantID, bindingID, version)
+			if err != nil || binding.Type != tenant.ChannelTypeFeishu {
+				continue
+			}
+			token, err := secret.ResolveLocal(binding.Token)
+			if err != nil {
+				continue
+			}
+			candidate := feishu.Binding{
+				TenantID: tenantID, AppID: appID, BindingID: bindingID,
+				FeishuAppID: binding.ProviderAccountID, VerificationToken: token,
+				ConfigVersion: version,
+			}
+			if !binding.EncryptionKey.IsZero() {
+				encryptKey, err := secret.ResolveLocal(binding.EncryptionKey)
+				if err != nil {
+					continue
+				}
+				candidate.EncryptKey = encryptKey
+			}
+			candidates = append(candidates, candidate)
+		}
+		return candidates
 	}
 }
 
