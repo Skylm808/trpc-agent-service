@@ -173,10 +173,10 @@ func seedDeliveryParents(t *testing.T, ctx context.Context, db *sql.DB, tenantID
 		}
 	}
 	for _, binding := range bindings {
-		channelType := binding
-		if binding == "http" {
-			channelType = "http"
-		}
+		// Keep test rows outside the production Delivery Worker route query so
+		// this integration suite can run beside a live Compose service without
+		// that worker claiming the fixture Outbox first.
+		channelType := "integration-test"
 		if _, err := db.ExecContext(ctx, `INSERT INTO channel_bindings (tenant_id,app_id,binding_id,channel_type,provider_account_id,enabled,config_version) VALUES ($1,$2,$3,$4,$3,TRUE,1)`, tenantID, appID, binding, channelType); err != nil {
 			t.Fatal(err)
 		}

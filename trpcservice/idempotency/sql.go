@@ -161,7 +161,7 @@ func (store *SQLStore) ClaimReady(ctx context.Context, owner string, ttl time.Du
 	if _, err := tx.ExecContext(ctx, `UPDATE inbox_messages AS candidate SET status='dlq',lease_until=NULL,next_attempt_at=NULL WHERE `+readyPredicate+` AND candidate.attempts>=$2`, now, store.maxAttempts()); err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT candidate.inbox_id,candidate.status,candidate.attempts,candidate.inbox_seq,candidate.payload_json
+	rows, err := tx.QueryContext(ctx, `SELECT candidate.tenant_id,candidate.binding_id,candidate.external_message_id,candidate.inbox_id,candidate.status,candidate.attempts,candidate.inbox_seq,candidate.payload_json
 		FROM inbox_messages AS candidate
 		WHERE `+readyPredicate+` AND candidate.attempts<$2
 		AND NOT EXISTS (
@@ -177,24 +177,26 @@ func (store *SQLStore) ClaimReady(ctx context.Context, owner string, ttl time.Du
 		return nil, err
 	}
 	type candidate struct {
-		inboxID string
-		status  Status
-		attempt int
-		seq     uint64
-		message gateway.InboundMessage
+		tenantID, bindingID, externalMessageID string
+		inboxID                                string
+		status                                 Status
+		attempt                                int
+		seq                                    uint64
+		message                                gateway.InboundMessage
+		invalid                                bool
 	}
 	var candidates []candidate
 	for rows.Next() {
 		var item candidate
 		var payload []byte
-		if err := rows.Scan(&item.inboxID, &item.status, &item.attempt, &item.seq, &payload); err != nil {
+		if err := rows.Scan(&item.tenantID, &item.bindingID, &item.externalMessageID, &item.inboxID, &item.status, &item.attempt, &item.seq, &payload); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		if err := json.Unmarshal(payload, &item.message); err != nil {
-			rows.Close()
-			return nil, err
-		}
+		item.invalid = json.Unmarshal(payload, &item.message) != nil ||
+			item.message.TenantID != item.tenantID || item.message.BindingID != item.bindingID ||
+			item.message.ExternalMessageID != item.externalMessageID || item.message.AppID == "" ||
+			item.message.UserID == "" || item.message.SessionID == "" || item.message.ConfigVersion == 0
 		candidates = append(candidates, item)
 	}
 	if err := rows.Close(); err != nil {
@@ -203,9 +205,16 @@ func (store *SQLStore) ClaimReady(ctx context.Context, owner string, ttl time.Du
 	claims := make([]Claim, 0, len(candidates))
 	until := now.Add(ttl)
 	for _, item := range candidates {
+		if item.invalid {
+			if _, err := tx.ExecContext(ctx, `UPDATE inbox_messages SET status='dlq',lease_until=NULL,next_attempt_at=NULL,last_error='invalid durable inbox payload'
+				WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3`, item.tenantID, item.bindingID, item.externalMessageID); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		attempt := item.attempt + 1
 		token := claimToken(item.inboxID, attempt, now)
-		result, err := tx.ExecContext(ctx, `UPDATE inbox_messages SET status='processing',attempts=$4,claim_owner=$5,claim_token=$6,lease_until=$7,claimed_at=$8,next_attempt_at=NULL,last_error=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3`, item.message.TenantID, item.message.BindingID, item.message.ExternalMessageID, attempt, owner, token, until, now)
+		result, err := tx.ExecContext(ctx, `UPDATE inbox_messages SET status='processing',attempts=$4,claim_owner=$5,claim_token=$6,lease_until=$7,claimed_at=$8,next_attempt_at=NULL,last_error=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3`, item.tenantID, item.bindingID, item.externalMessageID, attempt, owner, token, until, now)
 		if err != nil {
 			return nil, err
 		}

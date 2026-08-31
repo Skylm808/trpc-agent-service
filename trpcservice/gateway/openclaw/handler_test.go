@@ -35,7 +35,7 @@ type captureSubmitter struct {
 type fakeCanceler struct{ requestID string }
 type fakeApprover struct{ tenantID, requestID, toolName string }
 
-func (canceler *fakeCanceler) Cancel(requestID string) bool {
+func (canceler *fakeCanceler) Cancel(_ string, requestID string) bool {
 	canceler.requestID = requestID
 	return true
 }

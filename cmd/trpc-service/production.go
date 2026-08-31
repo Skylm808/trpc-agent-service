@@ -18,6 +18,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/cluster"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/delivery"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
@@ -25,6 +26,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	servicemetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/policy"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/sessioncoord"
@@ -50,27 +52,43 @@ type durableComponent struct {
 	delivery *delivery.Worker
 	db       *sql.DB
 	redis    *backend.Redis
+	nodes    *cluster.NodeRegistry
 }
 
 func (component *durableComponent) Start(ctx context.Context) error {
 	if err := component.inner.Start(ctx); err != nil {
+		if component.nodes != nil {
+			_ = component.nodes.Close(context.Background())
+		}
 		return err
 	}
 	if component.delivery != nil {
 		if err := component.delivery.Start(ctx); err != nil {
-			return errors.Join(err, component.inner.Close(context.Background()))
+			var nodeErr error
+			if component.nodes != nil {
+				nodeErr = component.nodes.Close(context.Background())
+			}
+			return errors.Join(err, component.inner.Close(context.Background()), nodeErr)
 		}
 	}
 	return nil
 }
 
 func (component *durableComponent) Close(ctx context.Context) error {
+	var drainErr error
+	if component.nodes != nil {
+		drainErr = component.nodes.BeginDrain(ctx)
+	}
 	innerErr := component.inner.Close(ctx)
 	var deliveryErr error
 	if component.delivery != nil {
 		deliveryErr = component.delivery.Close(ctx)
 	}
-	return errors.Join(innerErr, deliveryErr, component.redis.Close(), component.db.Close())
+	var nodeErr error
+	if component.nodes != nil {
+		nodeErr = component.nodes.Close(ctx)
+	}
+	return errors.Join(drainErr, innerErr, deliveryErr, nodeErr, component.redis.Close(), component.db.Close())
 }
 
 func newDurableComponent(ctx context.Context, address string, file *config.File) (trpcservice.Component, error) {
@@ -130,6 +148,17 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 	redactor := servicelog.NewRedactor(nil, nil)
 	bus := &openclaw.RedisEventBus{Backend: redisBackend}
 	workerID := nodeID()
+	nodes, err := cluster.NewNodeRegistry(ctx, db, workerID, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("register worker node: %w", err)
+	}
+	statusStore := &openclaw.SQLStatusStore{DB: db}
+	policyEngine := &policy.Engine{
+		Identity:           policy.AuthenticatedIdentityAuthorizer{},
+		Budgets:            &policy.SQLBudgetStore{DB: db},
+		Approvals:          &policy.SQLApprovals{DB: db},
+		CostMicrosPerToken: 1,
+	}
 	component, err := openclaw.NewComponent(ctx, address, file, routes, openclaw.ComponentDependencies{
 		Inbox:          &idempotency.SQLStore{DB: db},
 		Coordinator:    coordinator,
@@ -137,16 +166,23 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 		RuntimeFactory: factory,
 		Audit:          &audit.SQLStore{DB: db, Redactor: redactor},
 		EventBus:       bus,
+		Status:         statusStore,
+		QueueBackend:   redisBackend,
+		ControlBackend: redisBackend,
+		Cancellations:  statusStore,
+		Policy:         policyEngine,
 		WorkerID:       workerID,
 		Snapshots:      gateway.StoreSnapshotResolver{Published: published},
 	}, productionDecorators(db, store, published, redactor)...)
 	if err != nil {
+		_ = nodes.Close(context.Background())
 		return nil, err
 	}
 	router := &publishedDeliveryRoutes{db: db, published: published, senders: make(map[deliverySenderKey]channels.TextSender)}
 	telemetry, err := servicemetrics.New("trpc-agent-service")
 	if err != nil {
 		_ = component.Close(context.Background())
+		_ = nodes.Close(context.Background())
 		return nil, err
 	}
 	outboxWorker, err := delivery.NewWorker(
@@ -158,11 +194,12 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 	)
 	if err != nil {
 		_ = component.Close(context.Background())
+		_ = nodes.Close(context.Background())
 		return nil, err
 	}
 	closeDB = false
 	closeRedis = false
-	return &durableComponent{inner: component, delivery: outboxWorker, db: db, redis: redisBackend}, nil
+	return &durableComponent{inner: component, delivery: outboxWorker, db: db, redis: redisBackend, nodes: nodes}, nil
 }
 
 type deliverySenderKey struct {

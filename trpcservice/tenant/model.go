@@ -93,8 +93,7 @@ const (
 	ChannelTypeHTTP ChannelType = "http"
 	// ChannelTypeWeCom is the WeCom channel.
 	ChannelTypeWeCom ChannelType = "wecom"
-	// ChannelTypeFeishu is the Feishu (Lark) channel. The adapter ships in a
-	// later PR; the type exists so configurations can already declare it.
+	// ChannelTypeFeishu is the Feishu (Lark) channel.
 	ChannelTypeFeishu ChannelType = "feishu"
 )
 

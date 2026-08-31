@@ -25,28 +25,35 @@ import (
 
 // Processor executes one already-claimed Inbox message.
 type Processor struct {
-	WorkerID    string
-	Inbox       idempotency.Store
-	Coordinator sessioncoord.LeaseCoordinator
-	Writes      sessioncoord.WriteStore
-	Runtimes    *serviceruntime.Manager
-	Snapshots   gateway.SnapshotResolver
-	Publisher   gateway.EventPublisher
-	LeaseTTL    time.Duration
-	RetryDelay  time.Duration
-	Policy      *policy.Engine
-	Audit       audit.Store
-	Redactor    *servicelog.Redactor
-	Telemetry   *servicemetrics.Telemetry
-	activeMu    sync.Mutex
-	active      map[string]context.CancelFunc
-	canceled    map[string]bool
+	WorkerID      string
+	Inbox         idempotency.Store
+	Coordinator   sessioncoord.LeaseCoordinator
+	Writes        sessioncoord.WriteStore
+	Runtimes      *serviceruntime.Manager
+	Snapshots     gateway.SnapshotResolver
+	Publisher     gateway.EventPublisher
+	LeaseTTL      time.Duration
+	RetryDelay    time.Duration
+	Policy        *policy.Engine
+	Audit         audit.Store
+	Redactor      *servicelog.Redactor
+	Telemetry     *servicemetrics.Telemetry
+	Cancellations CancellationStore
+	activeMu      sync.Mutex
+	active        map[string]context.CancelFunc
+	canceled      map[string]bool
 }
 
 // RuntimeFactory creates tenant services and gates every session mutation with the current fence.
 type PlatformStore interface {
 	sessioncoord.WriteStore
 	sessioncoord.FenceValidator
+}
+
+// CancellationStore is the durable cross-node cancellation intent queried by
+// a Worker before and while it owns a run.
+type CancellationStore interface {
+	Requested(context.Context, string, string) bool
 }
 
 // TestRuntimeFactory constructs the deterministic fixture used by protocol and
@@ -94,6 +101,7 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	ctx, runSpan := processor.Telemetry.Start(ctx, "worker.run", processor.spanFields(request))
 	defer runSpan.End()
 	started := time.Now()
+	completed := false
 	var projection *eventProjection
 	governanceDecision := "allow"
 	redact := processor.redact
@@ -134,7 +142,18 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	}()
 	defer func() {
 		if runErr != nil {
-			processor.publish(gateway.RunEvent{Type: "run.error", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Error: redact(runErr.Error()), Terminal: true})
+			// A stale stream copy is expected after another node reclaims the
+			// Inbox/session lease. It must not overwrite the new owner's shared
+			// status. Other recoverable failures remain non-terminal while the
+			// Inbox schedules a retry; policy rejection is terminal.
+			if errors.Is(runErr, idempotency.ErrClaimOwner) || errors.Is(runErr, sessioncoord.ErrStaleFence) {
+				return
+			}
+			eventType, terminal := "run.retrying", false
+			if completed {
+				eventType, terminal = "run.error", true
+			}
+			processor.publish(request, gateway.RunEvent{Type: eventType, RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Error: redact(runErr.Error()), Terminal: terminal})
 		}
 	}()
 	claim := idempotency.Claim{InboxID: request.InboxID, Owner: request.ClaimOwner, ClaimToken: request.ClaimToken, Attempt: request.ClaimAttempt, InboxSeq: request.InboxSeq, LeaseUntil: request.ClaimLeaseUntil, Message: gateway.InboundMessage{TenantID: request.TenantID, BindingID: request.BindingID, ExternalMessageID: request.ExternalMessageID}}
@@ -147,12 +166,21 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 		return err
 	}
 	request.ClaimLeaseUntil = claim.LeaseUntil
-	completed := false
 	defer func() {
 		if !completed && runErr != nil {
-			_ = processor.Inbox.Fail(context.Background(), claim, errors.New(redact(runErr.Error())), time.Now().UTC().Add(processor.retryDelay()))
+			failCtx, cancelFail := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = processor.Inbox.Fail(failCtx, claim, errors.New(redact(runErr.Error())), time.Now().UTC().Add(processor.retryDelay()))
+			cancelFail()
 		}
 	}()
+	if processor.cancellationRequested(ctx, request) {
+		if err := processor.Inbox.Cancel(ctx, claim); err != nil {
+			return err
+		}
+		completed = true
+		processor.publish(request, gateway.RunEvent{Type: "run.canceled", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Terminal: true})
+		return nil
+	}
 	leaseCtx, leaseSpan := processor.Telemetry.Start(ctx, "session.lease", processor.spanFields(request))
 	leaseStarted := time.Now()
 	lease, err := processor.Coordinator.Acquire(leaseCtx, request.Key(), processor.WorkerID, processor.leaseTTL())
@@ -188,26 +216,26 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 		return err
 	}
 	defer runtimeLease.Release()
-	processor.publish(gateway.RunEvent{Type: "run.started", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID})
+	processor.publish(request, gateway.RunEvent{Type: "run.started", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID})
 	runCtx, cancelRun := context.WithCancel(ctx)
 	runCtx = policy.WithRequest(runCtx, processor.Policy, policyRequest)
 	runCtx = servicelog.WithRedactor(runCtx, tenantRedactor)
 	runCtx = servicemetrics.WithTelemetry(runCtx, processor.Telemetry, processor.spanFields(request))
-	projection = &eventProjection{publisher: processor.Publisher, request: request, redact: redact}
+	projection = &eventProjection{publisher: processor.Publisher, request: request, workerID: processor.WorkerID, redact: redact}
 	projection.onUsage = func(tokens int64) error {
 		return processor.Policy.Reconcile(runCtx, policyRequest, tokens, processor.Policy.EstimateCost(tokens))
 	}
 	projection.cancel = cancelRun
-	processor.register(request.InboxID, cancelRun)
-	defer processor.unregister(request.InboxID)
+	processor.register(request.TenantID, request.InboxID, cancelRun)
+	defer processor.unregister(request.TenantID, request.InboxID)
 	renewDone := make(chan struct{})
 	renewFailure := make(chan error, 1)
-	go processor.renew(runCtx, cancelRun, lease, claim, renewDone, renewFailure)
+	go processor.renew(runCtx, cancelRun, request, lease, claim, renewDone, renewFailure)
 	runnerCtx, runnerSpan := processor.Telemetry.Start(sessioncoord.WithLease(runCtx, lease), "runner.execute", processor.spanFields(request))
 	runInput := serviceruntime.RunInput{RequestID: request.InboxID, UserID: request.UserID, SessionID: request.SessionID, Text: request.Text, Observer: projection.Observe, ToolFilter: controls.Visibility, ToolExecutionFilter: controls.Execution, ToolPermissionPolicy: controls.Permission}
 	_, err = runtimeLease.Runtime.Run(runnerCtx, runInput)
 	if err == nil && projection.pendingTool != "" {
-		processor.publish(gateway.RunEvent{Type: "run.approval_required", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Stage: "approval_required", ToolName: projection.pendingTool, ToolCallID: projection.pendingCall})
+		processor.publish(request, gateway.RunEvent{Type: "run.approval_required", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Stage: "approval_required", ToolName: projection.pendingTool, ToolCallID: projection.pendingCall})
 		if approvalErr := processor.Policy.WaitApproval(runnerCtx, policyRequest, projection.pendingTool); approvalErr != nil {
 			err = approvalErr
 		} else if resumer, ok := runtimeLease.Runtime.(serviceruntime.ToolResumer); !ok {
@@ -238,12 +266,12 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 			completed = true
 			return err
 		}
-		if errors.Is(err, context.Canceled) && processor.takeCanceled(request.InboxID) {
+		if errors.Is(err, context.Canceled) && processor.takeCanceled(request.TenantID, request.InboxID) {
 			if cancelErr := processor.Inbox.Cancel(context.Background(), claim); cancelErr != nil {
 				return cancelErr
 			}
 			completed = true
-			processor.publish(gateway.RunEvent{Type: "run.canceled", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Terminal: true})
+			processor.publish(request, gateway.RunEvent{Type: "run.canceled", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Terminal: true})
 			return nil
 		}
 		return err
@@ -290,7 +318,7 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 		return err
 	}
 	completed = true
-	processor.publish(gateway.RunEvent{Type: "run.completed", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Message: reply, Terminal: true})
+	processor.publish(request, gateway.RunEvent{Type: "run.completed", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Message: reply, Terminal: true})
 	return nil
 }
 
@@ -299,14 +327,15 @@ func isGovernanceDenial(err error) bool {
 }
 
 // Cancel cancels an active Runner request. Queued cancellation belongs to the durable queue.
-func (processor *Processor) Cancel(requestID string) bool {
+func (processor *Processor) Cancel(tenantID, requestID string) bool {
+	key := activeRequestKey(tenantID, requestID)
 	processor.activeMu.Lock()
-	cancel := processor.active[requestID]
+	cancel := processor.active[key]
 	if cancel != nil {
 		if processor.canceled == nil {
 			processor.canceled = make(map[string]bool)
 		}
-		processor.canceled[requestID] = true
+		processor.canceled[key] = true
 	}
 	processor.activeMu.Unlock()
 	if cancel == nil {
@@ -315,25 +344,39 @@ func (processor *Processor) Cancel(requestID string) bool {
 	cancel()
 	return true
 }
-func (processor *Processor) register(requestID string, cancel context.CancelFunc) {
+
+func (processor *Processor) markCanceled(tenantID, requestID string) {
+	processor.activeMu.Lock()
+	if processor.canceled == nil {
+		processor.canceled = make(map[string]bool)
+	}
+	processor.canceled[activeRequestKey(tenantID, requestID)] = true
+	processor.activeMu.Unlock()
+}
+func (processor *Processor) register(tenantID, requestID string, cancel context.CancelFunc) {
 	processor.activeMu.Lock()
 	if processor.active == nil {
 		processor.active = make(map[string]context.CancelFunc)
 	}
-	processor.active[requestID] = cancel
+	processor.active[activeRequestKey(tenantID, requestID)] = cancel
 	processor.activeMu.Unlock()
 }
-func (processor *Processor) unregister(requestID string) {
+func (processor *Processor) unregister(tenantID, requestID string) {
 	processor.activeMu.Lock()
-	delete(processor.active, requestID)
+	delete(processor.active, activeRequestKey(tenantID, requestID))
 	processor.activeMu.Unlock()
 }
-func (processor *Processor) takeCanceled(requestID string) bool {
+func (processor *Processor) takeCanceled(tenantID, requestID string) bool {
+	key := activeRequestKey(tenantID, requestID)
 	processor.activeMu.Lock()
 	defer processor.activeMu.Unlock()
-	value := processor.canceled[requestID]
-	delete(processor.canceled, requestID)
+	value := processor.canceled[key]
+	delete(processor.canceled, key)
 	return value
+}
+
+func activeRequestKey(tenantID, requestID string) string {
+	return tenantID + "\x00" + requestID
 }
 
 func (processor *Processor) validate(request gateway.RunRequest) error {
@@ -358,13 +401,16 @@ func (processor *Processor) retryDelay() time.Duration {
 	}
 	return time.Second
 }
-func (processor *Processor) publish(event gateway.RunEvent) {
+func (processor *Processor) publish(request gateway.RunRequest, event gateway.RunEvent) {
 	if processor.Publisher != nil {
+		event.TenantID = request.TenantID
+		event.BindingID = request.BindingID
+		event.WorkerID = processor.WorkerID
 		processor.Publisher.Publish(event)
 	}
 }
 
-func (processor *Processor) renew(ctx context.Context, cancel context.CancelFunc, lease sessioncoord.Lease, claim idempotency.Claim, done chan<- struct{}, failure chan<- error) {
+func (processor *Processor) renew(ctx context.Context, cancel context.CancelFunc, request gateway.RunRequest, lease sessioncoord.Lease, claim idempotency.Claim, done chan<- struct{}, failure chan<- error) {
 	defer close(done)
 	interval := processor.leaseTTL() / 3
 	if interval <= 0 {
@@ -377,6 +423,11 @@ func (processor *Processor) renew(ctx context.Context, cancel context.CancelFunc
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if processor.cancellationRequested(ctx, request) {
+				processor.markCanceled(request.TenantID, request.InboxID)
+				cancel()
+				return
+			}
 			var err error
 			lease, err = processor.Coordinator.Renew(ctx, lease, processor.leaseTTL())
 			if err != nil {
@@ -394,9 +445,14 @@ func (processor *Processor) renew(ctx context.Context, cancel context.CancelFunc
 	}
 }
 
+func (processor *Processor) cancellationRequested(ctx context.Context, request gateway.RunRequest) bool {
+	return processor.Cancellations != nil && processor.Cancellations.Requested(ctx, request.TenantID, request.InboxID)
+}
+
 type eventProjection struct {
 	publisher   gateway.EventPublisher
 	request     gateway.RunRequest
+	workerID    string
 	reply       string
 	lastTool    string
 	totalTokens int
@@ -413,7 +469,7 @@ func (projection *eventProjection) Observe(item *event.Event) {
 	if item == nil || item.Response == nil {
 		return
 	}
-	base := gateway.RunEvent{RequestID: projection.request.InboxID, SessionID: projection.request.SessionID, TraceID: projection.request.TraceID}
+	base := gateway.RunEvent{TenantID: projection.request.TenantID, BindingID: projection.request.BindingID, WorkerID: projection.workerID, RequestID: projection.request.InboxID, SessionID: projection.request.SessionID, TraceID: projection.request.TraceID}
 	if item.Usage != nil {
 		base.PromptTokens = item.Usage.PromptTokens
 		base.CompletionTokens = item.Usage.CompletionTokens

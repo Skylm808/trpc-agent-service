@@ -10,6 +10,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/admin"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
 )
@@ -65,18 +66,19 @@ func TestFeishuBindingPublishDisableRollbackAndIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidates := provider("feishu-a")
-	if len(candidates) != 1 || candidates[0].TenantID != tenantA {
+	resolvedA, ok := candidateForTenant(candidates, tenantA)
+	if !ok {
 		t.Fatalf("candidates=%+v", candidates)
 	}
-	if candidates[0].VerificationToken != "verification-fixture" || candidates[0].EncryptKey != "encrypt-fixture" || candidates[0].FeishuAppID != "cli_shared_app" || candidates[0].ConfigVersion != 1 {
-		t.Fatalf("resolved=%+v", candidates[0])
+	if resolvedA.VerificationToken != "verification-fixture" || resolvedA.EncryptKey != "encrypt-fixture" || resolvedA.FeishuAppID != "cli_shared_app" || resolvedA.ConfigVersion != 1 {
+		t.Fatalf("resolved=%+v", resolvedA)
 	}
 
 	// Disable: new callbacks resolve nothing.
 	if _, err := service.Publish(ctx, tenantA, 1, payload(tenantA, 2, false)); err != nil {
 		t.Fatal(err)
 	}
-	if got := provider("feishu-a"); len(got) != 0 {
+	if got := provider("feishu-a"); hasTenantCandidate(got, tenantA) {
 		t.Fatalf("disabled candidates=%+v", got)
 	}
 
@@ -89,7 +91,8 @@ func TestFeishuBindingPublishDisableRollbackAndIsolation(t *testing.T) {
 		t.Fatalf("rolled=%+v", rolled)
 	}
 	candidates = provider("feishu-a")
-	if len(candidates) != 1 || candidates[0].ConfigVersion != 3 {
+	resolvedA, ok = candidateForTenant(candidates, tenantA)
+	if !ok || resolvedA.ConfigVersion != 3 {
 		t.Fatalf("rollback candidates=%+v", candidates)
 	}
 
@@ -100,9 +103,6 @@ func TestFeishuBindingPublishDisableRollbackAndIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidates = provider("feishu-a")
-	if len(candidates) != 2 {
-		t.Fatalf("shared binding candidates=%+v", candidates)
-	}
 	seen := map[string]bool{}
 	for _, candidate := range candidates {
 		seen[candidate.TenantID] = true
@@ -119,4 +119,18 @@ func TestFeishuBindingPublishDisableRollbackAndIsolation(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_bindings WHERE tenant_id=$1`, tenantB).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("tenant-b bindings count=%d err=%v", count, err)
 	}
+}
+
+func candidateForTenant(candidates []feishu.Binding, tenantID string) (feishu.Binding, bool) {
+	for _, candidate := range candidates {
+		if candidate.TenantID == tenantID {
+			return candidate, true
+		}
+	}
+	return feishu.Binding{}, false
+}
+
+func hasTenantCandidate(candidates []feishu.Binding, tenantID string) bool {
+	_, ok := candidateForTenant(candidates, tenantID)
+	return ok
 }

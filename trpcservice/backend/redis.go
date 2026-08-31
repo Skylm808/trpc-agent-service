@@ -3,8 +3,11 @@ package backend
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
+	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/cluster"
 	redis "github.com/redis/go-redis/v9"
 )
 
@@ -84,6 +87,67 @@ func (backend *Redis) Subscribe(ctx context.Context, channel string) (<-chan []b
 		}
 	}()
 	return output, closeSubscription, nil
+}
+
+// CreateConsumerGroup idempotently creates a durable worker consumer group.
+func (backend *Redis) CreateConsumerGroup(ctx context.Context, stream, group string) error {
+	if backend == nil || backend.client == nil || ctx == nil || stream == "" || group == "" {
+		return errors.New("backend: Redis stream and group are required")
+	}
+	err := backend.client.XGroupCreateMkStream(ctx, stream, group, "0").Err()
+	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
+		return err
+	}
+	return nil
+}
+
+// AddStream appends one opaque work payload with bounded approximate history.
+func (backend *Redis) AddStream(ctx context.Context, stream string, payload []byte) error {
+	if backend == nil || backend.client == nil || ctx == nil || stream == "" || len(payload) == 0 {
+		return errors.New("backend: Redis stream and payload are required")
+	}
+	return backend.client.XAdd(ctx, &redis.XAddArgs{Stream: stream, MaxLen: 100000, Approx: true, Values: map[string]any{"payload": payload}}).Err()
+}
+
+// ReadGroup reads pending or new entries for one stable consumer slot.
+func (backend *Redis) ReadGroup(ctx context.Context, stream, group, consumer, start string, count int64, block time.Duration) ([]cluster.StreamMessage, error) {
+	if backend == nil || backend.client == nil || ctx == nil || stream == "" || group == "" || consumer == "" || (start != "0" && start != ">") || count <= 0 {
+		return nil, errors.New("backend: complete Redis consumer group request is required")
+	}
+	result, err := backend.client.XReadGroup(ctx, &redis.XReadGroupArgs{Group: group, Consumer: consumer, Streams: []string{stream, start}, Count: count, Block: block}).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var messages []cluster.StreamMessage
+	for _, batch := range result {
+		for _, item := range batch.Messages {
+			value, ok := item.Values["payload"]
+			if !ok {
+				messages = append(messages, cluster.StreamMessage{ID: item.ID})
+				continue
+			}
+			switch payload := value.(type) {
+			case string:
+				messages = append(messages, cluster.StreamMessage{ID: item.ID, Payload: []byte(payload)})
+			case []byte:
+				messages = append(messages, cluster.StreamMessage{ID: item.ID, Payload: append([]byte(nil), payload...)})
+			default:
+				messages = append(messages, cluster.StreamMessage{ID: item.ID})
+			}
+		}
+	}
+	return messages, nil
+}
+
+// AckStream removes one processed entry from the consumer pending list.
+func (backend *Redis) AckStream(ctx context.Context, stream, group, id string) error {
+	if backend == nil || backend.client == nil || stream == "" || group == "" || id == "" {
+		return errors.New("backend: Redis stream acknowledgement is required")
+	}
+	return backend.client.XAck(ctx, stream, group, id).Err()
 }
 
 func (backend *Redis) Close() error {

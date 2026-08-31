@@ -39,7 +39,7 @@ flowchart TB
     subgraph DURABLE["3. 持久接入与调度"]
         direction LR
         INBOX[(PostgreSQL Inbox)]
-        MQ[共享消息队列（规划）]
+        MQ[Redis Streams 工作队列]
     end
 
     subgraph RUNTIME["4. Agent 执行"]
@@ -75,10 +75,10 @@ flowchart TB
     end
 
     WC --> WCA
-    TG --> TGA
+    FS --> FSA
     HC --> GW
     WCA --> GW
-    TGA --> GW
+    FSA --> GW
     GW --> INBOX --> MQ
     MQ --> WK1
     MQ --> WK2
@@ -93,7 +93,7 @@ flowchart TB
     ROUTER --> MEMORY
     GOV --> OUTBOX --> OUT
     OUT --> WAPI
-    OUT --> TAPI
+    OUT --> FAPI
     ADMIN --> CFG --> CONFIG
     CFG -. 保存 SecretRef .-> SECRET
     CONFIG -. 固定 config_version .-> RB
@@ -105,7 +105,7 @@ flowchart TB
     OTEL --> MON
 
     classDef planned stroke-dasharray: 5 5,color:#666;
-    class TG,TGA,MQ,TAPI planned;
+    class VECTOR,OBJECT,MEMORY,OTEL,MON planned;
 ```
 
 Agent Gateway 和 Worker 都是无状态节点，不要求负载均衡器提供 sticky session。Gateway 只根据已认证的 `channel_binding` 得到 `tenant_id`、`app_id` 和配置版本，再生成 canonical user/session。实际状态保存在共享后端；任何 Worker 取得队列消息和 session lease 后都能继续执行。
@@ -166,6 +166,11 @@ Adapter 把验签后的企业微信 XML 或飞书事件 JSON 转成 `InboundMess
 
 同一 session 的并发写由 Redis fencing token 和 PostgreSQL session head 共同约束。Worker 取得 lease 后先推进 `last_fence`；提交时必须在同一事务中检查 token，并要求 `inbox_seq = last_event_seq + 1`。暂停后恢复的旧 Worker 即使继续运行，也会因 fence 过期而无法写入。
 
+Gateway 和恢复 Poller 把已持久化、已 claim 的请求写入 Redis Streams consumer group，多个
+Worker 节点竞争消费。Stream 只负责即时调度，PostgreSQL Inbox 才是可靠事实源；节点崩溃后
+由 lease 到期和 `SKIP LOCKED` 生成新 claim。请求状态和取消意图写入 PostgreSQL，Redis
+command bus 只做低延迟通知。预算和工具审批同样使用 PostgreSQL 原子 Store，不依赖进程内状态。
+
 提交顺序固定为：`message event + state` 原子提交，随后更新 Summary/Memory，接着创建 Outbox，最后把 Inbox 标记为 completed。Summary 使用 `(version, cutoff_event_seq)` CAS；Memory 以 source event 做幂等；Outbox 以 `(tenant_id, dedupe_key)` 去重。中间失败保留可重试状态，重跑不会多写 event、memory 或 IM 回复。详细约束见 [多节点消息运行时](message-runtime.md) 和 [数据模型](data-model.md)。
 
 ### 4.1 企业微信与飞书的接入差异
@@ -201,6 +206,8 @@ Adapter 把验签后的企业微信 XML 或飞书事件 JSON 转成 `InboundMess
 | `inbox_messages` | `tenant_id`, `binding_id`, `external_message_id`, `inbox_seq`, `status`, `attempts` | 吸收 IM 重投并保存恢复状态 |
 | `outbox_messages` | `tenant_id`, `outbox_id`, `dedupe_key`, `binding_id`, `status`, `retry_at` | 回复可靠投递、去重、重试和 DLQ |
 | `audit_logs` | `tenant_id`, `channel`, `user_id`, `session_id`, `agent_name`, `tool_name`, `decision`, `latency_ms`, `error_type`, `cost`, `trace_id` | 记录治理决定、调用结果、成本和链路关联 |
+| `run_statuses` / `worker_nodes` | request 状态、cancel intent、worker、heartbeat、draining | 跨节点控制与节点失联观测 |
+| `policy_budget_*` / `tool_approvals` | period、request、reserved/actual cost、tool | 原子共享预算与人工审批 |
 
 Session/Event 的事实记录在 PostgreSQL 事务中提交。Summary、Memory、Knowledge 和 Artifact 是从已提交 event 派生的投影：投影失败不会回滚事实事件，而是保留任务和 checkpoint 后重试。这一划分避免向量库或对象存储的短暂故障拖住主会话事务。
 
@@ -277,7 +284,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、租户成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis 跨节点限流、治理审计、OpenTelemetry 链路、Compose 最小部署、生产 Admin 控制面与动态 Bundle 切换，以及企业微信和飞书两个 Channel Adapter/Sender。Gateway 到 Worker 的即时快速路径仍是进程内 dispatcher，但丢失的任务可由任一节点从 PostgreSQL 恢复。共享预算/审批/状态、投递异常的 Admin 运维页及 Kubernetes manifest 仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。
+当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、治理审计、OpenTelemetry 链路、Compose 最小部署、生产 Admin 控制面与动态 Bundle 切换，以及企业微信和飞书两个 Channel Adapter/Sender。投递异常的 Admin 运维页、按租户动态并发配额及 Kubernetes manifest 仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。
 
 ## 10. 预期效果与时间规划
 
@@ -301,7 +308,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | T0：方案与最小生产链路 | 2026 年 8 月 27 日 | 本文、两张图、数据模型、幂等/迁移策略、风险清单、Compose、PostgreSQL/Redis、真实模型 Provider | 已完成 |
 | T1：企业微信真实联调 | T0 后 1–2 个工作日 | 测试企业、HTTPS 回调、IP 白名单、真实收发、失败回放 | 已完成并跑通真实链路 |
 | T2a：飞书通道（PR10） | 已完成 | 飞书 Adapter/Sender、事件验签解密、身份映射、动态配置接入 | 代码已完成，待真实飞书账号联调 |
-| T2b：跨节点实时调度 | T0 后 3–5 个工作日 | 共享 command/event bus、跨节点 cancel/status | 规划中 |
-| T3：生产运维补强 | T0 后 5–8 个工作日 | Kubernetes manifests、共享预算/审批、DLQ/uncertain 管理接口、容量压测 | 规划中 |
+| T2b：跨节点实时调度（PR11） | 已完成 | Redis Streams、共享 command/event bus、跨节点 cancel/status、预算/审批和节点心跳 | 已完成并通过 PostgreSQL/Redis 双节点集成测试 |
+| T3：生产运维补强 | T0 后 5–8 个工作日 | Kubernetes manifests、按租户动态并发配额、DLQ/uncertain 管理接口、容量压测 | 规划中 |
 
 时间从依赖就绪后计算，不含企业微信权限、公网域名、TLS 证书或平台审核等待。

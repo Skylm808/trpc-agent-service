@@ -65,6 +65,28 @@ services:
       retries: 20
     restart: unless-stopped
 
+  integration-test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: build
+    entrypoint: ["go", "test"]
+    command:
+      - "-p=1"
+      - "./trpcservice/cluster"
+      - "./cmd/trpc-service"
+      - "./trpcservice/idempotency"
+      - "./trpcservice/delivery"
+      - "./trpcservice/repository"
+    environment:
+      TRPC_AGENT_POSTGRES_TEST_DSN: postgres://trpc_agent:${POSTGRES_PASSWORD:-local-postgres-password}@postgres:5432/trpc_agent?sslmode=disable
+      TRPC_AGENT_REDIS_TEST_URL: redis://redis:6379/0
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres-data:
   redis-data:

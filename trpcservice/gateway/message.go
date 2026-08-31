@@ -77,6 +77,8 @@ func (request RunRequest) Key() SessionKey {
 // RunEvent is a transport-neutral projection of an Agent event.
 type RunEvent struct {
 	Type, RequestID, TraceID string
+	TenantID, BindingID      string
+	WorkerID                 string
 	SessionID                string
 	Delta, Message, ToolName string
 	Stage, ToolStatus        string

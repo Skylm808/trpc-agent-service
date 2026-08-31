@@ -13,6 +13,10 @@ channel_binding -> identity_mapping
                 -> inbox_message -> outbox_message
 tenant -> audit_log
 tenant -> migration_job
+tenant -> run_status -> cancel intent
+tenant -> policy_budget_usage -> policy_budget_reservation
+tenant -> tool_approval
+worker_node
 ```
 
 `tenants.current_config_version` 是配置发布头。发布时锁定租户记录并比较 expected version，只有一个并发请求能够成功；`config_versions` 写入后不可修改。回滚会复制旧 payload 并创建新版本，不覆盖历史记录。配置正文只保存 `SecretRef` 的 provider/key，不保存模型 API key、IM token 或数据库密码。
@@ -36,6 +40,11 @@ tenant -> migration_job
 | `outbox_messages` | `tenant_id`, `outbox_id`, `dedupe_key`, `binding_id`, `session_id`, `source_inbox_id`, `source_event_id`, `status`, `attempts`, `retry_at`, `payload_json` | PK `(tenant_id, outbox_id)`；UNIQUE `(tenant_id, dedupe_key)`；trace 通过来源事件和 payload 关联 |
 | `audit_logs` | `tenant_id`, `audit_id`, `channel`, `user_id`, `session_id`, `agent_name`, `tool_name`, `decision`, `latency_ms`, `error_type`, `cost`, `trace_id` | PK `(tenant_id, audit_id)`；按 tenant/trace/time 查询 |
 | `migration_jobs` | `tenant_id`, `job_id`, `app_id`, `domain`, `source_backend`, `target_backend`, `status`, `cursor_json`, `checkpoint_json`, `lease_owner`, `last_error` | PK `(tenant_id, job_id)`；checkpoint 支持断点续传 |
+| `run_statuses` | `tenant_id`, `binding_id`, `request_id`, `status`, `worker_id`, `cancel_requested`, `reply`, `error` | PK `(tenant_id, request_id)`；跨节点状态查询与持久化取消意图 |
+| `worker_nodes` | `node_id`, `started_at`, `last_heartbeat`, `draining`, `stopped_at` | PK `node_id`；拒绝活跃节点 ID 冲突并记录 drain/liveness |
+| `policy_budget_usage` | `tenant_id`, `period`, `used_micros` | PK `(tenant_id, period)`；跨节点月度预算原子累计 |
+| `policy_budget_reservations` | `tenant_id`, `request_id`, `period`, `reserved_micros`, `actual_micros` | PK `(tenant_id, request_id)`；请求重试时幂等预留与核销 |
+| `tool_approvals` | `tenant_id`, `request_id`, `tool_name`, `approved_at` | PK `(tenant_id, request_id, tool_name)`；跨节点人工批准 |
 
 表之间不使用裸 `app_id`、`session_id` 或外部用户 ID 关联。应用、绑定、会话和事件的外键路径都带 `tenant_id`，Repository 方法也显式接收租户参数，因此两个租户可以安全使用相同的业务 ID。
 

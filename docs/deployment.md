@@ -72,18 +72,29 @@ Compose 中的默认数据库密码和 HTTP token 只供本地使用。共享环
 
 生产环境把 Gateway、Worker、Outbox Delivery Worker、Channel Adapter 和 Admin API 分开扩容，PostgreSQL 与 Redis 使用托管高可用集群。migration 作为单独 Job 执行；迁移在事务内获取 PostgreSQL advisory lock，业务 Pod 不负责建表。Session 和 Memory 不保存在 Worker 本地，因此不要求 sticky session。
 
-当前 Compose 是单进程最小链路：Gateway 到 Worker 的快速路径仍使用进程内 dispatcher，
-但每个节点都会从 PostgreSQL 竞争捞取到期 retry 和 lease 已过期的 Inbox，因此进程在
-ACK 后、执行前崩溃，重启或其他节点可恢复任务。claim 使用 `SKIP LOCKED`，同 session
-按 `inbox_seq` 执行，超过最大尝试次数进入 DLQ；旧 token 在调用模型前会被拒绝。
+当前 Compose 仍把 Gateway 与 Worker 合并在一个进程，但生产路径已经使用 Redis Streams
+consumer group，不再依赖进程内 dispatcher。每个节点同时从 PostgreSQL 竞争捞取到期 retry
+和 lease 已过期的 Inbox；进程在 ACK 后任意位置崩溃，其他节点都能生成新 claim 并重新投递。
+claim 使用 `SKIP LOCKED`，同 session 按 `inbox_seq` 提交，超过最大尝试次数进入 DLQ；旧 token
+在调用模型前或写入时被拒绝。
 
 企业微信 Outbox 已装配 PostgreSQL 多节点 claim、租约、重试、DLQ、结果不确定隔离和
 Redis 跨节点限流。Compose 中它与 Gateway/Worker 合并运行；生产可使用相同 Store 和
 Sender 将 Delivery Worker 拆成独立 Deployment。
 
-仍未生产化的部分包括：Gateway 与 Worker 独立进程之间的即时共享队列、跨节点请求状态、
-共享预算与人工审批存储，以及 `uncertain` / DLQ 的 Admin 运维页面。真实企业微信账号、
+跨节点请求状态、取消意图、预算、人工审批和节点心跳均保存在共享后端；取消命令另用 Redis
+Pub/Sub 做低延迟通知。仍未生产化的部分包括 `uncertain` / DLQ 的 Admin 运维页面、按租户
+动态并发配额和自动扩缩容控制器。真实企业微信账号、
 公网 HTTPS 回调和平台 IP 白名单仍需部署方配置。
+
+共享后端集成测试不需要暴露 PostgreSQL/Redis 到宿主机：
+
+```bash
+docker compose --profile test run --rm --build integration-test
+```
+
+测试覆盖 Redis 双节点 consumer group、PostgreSQL 状态/取消、节点 ID 冲突与重启、共享预算/
+审批，以及 Inbox/Outbox/配置版本回归；使用唯一测试作用域，可在保留数据卷时重复执行。
 
 ## 容量估算
 

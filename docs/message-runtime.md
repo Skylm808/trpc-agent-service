@@ -3,7 +3,8 @@
 ## 组件边界
 
 `gateway/openclaw` 只负责认证、协议解析和服务端路由；`idempotency`
-负责持久化 Inbox claim；`InboxPoller` 在所有节点竞争恢复到期任务；`dispatcher` 只提供单节点同 session 排队；
+负责持久化 Inbox claim；`InboxPoller` 在所有节点竞争恢复到期任务；生产调度使用 Redis
+Streams consumer group，`dispatcher` 只保留给离线开发和单进程测试；
 `sessioncoord` 负责跨节点 lease、fencing 和写入顺序；`worker` 才能取得固定版本的
 Runtime Bundle 并调用 tRPC-Agent-Go `Runner`。因此 Gateway 和 Worker 都可以水平扩展，
 不依赖负载均衡器 sticky session。
@@ -14,8 +15,8 @@ OpenClaw/IM callback
   -> canonical user/session
   -> PostgreSQL Inbox unique claim + inbox_seq
   -> fast HTTP 202
+  -> Redis Streams consumer group（即时竞争调度）
   -> Inbox poller reclaims retry/expired claims with SKIP LOCKED
-  -> per-session dispatcher
   -> Redis lease (INCR fencing token)
   -> Runtime Manager -> LLMAgent -> Tool -> Runner events
   -> fenced event/state
@@ -53,11 +54,18 @@ OpenClaw/IM callback
    按 `inbox_seq` 阻止同 session 后序消息越过前序消息；超过最大尝试次数后进入 DLQ。
    Processor 在调用模型或工具前再次续租并校验 claim token，因此已被其他节点接管的
    本地排队副本会直接退出，不会产生重复模型费用或工具副作用。
-7. Delivery Worker 只 claim 本节点注册了 Sender 的 tenant binding。Outbox 使用
+7. Gateway 首次 claim 与 InboxPoller 恢复出的请求都进入同一个 Redis Streams consumer
+   group。Streams 提供低延迟单消费者投递；PostgreSQL claim token、lease 和 InboxPoller
+   提供可靠性。节点在处理途中退出时，即使 Stream entry 保持 pending，Inbox lease 到期后
+   也会生成新 claim 并重新投递，旧 claim 恢复后无法续租或写入。
+8. `worker_nodes` 记录节点心跳和 drain 状态；活跃节点 ID 冲突会 fail fast。节点失联判定
+   不直接授权写入，实际接管仍必须同时取得新 Inbox claim、Redis session lease 和更大的
+   fencing token。
+9. Delivery Worker 只 claim 本节点注册了 Sender 的 tenant binding。Outbox 使用
    `pending/claimed/sending/sent/retry/dlq/uncertain` 状态机和独立 claim token；
    `claimed` 超时可安全恢复，`sending` 超时转为 `uncertain`，避免企业微信 API 已成功
    但本地尚未落库时产生重复回复。发送前和每个文本分片前都经过 Redis 共享限流。
-8. PostgreSQL Memory 写入在事务提交后对所有节点可见；当前请求以内存中的 Runner event
+10. PostgreSQL Memory 写入在事务提交后对所有节点可见；当前请求以内存中的 Runner event
    继续执行，不依赖异步投影做 read-your-writes。外部 Memory 服务或向量索引允许最终一致，
    派生任务记录 source event 和 checkpoint；新节点只有在索引水位达到所需 event 后才把该
    版本视为已同步，超时则降级为读取 PostgreSQL 事实或暂不召回。
@@ -74,13 +82,13 @@ OpenClaw/IM callback
 - `POST /v1/gateway/messages:stream`：Runner 产生事件时立即输出 `run.started`、
   `run.progress`、`message.delta`、`message.completed`、`run.completed` 或终态事件。
 - `GET /healthz`、`GET /v1/gateway/status`。
-- `POST /v1/gateway/cancel`：取消本节点当前活跃的 Runner，并将 Inbox 以 CAS 标记为
-  `canceled`；未知或已结束请求返回 `404`。生产多节点部署必须把取消命令送到持有
-  request 的 Worker（例如 Redis command bus），不能依赖 Gateway 进程内查找。
+- `POST /v1/gateway/cancel`：先把取消意图写入 PostgreSQL，再通过 Redis command bus
+  广播到所有 Worker；持有请求的节点立即取消 Runner 并以 claim CAS 将 Inbox 标记为
+  `canceled`。Pub/Sub 丢失时 Worker 的续租循环仍会发现持久化意图；未知或已结束请求返回 `404`。
 
-本地 `Hub` 和 `Registry` 仅供单进程开发。Gateway 与 Worker 分离或水平扩展时，SSE
-事件应使用 `RedisEventBus`（或等价共享 Pub/Sub），status 应投影到共享持久化后端；
-因此客户端不需要 sticky session。
+本地 `Hub`、`Registry`、`MemoryBudget` 和 `MemoryApprovals` 仅供单进程开发。生产组合使用
+`RedisEventBus`、PostgreSQL `run_statuses`、`policy_budget_*` 和 `tool_approvals`，因此状态查询、
+SSE、取消和人工审批都不依赖请求落到原 Gateway/Worker 节点。
 
 进程内 Hub 对 delta 使用有界、非阻塞缓冲；慢客户端可能丢失中间 delta，但终态
 `message.completed`/`run.completed` 会优先投递。需要完整回放时，应从共享 event log

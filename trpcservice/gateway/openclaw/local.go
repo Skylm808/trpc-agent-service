@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/cluster"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/dispatcher"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
@@ -24,6 +25,8 @@ type LocalComponent struct {
 	server     *Server
 	poller     *worker.InboxPoller
 	dispatcher *dispatcher.Dispatcher
+	queue      *cluster.WorkQueue
+	cancelBus  *cluster.CancelBus
 	runtimes   *serviceruntime.Manager
 }
 
@@ -33,13 +36,19 @@ type HandlerDecorator func(*Handler, http.Handler) (http.Handler, error)
 // ComponentDependencies selects durable stores without coupling the HTTP
 // protocol package to concrete database clients.
 type ComponentDependencies struct {
-	Inbox          idempotency.ReadyStore
-	Coordinator    sessioncoord.LeaseCoordinator
-	Writes         worker.PlatformStore
-	RuntimeFactory serviceruntime.Factory
-	Audit          audit.Store
-	EventBus       EventBus
-	WorkerID       string
+	Inbox             idempotency.ReadyStore
+	Coordinator       sessioncoord.LeaseCoordinator
+	Writes            worker.PlatformStore
+	RuntimeFactory    serviceruntime.Factory
+	Audit             audit.Store
+	EventBus          EventBus
+	Status            StatusStore
+	QueueBackend      cluster.StreamBackend
+	ControlBackend    cluster.PubSubBackend
+	Cancellations     worker.CancellationStore
+	Policy            *policy.Engine
+	WorkerID          string
+	WorkerConcurrency int
 	// Snapshots optionally resolves pinned published versions from the
 	// control-plane store. Nil falls back to the static startup file, which
 	// is only appropriate for offline development.
@@ -85,36 +94,78 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 	if bus == nil {
 		bus = NewHub()
 	}
-	registry := NewRegistry()
+	status := dependencies.Status
+	if status == nil {
+		status = NewRegistry()
+	}
 	telemetry, err := servicemetrics.New("trpc-agent-service")
 	if err != nil {
 		_ = runtimes.Close(context.Background())
 		return nil, err
 	}
 	redactor := servicelog.NewRedactor(nil, nil)
-	policyEngine := &policy.Engine{
-		Identity:           policy.AuthenticatedIdentityAuthorizer{},
-		Budgets:            policy.NewMemoryBudget(),
-		Approvals:          policy.NewMemoryApprovals(),
-		CostMicrosPerToken: 1, // deterministic local accounting for the mock model.
+	policyEngine := dependencies.Policy
+	if policyEngine == nil {
+		policyEngine = &policy.Engine{
+			Identity:           policy.AuthenticatedIdentityAuthorizer{},
+			Budgets:            policy.NewMemoryBudget(),
+			Approvals:          policy.NewMemoryApprovals(),
+			CostMicrosPerToken: 1, // deterministic local accounting for the mock model.
+		}
 	}
 	snapshots := dependencies.Snapshots
 	if snapshots == nil {
 		snapshots = gateway.FileSnapshotResolver{File: file}
 	}
-	processor := &worker.Processor{WorkerID: dependencies.WorkerID, Inbox: dependencies.Inbox, Coordinator: dependencies.Coordinator, Writes: dependencies.Writes, Runtimes: runtimes, Snapshots: snapshots, Publisher: MultiPublisher{bus, registry}, Policy: policyEngine, Audit: dependencies.Audit, Redactor: redactor, Telemetry: telemetry}
-	dispatch, err := dispatcher.New(parent, processor.Process)
+	processor := &worker.Processor{WorkerID: dependencies.WorkerID, Inbox: dependencies.Inbox, Coordinator: dependencies.Coordinator, Writes: dependencies.Writes, Runtimes: runtimes, Snapshots: snapshots, Publisher: MultiPublisher{bus, status}, Policy: policyEngine, Audit: dependencies.Audit, Redactor: redactor, Telemetry: telemetry, Cancellations: dependencies.Cancellations}
+	var cancelBus *cluster.CancelBus
+	var canceler Canceler = processor
+	if dependencies.ControlBackend != nil {
+		durable, ok := status.(cluster.DurableCanceler)
+		if !ok {
+			_ = runtimes.Close(context.Background())
+			return nil, errors.New("openclaw: shared control backend requires a durable cancel status store")
+		}
+		cancelBus, err = cluster.NewCancelBus(parent, dependencies.ControlBackend, durable, processor.Cancel, "")
+		if err != nil {
+			_ = runtimes.Close(context.Background())
+			return nil, err
+		}
+		canceler = cancelBus
+	}
+	var dispatch *dispatcher.Dispatcher
+	var queue *cluster.WorkQueue
+	var submitter worker.RequestSubmitter
+	if dependencies.QueueBackend != nil {
+		queue, err = cluster.NewWorkQueue(parent, dependencies.QueueBackend, processor.Process, cluster.WorkQueueConfig{NodeID: dependencies.WorkerID, Concurrency: dependencies.WorkerConcurrency})
+		if err != nil {
+			_ = cancelBus.Close()
+			_ = runtimes.Close(context.Background())
+			return nil, err
+		}
+		submitter = queue
+	} else {
+		dispatch, err = dispatcher.New(parent, processor.Process)
+		if err != nil {
+			_ = cancelBus.Close()
+			_ = runtimes.Close(context.Background())
+			return nil, err
+		}
+		submitter = dispatch
+	}
+	poller, err := worker.NewInboxPoller(parent, dependencies.Inbox, submitter, worker.InboxPollerConfig{Owner: dependencies.WorkerID + ":inbox"})
 	if err != nil {
+		if dispatch != nil {
+			_ = dispatch.Close(context.Background())
+		}
+		if queue != nil {
+			_ = queue.Close(context.Background())
+		}
+		_ = cancelBus.Close()
 		_ = runtimes.Close(context.Background())
 		return nil, err
 	}
-	poller, err := worker.NewInboxPoller(parent, dependencies.Inbox, dispatch, worker.InboxPollerConfig{Owner: dependencies.WorkerID + ":inbox"})
-	if err != nil {
-		_ = dispatch.Close(context.Background())
-		_ = runtimes.Close(context.Background())
-		return nil, err
-	}
-	core := &Handler{Routes: routes, Inbox: dependencies.Inbox, Submitter: dispatch, Hub: bus, Status: registry, Canceler: processor, Approver: policyEngine, ClaimOwner: dependencies.WorkerID + ":gateway", Telemetry: telemetry}
+	core := &Handler{Routes: routes, Inbox: dependencies.Inbox, Submitter: submitter, Hub: bus, Status: status, Canceler: canceler, Approver: policyEngine, ClaimOwner: dependencies.WorkerID + ":gateway", Telemetry: telemetry}
 	var handler http.Handler = core.RoutesHandler()
 	for _, decorate := range decorators {
 		if decorate == nil {
@@ -123,12 +174,18 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 		handler, err = decorate(core, handler)
 		if err != nil {
 			_ = poller.Close(context.Background())
-			_ = dispatch.Close(context.Background())
+			if dispatch != nil {
+				_ = dispatch.Close(context.Background())
+			}
+			if queue != nil {
+				_ = queue.Close(context.Background())
+			}
+			_ = cancelBus.Close()
 			_ = runtimes.Close(context.Background())
 			return nil, err
 		}
 	}
-	return &LocalComponent{server: &Server{Address: address, Handler: handler}, poller: poller, dispatcher: dispatch, runtimes: runtimes}, nil
+	return &LocalComponent{server: &Server{Address: address, Handler: handler}, poller: poller, dispatcher: dispatch, queue: queue, cancelBus: cancelBus, runtimes: runtimes}, nil
 }
 
 // Start starts the local HTTP gateway.
@@ -136,5 +193,12 @@ func (component *LocalComponent) Start(ctx context.Context) error { return compo
 
 // Close drains ingress, queued requests, and Runtime Bundles in dependency order.
 func (component *LocalComponent) Close(ctx context.Context) error {
-	return errors.Join(component.server.Close(ctx), component.poller.Close(ctx), component.dispatcher.Close(ctx), component.runtimes.Close(ctx))
+	var dispatchErr, queueErr error
+	if component.dispatcher != nil {
+		dispatchErr = component.dispatcher.Close(ctx)
+	}
+	if component.queue != nil {
+		queueErr = component.queue.Close(ctx)
+	}
+	return errors.Join(component.server.Close(ctx), component.poller.Close(ctx), dispatchErr, queueErr, component.cancelBus.Close(), component.runtimes.Close(ctx))
 }

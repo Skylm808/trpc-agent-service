@@ -29,7 +29,7 @@ type Handler struct {
 	Inbox      idempotency.Store
 	Submitter  Submitter
 	Hub        EventBus
-	Status     *Registry
+	Status     StatusStore
 	Canceler   Canceler
 	Approver   Approver
 	ClaimOwner string
@@ -71,7 +71,7 @@ func (handler *Handler) AcceptInbound(ctx context.Context, inbound gateway.Inbou
 		return accepted, nil
 	}
 	if handler.Status != nil {
-		handler.Status.Publish(gateway.RunEvent{Type: "run.accepted", RequestID: claim.InboxID, SessionID: inbound.SessionID, TraceID: inbound.TraceID})
+		handler.Status.Publish(gateway.RunEvent{Type: "run.accepted", TenantID: inbound.TenantID, BindingID: inbound.BindingID, RequestID: claim.InboxID, SessionID: inbound.SessionID, TraceID: inbound.TraceID})
 	}
 	run := claim.RunRequest()
 	if err := handler.Submitter.Submit(run); err != nil {
@@ -107,7 +107,7 @@ func (handler *Handler) status(w http.ResponseWriter, request *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("request not found"))
 		return
 	}
-	status, ok := handler.Status.Get(requestID)
+	status, ok := handler.Status.Get(request.Context(), route.TenantID, requestID)
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("request not found"))
 		return
@@ -127,7 +127,7 @@ func (handler *Handler) cancel(w http.ResponseWriter, request *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("valid request_id is required"))
 		return
 	}
-	if handler.Canceler == nil || !handler.Canceler.Cancel(input.RequestID) {
+	if handler.Canceler == nil || !handler.Canceler.Cancel(route.TenantID, input.RequestID) {
 		writeError(w, http.StatusNotFound, errors.New("active request not found"))
 		return
 	}
@@ -296,7 +296,7 @@ func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe 
 		return response, nil, http.StatusAccepted, nil
 	}
 	if handler.Status != nil {
-		handler.Status.Publish(gateway.RunEvent{Type: "run.accepted", RequestID: claim.InboxID, SessionID: sessionID, TraceID: traceID})
+		handler.Status.Publish(gateway.RunEvent{Type: "run.accepted", TenantID: route.TenantID, BindingID: route.BindingID, RequestID: claim.InboxID, SessionID: sessionID, TraceID: traceID})
 	}
 	var events <-chan StreamEvent
 	var unsubscribe func()

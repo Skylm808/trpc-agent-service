@@ -169,12 +169,13 @@ func (engine *Engine) WaitApproval(ctx context.Context, request Request, toolNam
 }
 
 func (engine *Engine) Grant(tenantID, requestID, toolName string) bool {
-	store, ok := engine.Approvals.(interface{ Grant(string, string, string) })
+	store, ok := engine.Approvals.(interface {
+		Grant(string, string, string) bool
+	})
 	if !ok || tenantID == "" || requestID == "" || toolName == "" {
 		return false
 	}
-	store.Grant(tenantID, requestID, toolName)
-	return true
+	return store.Grant(tenantID, requestID, toolName)
 }
 
 func (engine *Engine) EstimateCost(tokens int64) int64 {
@@ -303,7 +304,10 @@ type MemoryApprovals struct {
 func NewMemoryApprovals() *MemoryApprovals {
 	return &MemoryApprovals{approved: make(map[string]struct{}), waiters: make(map[string]chan struct{})}
 }
-func (store *MemoryApprovals) Grant(tenantID, requestID, toolName string) {
+func (store *MemoryApprovals) Grant(tenantID, requestID, toolName string) bool {
+	if store == nil || tenantID == "" || requestID == "" || toolName == "" {
+		return false
+	}
 	key := tenantID + "\x00" + requestID + "\x00" + toolName
 	store.mu.Lock()
 	store.approved[key] = struct{}{}
@@ -312,6 +316,7 @@ func (store *MemoryApprovals) Grant(tenantID, requestID, toolName string) {
 		delete(store.waiters, key)
 	}
 	store.mu.Unlock()
+	return true
 }
 func (store *MemoryApprovals) Approved(_ context.Context, tenantID, requestID, toolName string) bool {
 	store.mu.RLock()

@@ -170,7 +170,7 @@ curl -H 'Authorization: Bearer local-secret' \
 **已经实现并验证**：
 
 - 企业微信真实端到端链路：回调验签/解密 → Inbox 幂等 → tRPC-Agent-Go Runner → DeepSeek → PostgreSQL Session/Memory/Event → Outbox → 企业微信回复。
-- 多节点消息运行时：PostgreSQL Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis 跨节点限流与事件总线。
+- 多节点消息运行时：Redis Streams consumer group 即时调度、PostgreSQL Inbox/fencing/Outbox、崩溃恢复与 DLQ、共享状态/取消、共享预算/审批、节点心跳以及 Redis 跨节点限流与事件总线。
 - 控制面数据模型与不可变配置版本、治理审计、OpenTelemetry 链路、Compose 最小部署。
 
 **本 PR（PR9：生产控制面与动态配置发布）实现**：
@@ -192,9 +192,16 @@ curl -H 'Authorization: Bearer local-secret' \
 - 动态配置：飞书 binding 的发布、禁用、回滚即时生效；Outbox 按入口钉住的 config_version 解析旧 Sender；canary secret 不出现在响应、日志、错误或审计中。
 - 真实飞书端到端联调尚未执行：缺少飞书测试账号、公网回调域名与平台事件订阅配置，步骤见 [docs/feishu.md](docs/feishu.md)；本 PR 不声明真实 E2E 已通过。
 
+**本 PR（PR11：跨节点共享调度与控制）实现**：
+
+- Gateway 和 Inbox recovery poller 都把已 claim 的 `RunRequest` 投递到 Redis Streams consumer group；多个 Worker 节点竞争消费，PostgreSQL Inbox 仍是事实源并在流消息丢失或节点崩溃后恢复。
+- PostgreSQL `run_statuses` 保存跨节点请求状态和取消意图；Redis cancel bus 把取消命令即时广播给持有 Runner 的节点，Worker 同时轮询持久化意图作为 Pub/Sub 丢失兜底。
+- PostgreSQL 原子预算预留/核销和共享工具审批替代生产进程内 Store；不同 Gateway/Worker 节点可查询状态、批准工具并执行取消，不要求 sticky session。
+- `worker_nodes` 保存唯一节点 ID、心跳、draining 和停止时间；重复的活跃 `TRPC_AGENT_NODE_ID` 启动失败。关闭时先标记 draining、停止接收；未完成请求释放/失去 lease 后由其他节点有界接管。
+- PostgreSQL/Redis Compose 集成测试可用 `docker compose --profile test run --rm --build integration-test` 重复执行，不要求删除数据卷。
+
 **后续计划**：
 
-- PR11：真正的跨节点共享调度与控制。
 - PR12：多后端 Storage Router 与数据迁移 Worker。
 - PR13：Knowledge/RAG、MCP 与业务工具。
 - PR14：持久化治理、OpenTelemetry Collector、Prometheus/Grafana。
