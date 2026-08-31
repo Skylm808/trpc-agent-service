@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 
@@ -222,14 +223,43 @@ func (service *MirroredArtifact) SaveArtifact(ctx context.Context, info artifact
 	if err != nil {
 		return 0, err
 	}
-	shadowRevision, err := service.Target.SaveArtifact(ctx, info, name, value)
+	// A previous attempt may have committed the primary revision but failed or
+	// lost its response while writing the target. Repair every missing target
+	// revision in order so an Inbox retry cannot permanently desynchronise the
+	// two append-only stores.
+	versions, err := service.Target.ListVersions(ctx, info, name)
 	if err != nil {
 		return 0, errors.Join(ErrMirrorWrite, err)
 	}
-	if shadowRevision != revision {
-		return 0, errors.Join(ErrMirrorWrite, errors.New("artifact revision mismatch"))
+	present := make(map[int]bool, len(versions))
+	for _, current := range versions {
+		present[current] = true
+	}
+	for current := 0; current <= revision; current++ {
+		primary, loadErr := service.Primary.LoadArtifact(ctx, info, name, &current)
+		if loadErr != nil || primary == nil {
+			return 0, errors.Join(ErrMirrorWrite, errors.New("primary artifact revision is unavailable"))
+		}
+		if present[current] {
+			shadow, loadErr := service.Target.LoadArtifact(ctx, info, name, &current)
+			if loadErr != nil || !sameArtifact(primary, shadow) {
+				return 0, errors.Join(ErrMirrorWrite, errors.New("artifact revision content mismatch"))
+			}
+			continue
+		}
+		shadowRevision, saveErr := service.Target.SaveArtifact(ctx, info, name, primary)
+		if saveErr != nil {
+			return 0, errors.Join(ErrMirrorWrite, saveErr)
+		}
+		if shadowRevision != current {
+			return 0, errors.Join(ErrMirrorWrite, errors.New("artifact revision mismatch"))
+		}
 	}
 	return revision, nil
+}
+
+func sameArtifact(left, right *artifact.Artifact) bool {
+	return left != nil && right != nil && bytes.Equal(left.Data, right.Data) && left.MimeType == right.MimeType && left.URL == right.URL && left.Name == right.Name
 }
 func (service *MirroredArtifact) LoadArtifact(ctx context.Context, info artifact.SessionInfo, name string, version *int) (*artifact.Artifact, error) {
 	return service.Primary.LoadArtifact(ctx, info, name, version)
@@ -248,6 +278,16 @@ func (service *MirroredArtifact) DeleteArtifact(ctx context.Context, info artifa
 }
 func (service *MirroredArtifact) ListVersions(ctx context.Context, info artifact.SessionInfo, name string) ([]int, error) {
 	return service.Primary.ListVersions(ctx, info, name)
+}
+func (service *MirroredArtifact) Close() error {
+	var primaryErr, targetErr error
+	if closer, ok := service.Primary.(interface{ Close() error }); ok {
+		primaryErr = closer.Close()
+	}
+	if closer, ok := service.Target.(interface{ Close() error }); ok {
+		targetErr = closer.Close()
+	}
+	return errors.Join(primaryErr, targetErr)
 }
 
 // ErrMirrorWrite marks a migration target failure without leaking its endpoint.

@@ -51,14 +51,34 @@ type Tenant struct {
 
 // AgentApp contains one tenant-owned Agent application's runtime policy.
 type AgentApp struct {
-	ID       string           `json:"app_id" yaml:"app_id"`
-	Name     string           `json:"name" yaml:"name"`
-	Enabled  bool             `json:"enabled" yaml:"enabled"`
-	Config   AppConfig        `json:"config" yaml:"config"`
-	Model    ModelProfile     `json:"model" yaml:"model"`
-	Tools    ToolPolicy       `json:"tools" yaml:"tools"`
-	Channels []ChannelBinding `json:"channels" yaml:"channels"`
-	Storage  StorageProfile   `json:"storage" yaml:"storage"`
+	ID        string           `json:"app_id" yaml:"app_id"`
+	Name      string           `json:"name" yaml:"name"`
+	Enabled   bool             `json:"enabled" yaml:"enabled"`
+	Config    AppConfig        `json:"config" yaml:"config"`
+	Model     ModelProfile     `json:"model" yaml:"model"`
+	Tools     ToolPolicy       `json:"tools" yaml:"tools"`
+	Channels  []ChannelBinding `json:"channels" yaml:"channels"`
+	Storage   StorageProfile   `json:"storage" yaml:"storage"`
+	Knowledge KnowledgePolicy  `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
+}
+
+// KnowledgePolicy configures the optional tenant-scoped RAG tool. The API key
+// remains a SecretRef and is resolved only while constructing an immutable
+// Runtime Bundle.
+type KnowledgePolicy struct {
+	Enabled    bool             `json:"enabled" yaml:"enabled"`
+	Embedding  EmbeddingProfile `json:"embedding" yaml:"embedding"`
+	MaxResults int              `json:"max_results,omitempty" yaml:"max_results,omitempty"`
+	MinScore   float64          `json:"min_score,omitempty" yaml:"min_score,omitempty"`
+}
+
+// EmbeddingProfile selects an OpenAI-compatible embeddings endpoint.
+type EmbeddingProfile struct {
+	Provider   string    `json:"provider" yaml:"provider"`
+	Model      string    `json:"model" yaml:"model"`
+	BaseURL    string    `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	APIKey     SecretRef `json:"api_key" yaml:"api_key"`
+	Dimensions int       `json:"dimensions" yaml:"dimensions"`
 }
 
 // AppConfig contains model-independent Agent behavior.

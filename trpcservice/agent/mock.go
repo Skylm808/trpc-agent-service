@@ -66,6 +66,12 @@ type calculatorOutput struct {
 
 // Tools resolves the configured allow/deny policy to known offline tools.
 func Tools(allow, deny []string) ([]tool.Tool, []string, error) {
+	return ToolsWithExtras(allow, deny, nil)
+}
+
+// ToolsWithExtras applies the same allow/deny policy to Bundle-owned dynamic
+// tools such as tenant-scoped knowledge search.
+func ToolsWithExtras(allow, deny []string, extras map[string]tool.Tool) ([]tool.Tool, []string, error) {
 	denied := make(map[string]struct{}, len(deny))
 	for _, name := range deny {
 		denied[name] = struct{}{}
@@ -73,6 +79,15 @@ func Tools(allow, deny []string) ([]tool.Tool, []string, error) {
 	registry := map[string]tool.Tool{
 		"echo":       function.NewFunctionTool(func(_ context.Context, in echoInput) (echoOutput, error) { return echoOutput{Text: in.Text}, nil }, function.WithName("echo"), function.WithDescription("Echo text without external access.")),
 		"calculator": function.NewFunctionTool(calculate, function.WithName("calculator"), function.WithDescription("Calculate add, subtract, multiply, or divide.")),
+	}
+	for name, candidate := range extras {
+		if name == "" || candidate == nil {
+			return nil, nil, errors.New("agent: dynamic tool name and implementation are required")
+		}
+		if _, exists := registry[name]; exists {
+			return nil, nil, fmt.Errorf("agent: dynamic tool %q conflicts with a built-in tool", name)
+		}
+		registry[name] = candidate
 	}
 	var selected []tool.Tool
 	var names []string

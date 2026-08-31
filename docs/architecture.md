@@ -217,7 +217,7 @@ PostgreSQL Memory 提交后对其他 Worker 可见；外部 Memory 和向量索�
 
 平台使用按数据域拆分的 Adapter，不设计一个包办所有后端的通用 KV 接口。Session 需要顺序和事务，Knowledge 需要向量召回，Artifact 需要大对象读写；强行统一会丢失各后端真正需要的语义。
 
-PR12 已实现 `storage.Router`。Runtime Bundle 按 `(tenant_id, app_id, config_version)` 从已发布配置解析 Session/Summary、Memory 和 Artifact 路由；零 Credential 使用平台 PostgreSQL，显式 SecretRef 可以选择另一个已迁移的 PostgreSQL 集群。Knowledge 和 Audit 尚未接入外置实现：前者随 PR13 的 RAG 一起交付，后者随 PR14 的持久化治理交付，发布配置在此之前会拒绝这两个域的外置路由。
+PR12 已实现 `storage.Router` 的 PostgreSQL 路由。PR13 把 Artifact 扩展到 S3-compatible，并把 Knowledge 接到 PGVector/Qdrant 与 OpenAI-compatible Embedding。Runtime Bundle 按 `(tenant_id, app_id, config_version)` 固定连接和工具；每个 Knowledge index 具有独立物理 namespace，并在 metadata filter 再次强制 tenant/App scope。Audit 外置实现仍属于后续治理工作。
 
 目标接口如下，业务代码不应直接依赖 PostgreSQL、Redis 或某个向量库 SDK：
 
@@ -238,12 +238,12 @@ Adapter 可以替换实现，但不能削弱这些语义。某个后端无法提
 | Inbox / Session / Event / Summary / Audit | PostgreSQL | 幂等消息、会话头、事件流、摘要、审计 | 事务强一致；热点 session 可能产生行锁竞争 |
 | Lease / Fencing / Queue / 热点缓存 | Redis Cluster | Worker 所有权、单调 token、短期状态、命令与事件总线 | 低延迟；不能把易失缓存当作事实来源，需 AOF/集群和降级策略 |
 | Memory | PostgreSQL 或外部 Memory 服务 | 用户长期事实、source event、版本状态 | SQL 便于强隔离；外部服务通常最终一致，读取要接受短暂不可见 |
-| Knowledge | Qdrant / Milvus | embedding、chunk metadata、索引版本 | 最终一致；源文档版本保存在 SQL，检索结果必须带 tenant filter |
-| Artifact | S3 / COS | 图片、文件、工具产物 | 对象本体成本低；元数据和权限保存在 SQL，使用短时签名 URL |
+| Knowledge | PGVector / Qdrant | embedding、文本 chunk、metadata | ingest 完成后可见；物理 namespace 与强制 metadata filter 双重隔离 |
+| Artifact | PostgreSQL / S3-compatible | 图片、文件、工具产物 | revision 强一致分配；S3 跨节点分配由共享 PostgreSQL advisory lock 协调 |
 
 Session 的事实来源选择 PostgreSQL，Redis 负责 lease、fencing 和热点加速。这样 Redis 故障不会让历史事件消失，代价是一次 turn 至少包含 Inbox 和 Session 事务。Knowledge 与 Artifact 不进入主事务：event 提交后创建派生任务，异步更新向量索引或对象元数据。Agent 可以在短时间内读到旧知识版本，但不能读到其他租户的数据。
 
-后端迁移采用 `dual write -> snapshot/backfill -> verify -> cutover -> rollback window`。先发布带 `migration_target` 的配置版本，新 Bundle 从主库读取并同步双写目标；再通过 Admin API 创建租户/App/domain 任务。多个 Migration Worker 使用 PostgreSQL claim lease 和 `SKIP LOCKED` 分批处理，checkpoint 可恢复，目标 ledger 与目标行在一个事务中提交。任务完成后，下一次配置发布才能把目标提升为主路由；发布服务会核对 expected version、目标身份、完成状态与行数。旧后端不会自动删除。若要回退，必须把它作为新的目标执行反向迁移，不能直接切回可能已经落后的旧库。当前 copier 覆盖 PostgreSQL Session/Summary、Memory 和 Artifact；向量索引迁移随 PR13 实现。
+后端迁移采用 `dual write -> snapshot/backfill -> verify -> cutover -> rollback window`。先发布带 `migration_target` 的配置版本，新 Bundle 从主库读取并同步双写目标；再通过 Admin API 创建租户/App/domain 任务。多个 Migration Worker 使用 PostgreSQL claim lease 和 `SKIP LOCKED` 分批处理，checkpoint 可恢复。任务完成后，下一次配置发布才能把目标提升为主路由。当前 copier 覆盖 PostgreSQL Session/Summary/Memory/Artifact 之间迁移，以及 PostgreSQL Artifact → S3；Knowledge 跨向量后端迁移和 S3 反向迁移尚未交付，不允许通过配置伪装成可用能力。
 
 ## 7. 治理、可观测性与故障处理
 
@@ -284,7 +284,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、租户成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、多 PostgreSQL Storage Router、可恢复迁移 Worker、治理审计、OpenTelemetry 链路、Compose 最小部署、生产 Admin 控制面与动态 Bundle 切换，以及企业微信和飞书两个 Channel Adapter/Sender。Knowledge/RAG 与外置向量库、外置审计、投递异常运维页、按租户动态并发配额及 Kubernetes manifest 仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。
+当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复迁移 Worker、治理审计、OpenTelemetry 链路、Compose 最小部署、生产 Admin 控制面与动态 Bundle 切换，以及企业微信和飞书两个 Channel Adapter/Sender。MCP/业务工具、复杂文档解析、Knowledge 跨后端迁移、外置审计、投递异常运维页、按租户动态并发配额及 Kubernetes manifest 仍未完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
 
 ## 10. 预期效果与时间规划
 

@@ -1,6 +1,6 @@
 # Storage Router 与数据迁移
 
-PR12 路由 tRPC-Agent-Go 使用的 Session/Summary、Memory 和 Artifact。每个域的主后端仍必须是共享 PostgreSQL；可以用 `credential: SecretRef` 指向不同集群。Knowledge/向量索引属于 PR13，外置 Audit 属于 PR14，本阶段会拒绝为它们配置外部 Credential 或 migration target。
+PR12 路由 Session/Summary、Memory 和 PostgreSQL Artifact。PR13 增加 S3-compatible Artifact、PGVector/Qdrant Knowledge，以及 PostgreSQL Artifact → S3 的安全迁移。Session/Summary、Memory 仍必须使用共享 PostgreSQL；外置 Audit 仍未交付。
 
 ## 安全迁移流程
 
@@ -36,7 +36,7 @@ POST /v1/tenants/demo/storage/migrations/{migration_id}/cancel
 
 - Session/Summary 使用同一路由，避免事件在一个集群而摘要在另一个集群。
 - Backfill 只复制 canonical app_name 或显式 tenant/app 范围内的数据；两个租户使用相同用户、session 或文件名也不会互相读取。
-- 目标数据与 `storage_migration_items` 在一个事务中提交。若控制面 checkpoint 更新失败，同一 batch 重放只推进 checkpoint，不重复插入目标行。
+- PostgreSQL 目标数据与 `storage_migration_items` 在一个事务中提交。S3 无法参与 SQL 事务，因此外部写成功后的重放会按指定 revision 读取并比对内容，再补平台 PostgreSQL ledger；冲突时 fail closed，不会继续创建 revision。
 - `migration_jobs` 使用 owner/token/lease 精确更新；过期 Worker 无权提交新 checkpoint。
 - 错误只保存 Go error type，不保存驱动错误正文，避免 DSN、数据库地址或密码进入 API、审计和日志。
-- 本阶段的完成校验是源快照行数与已处理行数。大规模生产切换仍应在回滚窗口内额外执行业务抽样和只读校验；向量召回对比在 PR13 实现。
+- 本阶段的完成校验是源快照行数与已处理行数。大规模生产切换仍应在回滚窗口内额外执行业务抽样和只读校验。Knowledge 跨 PGVector/Qdrant 自动迁移尚未交付，必须重新 ingest、执行召回对比后再切换。

@@ -49,6 +49,9 @@ services:
       FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
       FEISHU_ENCRYPT_KEY: ${FEISHU_ENCRYPT_KEY:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      S3_CREDENTIAL_JSON: ${S3_CREDENTIAL_JSON:-}
     depends_on:
       migrate:
         condition: service_completed_successfully

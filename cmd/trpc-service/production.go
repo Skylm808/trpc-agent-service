@@ -25,6 +25,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway/openclaw"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledgebase"
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	servicemetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/policy"
@@ -116,6 +117,7 @@ func (component *durableComponent) Close(ctx context.Context) error {
 }
 
 func newDurableComponent(ctx context.Context, address string, file *config.File) (trpcservice.Component, error) {
+	servicelog.InstallUpstreamRedaction()
 	if err := validatePersistentProfiles(file); err != nil {
 		return nil, err
 	}
@@ -182,7 +184,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 	factory := worker.RuntimeFactoryWithServices(writes, func(snapshot config.RuntimeSnapshot) (*storage.Services, error) {
 		routeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
-		return storageRouter.Services(routeCtx, snapshot.App().Storage)
+		return storageRouter.ServicesForApp(routeCtx, snapshot.TenantID(), snapshot.App())
 	})
 	redactor := servicelog.NewRedactor(nil, nil)
 	bus := &openclaw.RedisEventBus{Backend: redisBackend}
@@ -399,7 +401,7 @@ func productionDecorators(db *sql.DB, store repository.Store, published *config.
 						continue
 					}
 					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-					err := storageRouter.Preflight(ctx, app.Storage)
+					err := storageRouter.PreflightApp(ctx, configured.ID, app)
 					cancel()
 					if err != nil {
 						return fmt.Errorf("tenant %q app %q: %w", configured.ID, app.ID, err)
@@ -417,7 +419,17 @@ func productionDecorators(db *sql.DB, store repository.Store, published *config.
 		if err != nil {
 			return nil, err
 		}
-		handler, err := admin.NewHandler(service)
+		handler, err := admin.NewHandler(service, admin.WithKnowledgeResolver(func(ctx context.Context, tenantID, appID string) (*knowledgebase.Service, error) {
+			file, err := published.Current(ctx, tenantID)
+			if err != nil {
+				return nil, errors.New("admin: published tenant configuration is unavailable")
+			}
+			snapshot, err := file.Snapshot(tenantID, appID)
+			if err != nil {
+				return nil, errors.New("admin: published app configuration is unavailable")
+			}
+			return storageRouter.KnowledgeForApp(ctx, tenantID, snapshot.App())
+		}))
 		if err != nil {
 			return nil, err
 		}
@@ -450,7 +462,7 @@ func preflightPublishedStorage(ctx context.Context, db *sql.DB, router *storage.
 				if !app.Enabled {
 					continue
 				}
-				if err := router.Preflight(ctx, app.Storage); err != nil {
+				if err := router.PreflightApp(ctx, configured.ID, app); err != nil {
 					return fmt.Errorf("tenant %q app %q storage preflight: %w", configured.ID, app.ID, err)
 				}
 			}

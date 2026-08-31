@@ -20,6 +20,7 @@ import (
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	knowledgetool "trpc.group/trpc-go/trpc-agent-go/knowledge/tool"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
@@ -111,7 +112,15 @@ func NewBundleWithServices(snapshot config.RuntimeSnapshot, services *storage.Se
 	if err != nil {
 		return nil, err
 	}
-	tools, toolNames, err := serviceagent.Tools(app.Tools.Allow, app.Tools.Deny)
+	extras := make(map[string]tool.Tool)
+	if services != nil && services.Knowledge != nil {
+		maxResults := app.Knowledge.MaxResults
+		if maxResults == 0 {
+			maxResults = 10
+		}
+		extras["knowledge_search"] = knowledgetool.NewKnowledgeSearchTool(services.Knowledge, knowledgetool.WithMaxResults(maxResults), knowledgetool.WithMinScore(app.Knowledge.MinScore))
+	}
+	tools, toolNames, err := serviceagent.ToolsWithExtras(app.Tools.Allow, app.Tools.Deny, extras)
 	if err != nil {
 		return nil, err
 	}

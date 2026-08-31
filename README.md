@@ -209,11 +209,21 @@ curl -H 'Authorization: Bearer local-secret' \
 - cutover 必须满足：旧版本已声明目标、对应迁移任务 completed、copied rows 不少于 source snapshot，并通过 expected version。任意改路由或直接回滚到可能陈旧的源库都会被拒绝，需先执行反向迁移。
 - 服务启动、配置 validate/publish 会连接并检查所有路由所需表；SecretRef 缺失、目标不可达或未执行 schema migration 时 fail fast。完整操作步骤见 [Storage Router 与迁移](docs/storage-migrations.md)。
 
+**本 PR（PR13：Knowledge/RAG 与对象存储）实现**：
+
+- 可选的租户/App 级 Knowledge 配置使用 OpenAI-compatible Embedding，向量后端支持 PGVector 与 Qdrant；API Key 和 Qdrant Key 只允许通过 SecretRef 解析。
+- 受 Admin 认证与 tenant scope 保护的文本 ingest/search API 完成 chunk、embedding、upsert 与检索；服务端强制覆盖 `tenant_id`/`app_id` metadata，并为每个租户/App 派生独立物理 table/collection，客户端不能扩大作用域。
+- 启用 Knowledge 的 App 必须把 `knowledge_search` 加入工具白名单；该工具随不可变 Runtime Bundle 构建，新配置发布后新请求使用新索引配置，旧请求继续使用旧 Bundle 并有界关闭连接。
+- Artifact 生产路由新增 S3-compatible（含 MinIO）。S3 revision 分配使用共享 PostgreSQL advisory lock 跨节点串行化；PostgreSQL → S3 支持双写、可恢复 backfill、外部写入后 ledger 对账与受控 cutover。
+- 配置 validate/publish 和启动 preflight 会验证 PGVector/Qdrant、S3 凭据与可达性；初始化或切换失败不会替换上一份有效 Bundle，错误不包含解析后的凭据。配置和操作说明见 [Knowledge/RAG 与 S3 Artifact](docs/knowledge.md)。
+- 本 PR 不交付 MCP、业务 Tool、复杂 PDF/OCR 文档流水线、Knowledge 跨向量后端自动迁移或真实飞书联调；这些不能写成已经实现。
+
 **后续计划**：
 
-- PR13：Knowledge/RAG、MCP 与业务工具。
 - PR14：持久化治理、OpenTelemetry Collector、Prometheus/Grafana。
 - PR15：Kubernetes、容量测试、故障演练和生产验收。
+
+MCP、业务工具和复杂文档解析仍是未排期能力；本次 PR13 不把它们标成已完成。
 
 ## Admin API
 

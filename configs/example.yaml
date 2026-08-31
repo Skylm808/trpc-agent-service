@@ -34,6 +34,10 @@ tenants:
           require_approval: []
           request_token_budget: 10000
           monthly_cost_budget_cents: 10000
+        # PR13 Knowledge/RAG 默认关闭。启用时还需把 knowledge_search 加入
+        # tools.allow，并配置 embedding SecretRef；完整示例见 docs/knowledge.md。
+        knowledge:
+          enabled: false
         channels:
           - binding_id: demo-http
             type: http
@@ -90,6 +94,8 @@ tenants:
           artifact:
             type: postgres
             endpoint: postgres://postgres:5432/trpc_agent
+            # PostgreSQL -> S3 可使用 migration_target 安全双写/backfill；
+            # endpoint、bucket(namespace) 与 credential 都来自发布配置。
           knowledge:
             type: postgres
             endpoint: postgres://postgres:5432/trpc_agent

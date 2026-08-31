@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledgebase"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
 	artifactmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
@@ -20,11 +21,12 @@ import (
 
 // Services groups storage instances owned by one Runtime Bundle.
 type Services struct {
-	Session  session.Service
-	Memory   memory.Service
-	Artifact artifact.Service
-	once     sync.Once
-	closeErr error
+	Session   session.Service
+	Memory    memory.Service
+	Artifact  artifact.Service
+	Knowledge *knowledgebase.Service
+	once      sync.Once
+	closeErr  error
 }
 
 // NewPostgres constructs the Runner services backed by PostgreSQL. Platform
@@ -109,14 +111,20 @@ func (services *Services) Close() error {
 		return nil
 	}
 	services.once.Do(func() {
-		var memoryErr, sessionErr error
+		var memoryErr, sessionErr, artifactErr, knowledgeErr error
 		if services.Memory != nil {
 			memoryErr = services.Memory.Close()
 		}
 		if services.Session != nil {
 			sessionErr = services.Session.Close()
 		}
-		services.closeErr = errors.Join(memoryErr, sessionErr)
+		if closer, ok := services.Artifact.(interface{ Close() error }); ok {
+			artifactErr = closer.Close()
+		}
+		if services.Knowledge != nil {
+			knowledgeErr = services.Knowledge.Close()
+		}
+		services.closeErr = errors.Join(memoryErr, sessionErr, artifactErr, knowledgeErr)
 	})
 	return services.closeErr
 }

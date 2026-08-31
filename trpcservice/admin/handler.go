@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,25 +9,43 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledgebase"
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storagemigration"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
 )
 
 // Handler exposes the configuration administration HTTP API.
 type Handler struct {
-	service  *Service
-	redactor *servicelog.Redactor
+	service   *Service
+	redactor  *servicelog.Redactor
+	knowledge func(context.Context, string, string) (*knowledgebase.Service, error)
+}
+
+// HandlerOption customizes optional administration surfaces.
+type HandlerOption func(*Handler)
+
+// WithKnowledgeResolver enables authenticated tenant/app knowledge ingestion
+// and search without accepting storage or secret settings from the client.
+func WithKnowledgeResolver(resolver func(context.Context, string, string) (*knowledgebase.Service, error)) HandlerOption {
+	return func(handler *Handler) { handler.knowledge = resolver }
 }
 
 // NewHandler creates an HTTP handler. Authentication must be applied by the
 // caller, for example with Authenticator.Wrap.
-func NewHandler(service *Service) (*Handler, error) {
+func NewHandler(service *Service, options ...HandlerOption) (*Handler, error) {
 	if service == nil {
 		return nil, errors.New("admin: nil service")
 	}
-	return &Handler{service: service, redactor: servicelog.NewRedactor(nil, nil)}, nil
+	handler := &Handler{service: service, redactor: servicelog.NewRedactor(nil, nil)}
+	for _, option := range options {
+		if option != nil {
+			option(handler)
+		}
+	}
+	return handler, nil
 }
 
 // ServeHTTP handles validate, publish, version list, current version, and
@@ -39,6 +58,10 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	tenantID := parts[2]
+	if parts[3] == "apps" {
+		handler.serveKnowledge(writer, request, tenantID, parts)
+		return
+	}
 	if parts[3] == "storage" {
 		handler.serveStorage(writer, request, tenantID, parts)
 		return
@@ -137,6 +160,71 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		writeJSON(writer, http.StatusOK, metadata(record))
+	default:
+		http.NotFound(writer, request)
+	}
+}
+
+func (handler *Handler) serveKnowledge(writer http.ResponseWriter, request *http.Request, tenantID string, parts []string) {
+	if len(parts) != 7 || parts[4] == "" || parts[5] != "knowledge" || handler.knowledge == nil {
+		http.NotFound(writer, request)
+		return
+	}
+	service, err := handler.knowledge(request.Context(), tenantID, parts[4])
+	if err != nil || service == nil {
+		if err == nil {
+			err = errors.New("admin: knowledge service is unavailable")
+		}
+		handler.writeError(writer, http.StatusServiceUnavailable, err)
+		return
+	}
+	defer service.Close()
+	switch parts[6] {
+	case "documents":
+		if request.Method != http.MethodPost {
+			methodNotAllowed(writer)
+			return
+		}
+		var body struct {
+			DocumentID string         `json:"document_id"`
+			Name       string         `json:"name"`
+			Content    string         `json:"content"`
+			Metadata   map[string]any `json:"metadata"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 2<<20))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&body); err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		ids, err := service.Ingest(request.Context(), knowledgebase.IngestRequest{DocumentID: body.DocumentID, Name: body.Name, Content: body.Content, Metadata: body.Metadata})
+		if err != nil {
+			handler.writeError(writer, http.StatusUnprocessableEntity, err)
+			return
+		}
+		writeJSON(writer, http.StatusCreated, map[string]any{"document_id": body.DocumentID, "chunks": len(ids), "chunk_ids": ids})
+	case "search":
+		if request.Method != http.MethodPost {
+			methodNotAllowed(writer)
+			return
+		}
+		var body struct {
+			Query      string  `json:"query"`
+			MaxResults int     `json:"max_results"`
+			MinScore   float64 `json:"min_score"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<16))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&body); err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		result, err := service.Search(request.Context(), &knowledge.SearchRequest{Query: body.Query, MaxResults: body.MaxResults, MinScore: body.MinScore})
+		if err != nil {
+			handler.writeError(writer, http.StatusUnprocessableEntity, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, result.Documents)
 	default:
 		http.NotFound(writer, request)
 	}

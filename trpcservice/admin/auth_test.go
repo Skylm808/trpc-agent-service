@@ -135,7 +135,7 @@ func call(handler http.Handler, method, path, token string, body []byte) *httpte
 func TestAdminAPIRequiresAuthentication(t *testing.T) {
 	handler := newSecuredHandler(t, repository.NewMemoryStore(), nil, "ops=secret-token:*")
 	for _, token := range []string{"", "wrong-token"} {
-		for _, path := range []string{"/v1/tenants/tenant-a/configs", "/v1/tenants/tenant-a/configs/current"} {
+		for _, path := range []string{"/v1/tenants/tenant-a/configs", "/v1/tenants/tenant-a/configs/current", "/v1/tenants/tenant-a/apps/assistant/knowledge/search"} {
 			if response := call(handler, http.MethodGet, path, token, nil); response.Code != http.StatusUnauthorized {
 				t.Fatalf("token=%q path=%s code=%d", token, path, response.Code)
 			}
@@ -163,6 +163,9 @@ func TestAdminAPITenantScopeEnforcement(t *testing.T) {
 		if response := call(handler, method, path, "token-a", body); response.Code != http.StatusForbidden {
 			t.Fatalf("cross-scope %s=%d %s", method, response.Code, response.Body.String())
 		}
+	}
+	if response := call(handler, http.MethodPost, "/v1/tenants/tenant-b/apps/assistant/knowledge/search", "token-a", []byte(`{"query":"secret"}`)); response.Code != http.StatusForbidden {
+		t.Fatalf("cross-scope knowledge=%d %s", response.Code, response.Body.String())
 	}
 	// The URL tenant wins over any client-supplied payload tenant.
 	if response := call(handler, http.MethodPost, "/v1/tenants/tenant-a/configs/publish?expected_version=1", "token-a", tenantYAML("tenant-b", 2)); response.Code != http.StatusUnprocessableEntity {

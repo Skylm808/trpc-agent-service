@@ -267,6 +267,27 @@ func TestValidateAllowsSameBindingIDAcrossTenants(t *testing.T) {
 	}
 }
 
+func TestValidateKnowledgeRequiresToolAndSafeEmbeddingConfig(t *testing.T) {
+	file, err := Load(strings.NewReader(validYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &file.Tenants[0].Apps[0]
+	app.Knowledge = tenant.KnowledgePolicy{Enabled: true, Embedding: tenant.EmbeddingProfile{Provider: "openai-compatible", Model: "text-embedding", BaseURL: "https://embedding.example/v1", APIKey: tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "EMBEDDING_API_KEY"}, Dimensions: 1536}}
+	app.Storage.Knowledge = tenant.BackendConfig{Type: tenant.BackendQdrant, Endpoint: "grpcs://qdrant.example:6334", Namespace: "docs", Credential: tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "QDRANT_API_KEY"}}
+	if err := file.Validate(); err == nil || !strings.Contains(err.Error(), "knowledge_search") {
+		t.Fatalf("missing knowledge tool error=%v", err)
+	}
+	app.Tools.Allow = append(app.Tools.Allow, "knowledge_search")
+	if err := file.Validate(); err != nil {
+		t.Fatalf("valid knowledge config error=%v", err)
+	}
+	app.Knowledge.Embedding.Dimensions = 0
+	if err := file.Validate(); err == nil || !strings.Contains(err.Error(), "dimensions") {
+		t.Fatalf("invalid dimension error=%v", err)
+	}
+}
+
 func TestValidateMigrationTargetIsOneLevelAndDifferent(t *testing.T) {
 	file, err := Load(strings.NewReader(validYAML))
 	if err != nil {

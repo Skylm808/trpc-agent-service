@@ -1,6 +1,7 @@
 package storagemigration
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+	"trpc.group/trpc-go/trpc-agent-go/artifact"
 )
 
 // Copier advances one bounded backfill batch.
@@ -39,6 +41,9 @@ func (copier *PostgresCopier) Step(ctx context.Context, job Job, batchSize int) 
 	appName, err := tenant.CanonicalAppName(job.TenantID, job.AppID)
 	if err != nil {
 		return Progress{}, err
+	}
+	if job.Domain == DomainArtifact && job.Source.Type == tenant.BackendPostgres && job.Target.Type == tenant.BackendS3 {
+		return copier.stepArtifactToS3(ctx, job, appName, batchSize)
 	}
 	source, err := copier.Router.Resolve(ctx, job.Source)
 	if err != nil {
@@ -101,6 +106,126 @@ func (copier *PostgresCopier) Step(ctx context.Context, job Job, batchSize int) 
 		return Progress{}, errors.New("storage migration: copied row count is below source snapshot")
 	}
 	return progress, nil
+}
+
+type artifactCheckpoint struct {
+	Cursor string `json:"cursor,omitempty"`
+}
+
+type artifactRow struct {
+	key, userID, sessionID, filename string
+	revision                         int
+	mimeType, url, name              string
+	data                             []byte
+}
+
+func (copier *PostgresCopier) stepArtifactToS3(ctx context.Context, job Job, appName string, batchSize int) (Progress, error) {
+	source, err := copier.Router.Resolve(ctx, job.Source)
+	if err != nil {
+		return Progress{}, errors.New("storage migration: source backend unavailable")
+	}
+	target, err := copier.Router.ArtifactForRoute(ctx, job.Target)
+	if err != nil {
+		return Progress{}, errors.New("storage migration: target artifact backend unavailable")
+	}
+	if closer, ok := target.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+	ledger := copier.Router.MigrationLedgerDB()
+	if ledger == nil {
+		return Progress{}, errors.New("storage migration: migration ledger unavailable")
+	}
+	var mark artifactCheckpoint
+	if len(job.Checkpoint) > 0 && json.Unmarshal(job.Checkpoint, &mark) != nil {
+		return Progress{}, errors.New("storage migration: invalid artifact checkpoint")
+	}
+	progress := Progress{SourceRows: job.SourceRows, CopiedRows: job.CopiedRows}
+	if progress.SourceRows == 0 {
+		if err := source.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_artifacts WHERE tenant_id=$1 AND app_id=$2`, job.TenantID, job.AppID).Scan(&progress.SourceRows); err != nil {
+			return Progress{}, err
+		}
+	}
+	rows, err := selectArtifactBatch(ctx, source.DB, job.TenantID, job.AppID, mark.Cursor, batchSize)
+	if err != nil {
+		return Progress{}, err
+	}
+	if len(rows) == 0 {
+		progress.Done = true
+		progress.Checkpoint, _ = json.Marshal(mark)
+		if progress.CopiedRows < progress.SourceRows {
+			return Progress{}, errors.New("storage migration: copied artifact count is below source snapshot")
+		}
+		return progress, nil
+	}
+	for _, row := range rows {
+		copied, err := copyArtifactRow(ctx, ledger, target, job.SourceRouteHash, appName, row)
+		if err != nil {
+			return Progress{}, err
+		}
+		if copied {
+			progress.CopiedRows++
+		}
+		mark.Cursor = row.key
+	}
+	progress.Checkpoint, _ = json.Marshal(mark)
+	return progress, nil
+}
+
+func selectArtifactBatch(ctx context.Context, db *sql.DB, tenantID, appID, cursor string, limit int) ([]artifactRow, error) {
+	rows, err := db.QueryContext(ctx, `SELECT jsonb_build_array(user_id,session_id,filename,revision)::text,user_id,session_id,filename,revision,mime_type,artifact_url,display_name,data FROM runtime_artifacts WHERE tenant_id=$1 AND app_id=$2 AND jsonb_build_array(user_id,session_id,filename,revision)::text>$3 ORDER BY jsonb_build_array(user_id,session_id,filename,revision)::text LIMIT $4`, tenantID, appID, cursor, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []artifactRow
+	for rows.Next() {
+		var row artifactRow
+		if err := rows.Scan(&row.key, &row.userID, &row.sessionID, &row.filename, &row.revision, &row.mimeType, &row.url, &row.name, &row.data); err != nil {
+			return nil, err
+		}
+		result = append(result, row)
+	}
+	return result, rows.Err()
+}
+
+func copyArtifactRow(ctx context.Context, ledger *sql.DB, target artifact.Service, sourceHash, appName string, row artifactRow) (bool, error) {
+	var exists int
+	err := ledger.QueryRowContext(ctx, `SELECT 1 FROM storage_migration_items WHERE source_route_hash=$1 AND table_name='runtime_artifacts' AND source_key=$2`, sourceHash, row.key).Scan(&exists)
+	if err == nil {
+		// The external write may have committed before a Worker lost its job
+		// lease. Count the durable ledger row again so the control-plane
+		// checkpoint catches up without writing another S3 revision.
+		return true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	info := artifact.SessionInfo{AppName: appName, UserID: row.userID, SessionID: row.sessionID}
+	current, loadErr := target.LoadArtifact(ctx, info, row.filename, &row.revision)
+	if loadErr != nil {
+		return false, loadErr
+	}
+	value := &artifact.Artifact{Data: row.data, MimeType: row.mimeType, URL: row.url, Name: row.name}
+	if current != nil {
+		if !bytes.Equal(current.Data, value.Data) || current.MimeType != value.MimeType || current.URL != value.URL || current.Name != value.Name {
+			return false, errors.New("storage migration: destination artifact revision conflicts with source")
+		}
+	} else {
+		revision, saveErr := target.SaveArtifact(ctx, info, row.filename, value)
+		if saveErr != nil {
+			return false, saveErr
+		}
+		if revision != row.revision {
+			return false, errors.New("storage migration: destination artifact revision order mismatch")
+		}
+	}
+	payload, _ := json.Marshal(value)
+	digest := sha256.Sum256(payload)
+	_, err = ledger.ExecContext(ctx, `INSERT INTO storage_migration_items (source_route_hash,table_name,source_key,checksum) VALUES ($1,'runtime_artifacts',$2,$3) ON CONFLICT DO NOTHING`, sourceHash, row.key, hex.EncodeToString(digest[:]))
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 type sourceRow struct {

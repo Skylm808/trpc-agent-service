@@ -9,7 +9,9 @@ import (
 	"sync"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/backend"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledgebase"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+	"trpc.group/trpc-go/trpc-agent-go/artifact"
 )
 
 // SecretResolver resolves a SecretRef without exposing its value to callers.
@@ -19,6 +21,19 @@ type SecretResolver func(tenant.SecretRef) (string, error)
 type PostgresTarget struct {
 	DSN string
 	DB  *sql.DB
+}
+
+// ArtifactForRoute constructs a migration-owned artifact service.
+func (router *Router) ArtifactForRoute(ctx context.Context, route tenant.BackendConfig) (artifact.Service, error) {
+	return router.artifactService(ctx, route)
+}
+
+// MigrationLedgerDB returns the platform database used for idempotency records.
+func (router *Router) MigrationLedgerDB() *sql.DB {
+	if router == nil {
+		return nil
+	}
+	return router.defaultTarget.DB
 }
 
 // Router resolves each storage domain independently and caches external pools.
@@ -42,6 +57,27 @@ func NewRouter(defaultDSN string, defaultDB *sql.DB, resolver SecretResolver) (*
 
 // Services builds the immutable Runtime Bundle services for one route profile.
 func (router *Router) Services(ctx context.Context, profile tenant.StorageProfile) (*Services, error) {
+	return router.services(ctx, "", "", profile, tenant.KnowledgePolicy{})
+}
+
+// ServicesForApp builds all routed services using trusted tenant/app scope.
+func (router *Router) ServicesForApp(ctx context.Context, tenantID string, app tenant.AgentApp) (*Services, error) {
+	if tenantID == "" || app.ID == "" {
+		return nil, errors.New("storage: tenant and app scope are required")
+	}
+	return router.services(ctx, tenantID, app.ID, app.Storage, app.Knowledge)
+}
+
+// KnowledgeForApp resolves only the scoped Knowledge service for Admin ingest
+// and search operations.
+func (router *Router) KnowledgeForApp(ctx context.Context, tenantID string, app tenant.AgentApp) (*knowledgebase.Service, error) {
+	if tenantID == "" || app.ID == "" || !app.Knowledge.Enabled {
+		return nil, errors.New("storage: enabled tenant/app knowledge configuration is required")
+	}
+	return router.knowledgeService(ctx, tenantID, app.ID, app.Storage.Knowledge, app.Knowledge)
+}
+
+func (router *Router) services(ctx context.Context, tenantID, appID string, profile tenant.StorageProfile, knowledgePolicy tenant.KnowledgePolicy) (*Services, error) {
 	if router == nil || ctx == nil {
 		return nil, errors.New("storage: router and context are required")
 	}
@@ -59,12 +95,21 @@ func (router *Router) Services(ctx context.Context, profile tenant.StorageProfil
 	if err != nil {
 		return nil, fmt.Errorf("storage: resolve memory backend: %w", err)
 	}
-	artifactTarget, err := router.Resolve(ctx, profile.Artifact)
+	artifactService, err := router.artifactService(ctx, profile.Artifact)
 	if err != nil {
 		return nil, fmt.Errorf("storage: resolve artifact backend: %w", err)
 	}
-	services, err := newPostgresServices(sessionTarget.DSN, memoryTarget.DSN, artifactTarget.DB)
+	services, err := newPostgresServices(sessionTarget.DSN, memoryTarget.DSN, router.defaultTarget.DB)
 	if err != nil {
+		if closer, ok := artifactService.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+		return nil, err
+	}
+	services.Artifact = artifactService
+	services.Knowledge, err = router.knowledgeService(ctx, tenantID, appID, profile.Knowledge, knowledgePolicy)
+	if err != nil {
+		_ = services.Close()
 		return nil, err
 	}
 	if profile.Session.MigrationTarget != nil {
@@ -94,12 +139,12 @@ func (router *Router) Services(ctx context.Context, profile tenant.StorageProfil
 		services.Memory = &MirroredMemory{Primary: services.Memory, Target: shadow}
 	}
 	if profile.Artifact.MigrationTarget != nil {
-		target, resolveErr := router.Resolve(ctx, *profile.Artifact.MigrationTarget)
+		target, resolveErr := router.artifactService(ctx, *profile.Artifact.MigrationTarget)
 		if resolveErr != nil {
 			_ = services.Close()
 			return nil, fmt.Errorf("storage: resolve artifact migration target: %w", resolveErr)
 		}
-		services.Artifact = &MirroredArtifact{Primary: services.Artifact, Target: &PostgresArtifactService{DB: target.DB}}
+		services.Artifact = &MirroredArtifact{Primary: services.Artifact, Target: target}
 	}
 	return services, nil
 }
@@ -174,7 +219,7 @@ func (router *Router) Close() error {
 
 // ValidateRoutedProfile is the production route gate used by Admin publish.
 func ValidateRoutedProfile(profile tenant.StorageProfile) error {
-	for name, route := range map[string]tenant.BackendConfig{"session": profile.Session, "memory": profile.Memory, "summary": profile.Summary, "artifact": profile.Artifact, "knowledge": profile.Knowledge, "audit": profile.Audit} {
+	for name, route := range map[string]tenant.BackendConfig{"session": profile.Session, "memory": profile.Memory, "summary": profile.Summary, "audit": profile.Audit} {
 		if route.Type != tenant.BackendPostgres {
 			return fmt.Errorf("storage: %s backend must be postgres, got %q", name, route.Type)
 		}
@@ -185,10 +230,28 @@ func ValidateRoutedProfile(profile tenant.StorageProfile) error {
 			return fmt.Errorf("storage: %s migration target requires a credential SecretRef", name)
 		}
 	}
+	if profile.Artifact.Type != tenant.BackendPostgres && profile.Artifact.Type != tenant.BackendS3 {
+		return fmt.Errorf("storage: artifact backend must be postgres or s3, got %q", profile.Artifact.Type)
+	}
+	if profile.Artifact.MigrationTarget != nil && profile.Artifact.MigrationTarget.Type != tenant.BackendPostgres && profile.Artifact.MigrationTarget.Type != tenant.BackendS3 {
+		return fmt.Errorf("storage: artifact migration target must be postgres or s3, got %q", profile.Artifact.MigrationTarget.Type)
+	}
+	if profile.Artifact.MigrationTarget != nil && profile.Artifact.Type != tenant.BackendPostgres {
+		return errors.New("storage: artifact backfill currently requires a postgres source")
+	}
+	if profile.Artifact.MigrationTarget != nil && profile.Artifact.MigrationTarget.Type == tenant.BackendPostgres && profile.Artifact.MigrationTarget.Credential.IsZero() {
+		return errors.New("storage: external PostgreSQL artifact migration target requires a credential SecretRef")
+	}
+	if profile.Knowledge.Type != tenant.BackendPostgres && profile.Knowledge.Type != tenant.BackendQdrant {
+		return fmt.Errorf("storage: knowledge backend must be postgres or qdrant, got %q", profile.Knowledge.Type)
+	}
+	if profile.Knowledge.MigrationTarget != nil {
+		return errors.New("storage: knowledge migration_target requires a rebuild job and cannot be activated directly")
+	}
 	if !sameRoute(profile.Session, profile.Summary) {
 		return errors.New("storage: session and summary routes must match")
 	}
-	for name, route := range map[string]tenant.BackendConfig{"knowledge": profile.Knowledge, "audit": profile.Audit} {
+	for name, route := range map[string]tenant.BackendConfig{"audit": profile.Audit} {
 		if !route.Credential.IsZero() || route.MigrationTarget != nil {
 			return fmt.Errorf("storage: %s external routing is not available before its dedicated delivery PR", name)
 		}
@@ -209,7 +272,17 @@ func (router *Router) Preflight(ctx context.Context, profile tenant.StorageProfi
 	}{
 		{"session", profile.Session, []string{"runtime_session_states", "runtime_session_events", "runtime_session_track_events", "runtime_session_summaries", "runtime_app_states", "runtime_user_states"}},
 		{"memory", profile.Memory, []string{"runtime_memories"}},
-		{"artifact", profile.Artifact, []string{"runtime_artifacts"}},
+	}
+	if profile.Artifact.Type == tenant.BackendPostgres {
+		artifactRoute := profile.Artifact.Clone()
+		if artifactRoute.MigrationTarget != nil && artifactRoute.MigrationTarget.Type == tenant.BackendS3 {
+			artifactRoute.MigrationTarget = nil
+		}
+		routes = append(routes, struct {
+			name   string
+			route  tenant.BackendConfig
+			tables []string
+		}{"artifact", artifactRoute, []string{"runtime_artifacts"}})
 	}
 	for _, entry := range routes {
 		target, err := router.Resolve(ctx, entry.route)
@@ -229,6 +302,54 @@ func (router *Router) Preflight(ctx context.Context, profile tenant.StorageProfi
 				return fmt.Errorf("storage: %s migration target schema is unavailable", entry.name)
 			}
 		}
+	}
+	return nil
+}
+
+// PreflightApp verifies external Artifact/Knowledge clients in addition to the
+// shared SQL schemas before a published app can receive new work.
+func (router *Router) PreflightApp(ctx context.Context, tenantID string, app tenant.AgentApp) error {
+	if err := router.Preflight(ctx, app.Storage); err != nil {
+		return err
+	}
+	artifactService, err := router.artifactService(ctx, app.Storage.Artifact)
+	if err != nil {
+		return errors.New("storage: artifact route preflight failed")
+	}
+	if app.Storage.Artifact.Type == tenant.BackendS3 {
+		appName, _ := tenant.CanonicalAppName(tenantID, app.ID)
+		if _, err := artifactService.ListArtifactKeys(ctx, artifact.SessionInfo{AppName: appName, UserID: "preflight", SessionID: "preflight"}); err != nil {
+			if closer, ok := artifactService.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+			return errors.New("storage: S3 artifact route is unreachable")
+		}
+	}
+	if closer, ok := artifactService.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
+	if app.Storage.Artifact.MigrationTarget != nil && app.Storage.Artifact.MigrationTarget.Type == tenant.BackendS3 {
+		target, err := router.artifactService(ctx, *app.Storage.Artifact.MigrationTarget)
+		if err != nil {
+			return errors.New("storage: artifact migration target preflight failed")
+		}
+		appName, _ := tenant.CanonicalAppName(tenantID, app.ID)
+		if _, err := target.ListArtifactKeys(ctx, artifact.SessionInfo{AppName: appName, UserID: "preflight", SessionID: "preflight"}); err != nil {
+			if closer, ok := target.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+			return errors.New("storage: S3 artifact migration target is unreachable")
+		}
+		if closer, ok := target.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	}
+	knowledgeService, err := router.knowledgeService(ctx, tenantID, app.ID, app.Storage.Knowledge, app.Knowledge)
+	if err != nil {
+		return errors.New("storage: knowledge route preflight failed")
+	}
+	if knowledgeService != nil {
+		_ = knowledgeService.Close()
 	}
 	return nil
 }

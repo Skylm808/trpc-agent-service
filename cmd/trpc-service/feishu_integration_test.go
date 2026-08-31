@@ -32,7 +32,9 @@ func TestFeishuBindingPublishDisableRollbackAndIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	// Register connection cleanup before fixture cleanup. Testing cleanups run
+	// in LIFO order, so the later fixture cleanup still has a live connection.
+	t.Cleanup(func() { _ = db.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := repository.Migrate(ctx, func(ctx context.Context, script string) error {
@@ -57,7 +59,33 @@ func TestFeishuBindingPublishDisableRollbackAndIsolation(t *testing.T) {
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	tenantA, tenantB := "feishu-a-"+suffix, "feishu-b-"+suffix
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(), `UPDATE tenants SET enabled=FALSE WHERE tenant_id IN ($1,$2)`, tenantA, tenantB)
+		// These tenants are unique to this test. Removing their complete control-
+		// plane fixture keeps a persistent Compose test database production-
+		// bootable: retaining an enabled historical payload with InMemory routes
+		// would correctly trip production storage fail-fast on the next restart.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		tx, cleanupErr := db.BeginTx(cleanupCtx, nil)
+		if cleanupErr != nil {
+			t.Errorf("begin fixture cleanup: %v", cleanupErr)
+			return
+		}
+		defer tx.Rollback()
+		for _, statement := range []string{
+			`DELETE FROM audit_logs WHERE tenant_id IN ($1,$2)`,
+			`DELETE FROM channel_bindings WHERE tenant_id IN ($1,$2)`,
+			`DELETE FROM agent_apps WHERE tenant_id IN ($1,$2)`,
+			`DELETE FROM config_versions WHERE tenant_id IN ($1,$2)`,
+			`DELETE FROM tenants WHERE tenant_id IN ($1,$2)`,
+		} {
+			if _, cleanupErr = tx.ExecContext(cleanupCtx, statement, tenantA, tenantB); cleanupErr != nil {
+				t.Errorf("clean fixture: %v", cleanupErr)
+				return
+			}
+		}
+		if cleanupErr = tx.Commit(); cleanupErr != nil {
+			t.Errorf("commit fixture cleanup: %v", cleanupErr)
+		}
 	})
 	provider := feishuBindingProvider(db, published)
 	payload := func(tenantID string, version int, enabled bool) []byte {

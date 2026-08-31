@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -12,6 +13,19 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	sessionmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
+
+type failOnceArtifact struct {
+	artifact.Service
+	failed bool
+}
+
+func (service *failOnceArtifact) SaveArtifact(ctx context.Context, info artifact.SessionInfo, name string, value *artifact.Artifact) (int, error) {
+	if !service.failed {
+		service.failed = true
+		return 0, errors.New("temporary target failure")
+	}
+	return service.Service.SaveArtifact(ctx, info, name, value)
+}
 
 func TestMirroredServicesWriteBothAndReadPrimary(t *testing.T) {
 	ctx := context.Background()
@@ -46,6 +60,24 @@ func TestMirroredServicesWriteBothAndReadPrimary(t *testing.T) {
 	}
 }
 
+func TestMirroredArtifactRetryRepairsMissingRevision(t *testing.T) {
+	ctx := context.Background()
+	primary := artifactmemory.NewService()
+	target := &failOnceArtifact{Service: artifactmemory.NewService()}
+	service := &MirroredArtifact{Primary: primary, Target: target}
+	info := artifact.SessionInfo{AppName: "tenant/a/app/b", UserID: "user", SessionID: "session"}
+	if _, err := service.SaveArtifact(ctx, info, "answer.txt", &artifact.Artifact{MimeType: "text/plain", Data: []byte("first")}); !errors.Is(err, ErrMirrorWrite) {
+		t.Fatalf("first error=%v", err)
+	}
+	if revision, err := service.SaveArtifact(ctx, info, "answer.txt", &artifact.Artifact{MimeType: "text/plain", Data: []byte("retry")}); err != nil || revision != 1 {
+		t.Fatalf("retry revision=%d err=%v", revision, err)
+	}
+	versions, err := target.ListVersions(ctx, info, "answer.txt")
+	if err != nil || len(versions) != 2 || versions[0] != 0 || versions[1] != 1 {
+		t.Fatalf("versions=%v err=%v", versions, err)
+	}
+}
+
 func TestValidateRoutedProfileRequiresMatchingSessionSummaryTargets(t *testing.T) {
 	postgres := tenant.BackendConfig{Type: tenant.BackendPostgres}
 	profile := tenant.StorageProfile{Session: postgres, Memory: postgres, Summary: postgres, Artifact: postgres, Knowledge: postgres, Audit: postgres}
@@ -61,5 +93,21 @@ func TestValidateRoutedProfileRequiresMatchingSessionSummaryTargets(t *testing.T
 	profile.Summary.MigrationTarget = &other
 	if err := ValidateRoutedProfile(profile); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateRoutedProfileAllowsOnlyPostgresToS3ArtifactMigration(t *testing.T) {
+	postgres := tenant.BackendConfig{Type: tenant.BackendPostgres}
+	profile := tenant.StorageProfile{Session: postgres, Memory: postgres, Summary: postgres, Artifact: postgres, Knowledge: postgres, Audit: postgres}
+	s3 := tenant.BackendConfig{Type: tenant.BackendS3, Endpoint: "https://objects.example", Namespace: "artifacts", Credential: tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "S3_CREDENTIAL_JSON"}}
+	profile.Artifact.MigrationTarget = &s3
+	if err := ValidateRoutedProfile(profile); err != nil {
+		t.Fatalf("postgres to S3 rejected: %v", err)
+	}
+	profile.Artifact = s3
+	target := postgres.Clone()
+	profile.Artifact.MigrationTarget = &target
+	if err := ValidateRoutedProfile(profile); err == nil {
+		t.Fatal("S3 source migration must be rejected until reverse enumeration exists")
 	}
 }

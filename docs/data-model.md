@@ -61,7 +61,7 @@ Inbox 和 Outbox 分别处理入站与出站幂等。Inbox 唯一键是 `(tenant
 
 `000003_persistent_runtime` 固定 tRPC-Agent-Go PostgreSQL Session/Memory Adapter 的表契约，并增加 `runtime_artifacts` 与 `runtime_knowledge_documents`。`000007_storage_migrations` 扩充迁移状态并创建目标端 ledger。平台表负责 Inbox、fencing、审计和可恢复执行；`runtime_session_*`、`runtime_memories` 保存 Runner 使用的具体状态。两组表职责不同，但都使用 canonical `app_name` 或显式 tenant/app 字段保持租户作用域。
 
-Artifact revision 的主键是 `(tenant_id, app_id, user_id, session_id, filename, revision)`。Knowledge 表目前只保留持久化契约，向量检索 Repository 和 Runner 装配不属于当前最小可执行链路。
+Artifact revision 的主键是 `(tenant_id, app_id, user_id, session_id, filename, revision)`；S3 使用相同逻辑 key/revision，并由共享 PostgreSQL advisory lock 协调分配。Knowledge 已通过 PGVector/Qdrant 保存 chunk、embedding 与 metadata，Runtime 只在显式允许 `knowledge_search` 时暴露检索工具。`runtime_knowledge_documents` 仍是预留的控制面契约，不应误写成当前向量索引的事实源。
 
 运行时 Adapter 关闭自动建表，所有 schema 变化由独立 migration 命令管理。CI 会在临时 PostgreSQL 16 中验证首次 up、重复 up、down、空 schema 和再次 up。down migration 会删除数据，只能用于测试或经过审批的灾备流程，不能作为日常生产回滚手段。
 

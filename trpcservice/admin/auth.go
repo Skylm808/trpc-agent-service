@@ -154,7 +154,7 @@ func (auth *Authenticator) Wrap(next http.Handler) http.Handler {
 // so scope checks never trust client-provided tenant fields.
 func pathTenant(path string) (string, bool) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "tenants" || (parts[3] != "configs" && parts[3] != "storage") {
+	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "tenants" || (parts[3] != "configs" && parts[3] != "storage" && parts[3] != "apps") {
 		return "", false
 	}
 	if parts[2] == "" {

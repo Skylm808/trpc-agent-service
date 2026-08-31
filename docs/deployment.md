@@ -100,6 +100,8 @@ docker compose --profile test run --rm --build integration-test
 
 PR12 支持把 Session/Summary、Memory、Artifact 分别路由到不同 PostgreSQL 集群。每个外部目标都必须先运行同版本 migration；DSN 只能由 `credential: SecretRef` 提供。启动和 Admin validate/publish 会执行连接与表检查，缺少凭据、目标不可达或 schema 不完整都会拒绝启动/发布。
 
+PR13 增加 PGVector/Qdrant Knowledge 和 S3-compatible Artifact。启用 Knowledge 或 S3 的配置在 Admin publish 时会解析 SecretRef 并执行有界连接预检；失败时保留当前发布版本和 Runtime Bundle。具体配置见 [Knowledge/RAG 与 S3 Artifact](knowledge.md)。
+
 迁移不能直接修改 endpoint。先发布带 `migration_target` 的双写配置，再调用受认证的 migration API backfill；任务 completed 后才发布下一版本完成 cutover。旧源库保留只读回滚窗口，不会自动清理。命令与故障恢复步骤见 [Storage Router 与迁移](storage-migrations.md)。
 
 ## 容量估算

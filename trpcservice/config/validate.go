@@ -166,7 +166,56 @@ func validateApp(
 	); err != nil {
 		return err
 	}
+	if err := validateKnowledge(path+".knowledge", app.Knowledge, app.Storage.Knowledge); err != nil {
+		return err
+	}
+	if app.Knowledge.Enabled && !containsString(app.Tools.Allow, "knowledge_search") {
+		return fmt.Errorf("config: %s.tools.allow must include knowledge_search when knowledge is enabled", path)
+	}
 	return validateBackend(path+".storage.audit", app.Storage.Audit, auditBackends)
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func validateKnowledge(path string, policy tenant.KnowledgePolicy, backend tenant.BackendConfig) error {
+	if !policy.Enabled {
+		return nil
+	}
+	if policy.Embedding.Provider != "openai-compatible" {
+		return fmt.Errorf("config: %s.embedding.provider must be openai-compatible", path)
+	}
+	if strings.TrimSpace(policy.Embedding.Model) == "" {
+		return fmt.Errorf("config: %s.embedding.model is required", path)
+	}
+	if policy.Embedding.Dimensions <= 0 || policy.Embedding.Dimensions > 65536 {
+		return fmt.Errorf("config: %s.embedding.dimensions must be between 1 and 65536", path)
+	}
+	if err := validateHTTPURL(path+".embedding.base_url", policy.Embedding.BaseURL, true); err != nil {
+		return err
+	}
+	if err := validateSecretRef(path+".embedding.api_key", policy.Embedding.APIKey, true); err != nil {
+		return err
+	}
+	if policy.MaxResults < 0 || policy.MaxResults > 100 {
+		return fmt.Errorf("config: %s.max_results must be between 0 and 100", path)
+	}
+	if policy.MinScore < 0 || policy.MinScore > 1 {
+		return fmt.Errorf("config: %s.min_score must be between 0 and 1", path)
+	}
+	if backend.Type != tenant.BackendPostgres && backend.Type != tenant.BackendQdrant {
+		return fmt.Errorf("config: %s requires a postgres or qdrant storage backend", path)
+	}
+	if strings.TrimSpace(backend.Namespace) == "" {
+		return fmt.Errorf("config: %s storage namespace is required", path)
+	}
+	return nil
 }
 
 func validateModel(path string, model tenant.ModelProfile) error {
