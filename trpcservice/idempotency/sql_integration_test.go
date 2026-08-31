@@ -136,7 +136,7 @@ func seedSQLInboxParents(t *testing.T, ctx context.Context, db *sql.DB, tenantID
 		query string
 		args  []any
 	}{
-		{`INSERT INTO tenants (tenant_id,name,enabled,current_config_version) VALUES ($1,$2,TRUE,1)`, []any{tenantID, tenantID}},
+		{`INSERT INTO tenants (tenant_id,name,enabled,current_config_version) VALUES ($1,$2,FALSE,1)`, []any{tenantID, tenantID}},
 		{`INSERT INTO config_versions (tenant_id,version,config_yaml,config_sha256,status) VALUES ($1,1,$2,$3,'published')`, []any{tenantID, []byte("test"), "test"}},
 		{`INSERT INTO agent_apps (tenant_id,app_id,name,enabled,config_version) VALUES ($1,$2,$2,TRUE,1)`, []any{tenantID, appID}},
 		{`INSERT INTO channel_bindings (tenant_id,app_id,binding_id,channel_type,provider_account_id,enabled,config_version) VALUES ($1,$2,$3,'http',$3,TRUE,1)`, []any{tenantID, appID, bindingID}},

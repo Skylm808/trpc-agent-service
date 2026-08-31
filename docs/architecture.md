@@ -217,7 +217,7 @@ PostgreSQL Memory 提交后对其他 Worker 可见；外部 Memory 和向量索�
 
 平台使用按数据域拆分的 Adapter，不设计一个包办所有后端的通用 KV 接口。Session 需要顺序和事务，Knowledge 需要向量召回，Artifact 需要大对象读写；强行统一会丢失各后端真正需要的语义。
 
-`StorageRouter/StorageBundle` 是目标契约，不是现有 Go 类型。当前代码由 `storage.NewPostgres` 构造 `storage.Services`，向 Runner 注入 Session、Memory 和 Artifact；Event、Summary/Memory 投影、Outbox 与 Audit 使用各自 SQL Store。后续接入其他后端时，再收敛到按 `(tenant_id, app_id, config_version)` 选择实现的路由层。
+PR12 已实现 `storage.Router`。Runtime Bundle 按 `(tenant_id, app_id, config_version)` 从已发布配置解析 Session/Summary、Memory 和 Artifact 路由；零 Credential 使用平台 PostgreSQL，显式 SecretRef 可以选择另一个已迁移的 PostgreSQL 集群。Knowledge 和 Audit 尚未接入外置实现：前者随 PR13 的 RAG 一起交付，后者随 PR14 的持久化治理交付，发布配置在此之前会拒绝这两个域的外置路由。
 
 目标接口如下，业务代码不应直接依赖 PostgreSQL、Redis 或某个向量库 SDK：
 
@@ -243,7 +243,7 @@ Adapter 可以替换实现，但不能削弱这些语义。某个后端无法提
 
 Session 的事实来源选择 PostgreSQL，Redis 负责 lease、fencing 和热点加速。这样 Redis 故障不会让历史事件消失，代价是一次 turn 至少包含 Inbox 和 Session 事务。Knowledge 与 Artifact 不进入主事务：event 提交后创建派生任务，异步更新向量索引或对象元数据。Agent 可以在短时间内读到旧知识版本，但不能读到其他租户的数据。
 
-后端迁移采用 `snapshot -> dual write -> catch-up -> verify -> cutover -> rollback window`。迁移任务按租户、App 和数据域维护 checkpoint。以 Redis Session 迁往 PostgreSQL 为例，先记录源端水位并做快照，再把新写入同时写到两端；追平后比较 event 数、末序号和抽样状态，最后原子更新租户配置版本。向量库迁移以稳定 chunk ID 重建索引，切换前对相同查询做召回抽检。旧后端在回滚窗口内只读保留，不允许切换当天立即删除。
+后端迁移采用 `dual write -> snapshot/backfill -> verify -> cutover -> rollback window`。先发布带 `migration_target` 的配置版本，新 Bundle 从主库读取并同步双写目标；再通过 Admin API 创建租户/App/domain 任务。多个 Migration Worker 使用 PostgreSQL claim lease 和 `SKIP LOCKED` 分批处理，checkpoint 可恢复，目标 ledger 与目标行在一个事务中提交。任务完成后，下一次配置发布才能把目标提升为主路由；发布服务会核对 expected version、目标身份、完成状态与行数。旧后端不会自动删除。若要回退，必须把它作为新的目标执行反向迁移，不能直接切回可能已经落后的旧库。当前 copier 覆盖 PostgreSQL Session/Summary、Memory 和 Artifact；向量索引迁移随 PR13 实现。
 
 ## 7. 治理、可观测性与故障处理
 
@@ -284,7 +284,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、租户成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、治理审计、OpenTelemetry 链路、Compose 最小部署、生产 Admin 控制面与动态 Bundle 切换，以及企业微信和飞书两个 Channel Adapter/Sender。投递异常的 Admin 运维页、按租户动态并发配额及 Kubernetes manifest 仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。
+当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、多 PostgreSQL Storage Router、可恢复迁移 Worker、治理审计、OpenTelemetry 链路、Compose 最小部署、生产 Admin 控制面与动态 Bundle 切换，以及企业微信和飞书两个 Channel Adapter/Sender。Knowledge/RAG 与外置向量库、外置审计、投递异常运维页、按租户动态并发配额及 Kubernetes manifest 仍需后续 PR 完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入本设计的完成项。
 
 ## 10. 预期效果与时间规划
 
@@ -309,6 +309,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | T1：企业微信真实联调 | T0 后 1–2 个工作日 | 测试企业、HTTPS 回调、IP 白名单、真实收发、失败回放 | 已完成并跑通真实链路 |
 | T2a：飞书通道（PR10） | 已完成 | 飞书 Adapter/Sender、事件验签解密、身份映射、动态配置接入 | 代码已完成，待真实飞书账号联调 |
 | T2b：跨节点实时调度（PR11） | 已完成 | Redis Streams、共享 command/event bus、跨节点 cancel/status、预算/审批和节点心跳 | 已完成并通过 PostgreSQL/Redis 双节点集成测试 |
+| T2c：存储路由与迁移（PR12） | 已完成 | 多 PostgreSQL 域路由、双写、checkpoint backfill、校验和安全 cutover | 已完成并通过 PostgreSQL 集成测试 |
 | T3：生产运维补强 | T0 后 5–8 个工作日 | Kubernetes manifests、按租户动态并发配额、DLQ/uncertain 管理接口、容量压测 | 规划中 |
 
 时间从依赖就绪后计算，不含企业微信权限、公网域名、TLS 证书或平台审核等待。

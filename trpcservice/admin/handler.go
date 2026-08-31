@@ -10,6 +10,7 @@ import (
 
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storagemigration"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -33,11 +34,19 @@ func NewHandler(service *Service) (*Handler, error) {
 // the authentication layer has already authorized.
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	parts := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
-	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "tenants" || parts[3] != "configs" {
+	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "tenants" {
 		http.NotFound(writer, request)
 		return
 	}
 	tenantID := parts[2]
+	if parts[3] == "storage" {
+		handler.serveStorage(writer, request, tenantID, parts)
+		return
+	}
+	if parts[3] != "configs" {
+		http.NotFound(writer, request)
+		return
+	}
 	action := "list"
 	if len(parts) == 5 {
 		action = parts[4]
@@ -130,6 +139,100 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeJSON(writer, http.StatusOK, metadata(record))
 	default:
 		http.NotFound(writer, request)
+	}
+}
+
+func (handler *Handler) serveStorage(writer http.ResponseWriter, request *http.Request, tenantID string, parts []string) {
+	if len(parts) < 5 || parts[4] != "migrations" {
+		http.NotFound(writer, request)
+		return
+	}
+	if len(parts) == 5 {
+		switch request.Method {
+		case http.MethodGet:
+			jobs, err := handler.service.ListMigrations(request.Context(), tenantID)
+			if err != nil {
+				handler.writeMigrationError(writer, err)
+				return
+			}
+			result := make([]map[string]any, len(jobs))
+			for index := range jobs {
+				result[index] = migrationMetadata(jobs[index])
+			}
+			writeJSON(writer, http.StatusOK, result)
+		case http.MethodPost:
+			var body struct {
+				AppID    string                  `json:"app_id"`
+				Domain   storagemigration.Domain `json:"domain"`
+				Expected tenant.ConfigVersion    `json:"expected_version"`
+			}
+			decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<16))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&body); err != nil {
+				writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+				return
+			}
+			job, err := handler.service.PlanMigration(request.Context(), tenantID, body.AppID, body.Domain, body.Expected)
+			if err != nil {
+				handler.writeMigrationError(writer, err)
+				return
+			}
+			writeJSON(writer, http.StatusCreated, migrationMetadata(job))
+		default:
+			methodNotAllowed(writer)
+		}
+		return
+	}
+	jobID := parts[5]
+	if len(parts) == 6 {
+		if request.Method != http.MethodGet {
+			methodNotAllowed(writer)
+			return
+		}
+		job, err := handler.service.GetMigration(request.Context(), tenantID, jobID)
+		if err != nil {
+			handler.writeMigrationError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, migrationMetadata(job))
+		return
+	}
+	if len(parts) == 7 && parts[6] == "cancel" {
+		if request.Method != http.MethodPost {
+			methodNotAllowed(writer)
+			return
+		}
+		if err := handler.service.CancelMigration(request.Context(), tenantID, jobID); err != nil {
+			handler.writeMigrationError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"tenant_id": tenantID, "migration_id": jobID, "status": storagemigration.StatusCanceled})
+		return
+	}
+	http.NotFound(writer, request)
+}
+
+func migrationMetadata(job storagemigration.Job) map[string]any {
+	result := map[string]any{"tenant_id": job.TenantID, "migration_id": job.JobID, "app_id": job.AppID, "config_version": job.ConfigVersion, "domain": job.Domain, "status": job.Status, "source_rows": job.SourceRows, "copied_rows": job.CopiedRows, "attempts": job.Attempts, "created_by": job.CreatedBy, "created_at": job.CreatedAt, "updated_at": job.UpdatedAt}
+	if job.LastErrorType != "" {
+		result["error_type"] = job.LastErrorType
+	}
+	if job.CompletedAt != nil {
+		result["completed_at"] = *job.CompletedAt
+	}
+	return result
+}
+
+func (handler *Handler) writeMigrationError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, repository.ErrVersionConflict), errors.Is(err, storagemigration.ErrConflict):
+		handler.writeError(writer, http.StatusConflict, err)
+	case errors.Is(err, storagemigration.ErrNotFound):
+		handler.writeError(writer, http.StatusNotFound, err)
+	case errors.Is(err, ErrInvalidConfig):
+		handler.writeError(writer, http.StatusUnprocessableEntity, err)
+	default:
+		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 	}
 }
 

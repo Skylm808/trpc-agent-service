@@ -39,12 +39,18 @@ var clusterControlUp string
 //go:embed 000006_cluster_control.down.sql
 var clusterControlDown string
 
+//go:embed 000007_storage_migrations.up.sql
+var storageMigrationsUp string
+
+//go:embed 000007_storage_migrations.down.sql
+var storageMigrationsDown string
+
 // Up returns SQL that creates or verifies the schema.
 func Up() string {
-	return up + "\n" + messageRuntimeUp + "\n" + persistentRuntimeUp + "\n" + inboxRecoveryUp + "\n" + outboxDeliveryUp + "\n" + clusterControlUp
+	return up + "\n" + messageRuntimeUp + "\n" + persistentRuntimeUp + "\n" + inboxRecoveryUp + "\n" + outboxDeliveryUp + "\n" + clusterControlUp + "\n" + storageMigrationsUp
 }
 
 // Down returns destructive SQL intended only for tests and disaster recovery.
 func Down() string {
-	return clusterControlDown + "\n" + outboxDeliveryDown + "\n" + inboxRecoveryDown + "\n" + persistentRuntimeDown + "\n" + messageRuntimeDown + "\n" + down
+	return storageMigrationsDown + "\n" + clusterControlDown + "\n" + outboxDeliveryDown + "\n" + inboxRecoveryDown + "\n" + persistentRuntimeDown + "\n" + messageRuntimeDown + "\n" + down
 }

@@ -39,7 +39,8 @@ worker_node
 | `inbox_messages` | `tenant_id`, `binding_id`, `external_message_id`, `inbox_id`, `inbox_seq`, `session_id`, `config_version`, `status`, `attempts`, `next_attempt_at`, `trace_id` | 外部消息唯一键吸收 IM 重投；session seq 唯一 |
 | `outbox_messages` | `tenant_id`, `outbox_id`, `dedupe_key`, `binding_id`, `session_id`, `source_inbox_id`, `source_event_id`, `status`, `attempts`, `retry_at`, `payload_json` | PK `(tenant_id, outbox_id)`；UNIQUE `(tenant_id, dedupe_key)`；trace 通过来源事件和 payload 关联 |
 | `audit_logs` | `tenant_id`, `audit_id`, `channel`, `user_id`, `session_id`, `agent_name`, `tool_name`, `decision`, `latency_ms`, `error_type`, `cost`, `trace_id` | PK `(tenant_id, audit_id)`；按 tenant/trace/time 查询 |
-| `migration_jobs` | `tenant_id`, `job_id`, `app_id`, `domain`, `source_backend`, `target_backend`, `status`, `cursor_json`, `checkpoint_json`, `lease_owner`, `last_error` | PK `(tenant_id, job_id)`；checkpoint 支持断点续传 |
+| `migration_jobs` | `tenant_id`, `job_id`, `app_id`, `config_version`, `domain`, `source_backend`, `target_backend`, `source_route_hash`, `status`, `checkpoint_json`, `source_rows`, `copied_rows`, `attempts`, `lease_owner`, `claim_token`, `lease_until`, `last_error_type` | PK `(tenant_id, job_id)`；同配置/App/domain 唯一；claim 与 checkpoint 支持跨节点断点续传 |
+| `storage_migration_items` | `source_route_hash`, `table_name`, `source_key`, `checksum`, `copied_at` | 目标端幂等 ledger；与目标数据行同事务提交，避免 checkpoint 丢失造成重复复制 |
 | `run_statuses` | `tenant_id`, `binding_id`, `request_id`, `status`, `worker_id`, `cancel_requested`, `reply`, `error` | PK `(tenant_id, request_id)`；跨节点状态查询与持久化取消意图 |
 | `worker_nodes` | `node_id`, `started_at`, `last_heartbeat`, `draining`, `stopped_at` | PK `node_id`；拒绝活跃节点 ID 冲突并记录 drain/liveness |
 | `policy_budget_usage` | `tenant_id`, `period`, `used_micros` | PK `(tenant_id, period)`；跨节点月度预算原子累计 |
@@ -58,7 +59,7 @@ Inbox 和 Outbox 分别处理入站与出站幂等。Inbox 唯一键是 `(tenant
 
 ## tRPC-Agent-Go 运行时表
 
-`000003_persistent_runtime` 固定 tRPC-Agent-Go PostgreSQL Session/Memory Adapter 的表契约，并增加 `runtime_artifacts` 与 `runtime_knowledge_documents`。平台表负责 Inbox、fencing、审计和可恢复执行；`runtime_session_*`、`runtime_memories` 保存 Runner 使用的具体状态。两组表职责不同，但都使用 canonical `app_name` 或显式 tenant/app 字段保持租户作用域。
+`000003_persistent_runtime` 固定 tRPC-Agent-Go PostgreSQL Session/Memory Adapter 的表契约，并增加 `runtime_artifacts` 与 `runtime_knowledge_documents`。`000007_storage_migrations` 扩充迁移状态并创建目标端 ledger。平台表负责 Inbox、fencing、审计和可恢复执行；`runtime_session_*`、`runtime_memories` 保存 Runner 使用的具体状态。两组表职责不同，但都使用 canonical `app_name` 或显式 tenant/app 字段保持租户作用域。
 
 Artifact revision 的主键是 `(tenant_id, app_id, user_id, session_id, filename, revision)`。Knowledge 表目前只保留持久化契约，向量检索 Repository 和 Runner 装配不属于当前最小可执行链路。
 

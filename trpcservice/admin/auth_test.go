@@ -12,6 +12,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storagemigration"
 )
 
 func newSecuredHandler(t *testing.T, store repository.Store, auditStore audit.Store, tokens string) http.Handler {
@@ -37,6 +38,88 @@ func newSecuredHandler(t *testing.T, store repository.Store, auditStore audit.St
 		t.Fatal(err)
 	}
 	return authenticator.Wrap(handler)
+}
+
+func migrationYAML(id string) []byte {
+	return []byte(fmt.Sprintf(`schema_version: 1
+tenants:
+- tenant_id: %s
+  name: %s
+  enabled: true
+  config_version: 1
+  audit: {enabled: true, retention_days: 30, store_content: false}
+  apps:
+  - app_id: assistant
+    name: Assistant
+    enabled: true
+    config: {instruction: Help the user.}
+    model: {provider: mock, name: mock}
+    tools: {allow: [echo], deny: [], require_approval: []}
+    channels: [{binding_id: http, type: http, provider_account_id: local, enabled: true}]
+    storage:
+      session: &session_route
+        type: postgres
+        endpoint: postgres://source.example/runtime
+        credential: {provider: env, key: SOURCE_DATABASE_DSN}
+        migration_target: &target_route
+          type: postgres
+          endpoint: postgres://target.example/runtime
+          credential: {provider: env, key: TARGET_DATABASE_DSN}
+      memory: {type: postgres}
+      summary: *session_route
+      artifact: {type: postgres}
+      knowledge: {type: postgres}
+      audit: {type: postgres}
+`, id, id))
+}
+
+func TestStorageMigrationAPIIsAuthenticatedTenantScopedAndRedacted(t *testing.T) {
+	configStore := repository.NewMemoryStore()
+	migrationStore := storagemigration.NewMemoryStore()
+	service, err := NewService(configStore, WithMigrationStore(migrationStore))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Publish(WithActor(context.Background(), "seed"), "tenant-a", 0, migrationYAML("tenant-a")); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandler(service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, _ := NewAuthenticator([]Credential{{Name: "ops", Token: "token", Tenants: map[string]bool{"tenant-a": true}}})
+	secured := authenticator.Wrap(handler)
+	body := []byte(`{"app_id":"assistant","domain":"session","expected_version":1}`)
+	if response := call(secured, http.MethodPost, "/v1/tenants/tenant-a/storage/migrations", "", body); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated=%d", response.Code)
+	}
+	if response := call(secured, http.MethodPost, "/v1/tenants/tenant-b/storage/migrations", "token", body); response.Code != http.StatusForbidden {
+		t.Fatalf("cross tenant=%d", response.Code)
+	}
+	response := call(secured, http.MethodPost, "/v1/tenants/tenant-a/storage/migrations", "token", body)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("plan=%d %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "SOURCE_DATABASE_DSN") || strings.Contains(response.Body.String(), "TARGET_DATABASE_DSN") {
+		t.Fatalf("response leaked route secret refs: %s", response.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	jobID, _ := created["migration_id"].(string)
+	if jobID == "" {
+		t.Fatal("missing migration_id")
+	}
+	if duplicate := call(secured, http.MethodPost, "/v1/tenants/tenant-a/storage/migrations", "token", body); duplicate.Code != http.StatusConflict {
+		t.Fatalf("duplicate=%d %s", duplicate.Code, duplicate.Body.String())
+	}
+	if listed := call(secured, http.MethodGet, "/v1/tenants/tenant-a/storage/migrations", "token", nil); listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), jobID) {
+		t.Fatalf("list=%d %s", listed.Code, listed.Body.String())
+	}
+	if canceled := call(secured, http.MethodPost, "/v1/tenants/tenant-a/storage/migrations/"+jobID+"/cancel", "token", nil); canceled.Code != http.StatusOK {
+		t.Fatalf("cancel=%d %s", canceled.Code, canceled.Body.String())
+	}
 }
 
 func call(handler http.Handler, method, path, token string, body []byte) *httptest.ResponseRecorder {

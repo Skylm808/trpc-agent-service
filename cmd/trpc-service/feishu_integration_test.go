@@ -56,6 +56,9 @@ func TestFeishuBindingPublishDisableRollbackAndIsolation(t *testing.T) {
 	}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	tenantA, tenantB := "feishu-a-"+suffix, "feishu-b-"+suffix
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `UPDATE tenants SET enabled=FALSE WHERE tenant_id IN ($1,$2)`, tenantA, tenantB)
+	})
 	provider := feishuBindingProvider(db, published)
 	payload := func(tenantID string, version int, enabled bool) []byte {
 		return feishuTenantPayload(tenantID, version, "cli_shared_app", enabled)

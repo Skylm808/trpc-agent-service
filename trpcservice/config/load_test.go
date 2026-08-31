@@ -88,6 +88,17 @@ func TestLoadValidConfiguration(t *testing.T) {
 	}
 }
 
+func TestDisabledFeishuBindingMayAwaitCredentials(t *testing.T) {
+	payload := strings.Replace(validYAML, "            token:\n              provider: env\n              key: FEISHU_VERIFICATION_TOKEN\n            secret:\n              provider: env\n              key: FEISHU_APP_SECRET\n            enabled: true", "            enabled: false", 1)
+	if _, err := Load(strings.NewReader(payload)); err != nil {
+		t.Fatalf("disabled Feishu binding should permit deferred credentials: %v", err)
+	}
+	payload = strings.Replace(payload, "            enabled: false", "            enabled: true", 1)
+	if _, err := Load(strings.NewReader(payload)); err == nil || !strings.Contains(err.Error(), "token is required") {
+		t.Fatalf("enabled Feishu binding without credentials error = %v", err)
+	}
+}
+
 func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 	tests := []struct {
 		name string
@@ -253,5 +264,24 @@ func TestValidateAllowsSameBindingIDAcrossTenants(t *testing.T) {
 	file.Tenants = append(file.Tenants, second)
 	if err := file.Validate(); err != nil {
 		t.Fatalf("Validate() cross-tenant binding error = %v", err)
+	}
+}
+
+func TestValidateMigrationTargetIsOneLevelAndDifferent(t *testing.T) {
+	file, err := Load(strings.NewReader(validYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := &file.Tenants[0].Apps[0].Storage.Session
+	target := route.Clone()
+	route.MigrationTarget = &target
+	if err := file.Validate(); err == nil || !strings.Contains(err.Error(), "must differ") {
+		t.Fatalf("same target error=%v", err)
+	}
+	target.Endpoint = "postgres://target.example/runtime"
+	nested := target.Clone()
+	target.MigrationTarget = &nested
+	if err := file.Validate(); err == nil || !strings.Contains(err.Error(), "cannot contain") {
+		t.Fatalf("nested target error=%v", err)
 	}
 }

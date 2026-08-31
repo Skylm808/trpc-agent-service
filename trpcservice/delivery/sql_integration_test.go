@@ -163,7 +163,7 @@ func seedDeliveryParents(t *testing.T, ctx context.Context, db *sql.DB, tenantID
 		query string
 		args  []any
 	}{
-		{`INSERT INTO tenants (tenant_id,name,enabled,current_config_version) VALUES ($1,$1,TRUE,1)`, []any{tenantID}},
+		{`INSERT INTO tenants (tenant_id,name,enabled,current_config_version) VALUES ($1,$1,FALSE,1)`, []any{tenantID}},
 		{`INSERT INTO config_versions (tenant_id,version,config_yaml,config_sha256,status) VALUES ($1,1,$2,'test','published')`, []any{tenantID, []byte("test")}},
 		{`INSERT INTO agent_apps (tenant_id,app_id,name,enabled,config_version) VALUES ($1,$2,$2,TRUE,1)`, []any{tenantID, appID}},
 	}

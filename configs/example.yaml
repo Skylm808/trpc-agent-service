@@ -74,6 +74,13 @@ tenants:
             type: postgres
             endpoint: postgres://postgres:5432/trpc_agent
             namespace: demo-assistant
+            # During a controlled PR12 migration, publish a new config version
+            # with migration_target on both session and summary. The credential
+            # SecretRef resolves to a complete target DSN; never put it inline.
+            # migration_target:
+            #   type: postgres
+            #   endpoint: postgres://target-postgres:5432/trpc_agent
+            #   credential: {provider: env, key: TRPC_AGENT_STORAGE_TARGET_DSN}
           memory:
             type: postgres
             endpoint: postgres://postgres:5432/trpc_agent

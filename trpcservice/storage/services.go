@@ -36,7 +36,27 @@ func NewPostgres(profile tenant.StorageProfile, dsn string, db *sql.DB) (*Servic
 	if dsn == "" || db == nil {
 		return nil, errors.New("storage: PostgreSQL DSN and database are required")
 	}
-	sessions, err := sessionpostgres.NewService(
+	return newPostgresServices(dsn, dsn, db)
+}
+
+func newPostgresServices(sessionDSN, memoryDSN string, artifactDB *sql.DB) (*Services, error) {
+	if sessionDSN == "" || memoryDSN == "" || artifactDB == nil {
+		return nil, errors.New("storage: routed PostgreSQL services are incomplete")
+	}
+	sessions, err := newPostgresSession(sessionDSN)
+	if err != nil {
+		return nil, err
+	}
+	memories, err := newPostgresMemory(memoryDSN)
+	if err != nil {
+		_ = sessions.Close()
+		return nil, err
+	}
+	return &Services{Session: sessions, Memory: memories, Artifact: &PostgresArtifactService{DB: artifactDB}}, nil
+}
+
+func newPostgresSession(dsn string) (session.Service, error) {
+	service, err := sessionpostgres.NewService(
 		sessionpostgres.WithPostgresClientDSN(dsn),
 		sessionpostgres.WithTablePrefix("runtime_"),
 		sessionpostgres.WithSkipDBInit(true),
@@ -44,16 +64,19 @@ func NewPostgres(profile tenant.StorageProfile, dsn string, db *sql.DB) (*Servic
 	if err != nil {
 		return nil, fmt.Errorf("storage: create PostgreSQL session service: %w", err)
 	}
-	memories, err := memorypostgres.NewService(
+	return service, nil
+}
+
+func newPostgresMemory(dsn string) (memory.Service, error) {
+	service, err := memorypostgres.NewService(
 		memorypostgres.WithPostgresClientDSN(dsn),
 		memorypostgres.WithTableName("runtime_memories"),
 		memorypostgres.WithSkipDBInit(true),
 	)
 	if err != nil {
-		_ = sessions.Close()
 		return nil, fmt.Errorf("storage: create PostgreSQL memory service: %w", err)
 	}
-	return &Services{Session: sessions, Memory: memories, Artifact: &PostgresArtifactService{DB: db}}, nil
+	return service, nil
 }
 
 // ValidatePostgresProfile checks every declared data domain before startup.

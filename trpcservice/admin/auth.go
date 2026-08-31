@@ -149,11 +149,12 @@ func (auth *Authenticator) Wrap(next http.Handler) http.Handler {
 	})
 }
 
-// pathTenant extracts the tenant segment from /v1/tenants/{tenant}/configs...
+// pathTenant extracts the tenant segment from authenticated config and storage
+// administration paths
 // so scope checks never trust client-provided tenant fields.
 func pathTenant(path string) (string, bool) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "tenants" || parts[3] != "configs" {
+	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "tenants" || (parts[3] != "configs" && parts[3] != "storage") {
 		return "", false
 	}
 	if parts[2] == "" {

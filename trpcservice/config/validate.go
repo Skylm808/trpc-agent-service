@@ -253,20 +253,20 @@ func validateChannel(path string, binding tenant.ChannelBinding) error {
 		if agentID, err := strconv.ParseInt(binding.ProviderAppID, 10, 64); err != nil || agentID <= 0 {
 			return fmt.Errorf("config: %s.provider_app_id must be a positive integer", path)
 		}
-		if err := validateSecretRef(path+".token", binding.Token, true); err != nil {
+		if err := validateSecretRef(path+".token", binding.Token, binding.Enabled); err != nil {
 			return err
 		}
-		if err := validateSecretRef(path+".secret", binding.Secret, true); err != nil {
+		if err := validateSecretRef(path+".secret", binding.Secret, binding.Enabled); err != nil {
 			return err
 		}
-		if err := validateSecretRef(path+".encryption_key", binding.EncryptionKey, true); err != nil {
+		if err := validateSecretRef(path+".encryption_key", binding.EncryptionKey, binding.Enabled); err != nil {
 			return err
 		}
 	case tenant.ChannelTypeFeishu:
-		if err := validateSecretRef(path+".token", binding.Token, true); err != nil {
+		if err := validateSecretRef(path+".token", binding.Token, binding.Enabled); err != nil {
 			return err
 		}
-		if err := validateSecretRef(path+".secret", binding.Secret, true); err != nil {
+		if err := validateSecretRef(path+".secret", binding.Secret, binding.Enabled); err != nil {
 			return err
 		}
 		if err := validateSecretRef(path+".encryption_key", binding.EncryptionKey, false); err != nil {
@@ -283,6 +283,17 @@ func validateBackend(
 	backend tenant.BackendConfig,
 	allowed map[tenant.BackendType]struct{},
 ) error {
+	if backend.MigrationTarget != nil {
+		if backend.MigrationTarget.MigrationTarget != nil {
+			return fmt.Errorf("config: %s.migration_target cannot contain another migration target", path)
+		}
+		if err := validateBackend(path+".migration_target", *backend.MigrationTarget, allowed); err != nil {
+			return err
+		}
+		if sameBackend(backend, *backend.MigrationTarget) {
+			return fmt.Errorf("config: %s.migration_target must differ from the primary backend", path)
+		}
+	}
 	if _, exists := allowed[backend.Type]; !exists {
 		return fmt.Errorf(
 			"config: %s.type %q is unsupported", path, backend.Type,
@@ -322,6 +333,11 @@ func validateBackend(
 		)
 	}
 	return nil
+}
+
+func sameBackend(left, right tenant.BackendConfig) bool {
+	return left.Type == right.Type && left.Endpoint == right.Endpoint &&
+		left.Credential.Provider == right.Credential.Provider && left.Credential.Key == right.Credential.Key
 }
 
 func validateSecretRef(path string, ref tenant.SecretRef, required bool) error {

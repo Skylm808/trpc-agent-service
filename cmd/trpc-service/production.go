@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -31,6 +32,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/sessioncoord"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storagemigration"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 	"gopkg.in/yaml.v3"
@@ -48,11 +50,13 @@ const (
 )
 
 type durableComponent struct {
-	inner    trpcservice.Component
-	delivery *delivery.Worker
-	db       *sql.DB
-	redis    *backend.Redis
-	nodes    *cluster.NodeRegistry
+	inner         trpcservice.Component
+	delivery      *delivery.Worker
+	db            *sql.DB
+	redis         *backend.Redis
+	nodes         *cluster.NodeRegistry
+	migrations    *storagemigration.Worker
+	storageRouter *storage.Router
 }
 
 func (component *durableComponent) Start(ctx context.Context) error {
@@ -71,6 +75,18 @@ func (component *durableComponent) Start(ctx context.Context) error {
 			return errors.Join(err, component.inner.Close(context.Background()), nodeErr)
 		}
 	}
+	if component.migrations != nil {
+		if err := component.migrations.Start(ctx); err != nil {
+			if component.delivery != nil {
+				_ = component.delivery.Close(context.Background())
+			}
+			_ = component.inner.Close(context.Background())
+			if component.nodes != nil {
+				_ = component.nodes.Close(context.Background())
+			}
+			return err
+		}
+	}
 	return nil
 }
 
@@ -80,6 +96,10 @@ func (component *durableComponent) Close(ctx context.Context) error {
 		drainErr = component.nodes.BeginDrain(ctx)
 	}
 	innerErr := component.inner.Close(ctx)
+	var migrationErr error
+	if component.migrations != nil {
+		migrationErr = component.migrations.Close(ctx)
+	}
 	var deliveryErr error
 	if component.delivery != nil {
 		deliveryErr = component.delivery.Close(ctx)
@@ -88,7 +108,11 @@ func (component *durableComponent) Close(ctx context.Context) error {
 	if component.nodes != nil {
 		nodeErr = component.nodes.Close(ctx)
 	}
-	return errors.Join(drainErr, innerErr, deliveryErr, nodeErr, component.redis.Close(), component.db.Close())
+	var routerErr error
+	if component.storageRouter != nil {
+		routerErr = component.storageRouter.Close()
+	}
+	return errors.Join(drainErr, innerErr, migrationErr, deliveryErr, nodeErr, routerErr, component.redis.Close(), component.db.Close())
 }
 
 func newDurableComponent(ctx context.Context, address string, file *config.File) (trpcservice.Component, error) {
@@ -142,8 +166,23 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 
 	writes := &sessioncoord.SQLWriteStore{DB: db}
 	coordinator := &sessioncoord.RedisCoordinator{Redis: redisBackend, Fencer: writes}
+	storageRouter, err := storage.NewRouter(postgresDSN, db, secret.ResolveLocal)
+	if err != nil {
+		return nil, err
+	}
+	closeStorageRouter := true
+	defer func() {
+		if closeStorageRouter {
+			_ = storageRouter.Close()
+		}
+	}()
+	if err := preflightPublishedStorage(connectCtx, db, storageRouter); err != nil {
+		return nil, err
+	}
 	factory := worker.RuntimeFactoryWithServices(writes, func(snapshot config.RuntimeSnapshot) (*storage.Services, error) {
-		return storage.NewPostgres(snapshot.App().Storage, postgresDSN, db)
+		routeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		return storageRouter.Services(routeCtx, snapshot.App().Storage)
 	})
 	redactor := servicelog.NewRedactor(nil, nil)
 	bus := &openclaw.RedisEventBus{Backend: redisBackend}
@@ -173,12 +212,12 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 		Policy:         policyEngine,
 		WorkerID:       workerID,
 		Snapshots:      gateway.StoreSnapshotResolver{Published: published},
-	}, productionDecorators(db, store, published, redactor)...)
+	}, productionDecorators(db, store, published, redactor, &storagemigration.SQLStore{DB: db}, storageRouter)...)
 	if err != nil {
 		_ = nodes.Close(context.Background())
 		return nil, err
 	}
-	router := &publishedDeliveryRoutes{db: db, published: published, senders: make(map[deliverySenderKey]channels.TextSender)}
+	deliveryRouter := &publishedDeliveryRoutes{db: db, published: published, senders: make(map[deliverySenderKey]channels.TextSender)}
 	telemetry, err := servicemetrics.New("trpc-agent-service")
 	if err != nil {
 		_ = component.Close(context.Background())
@@ -187,7 +226,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 	}
 	outboxWorker, err := delivery.NewWorker(
 		&delivery.SQLStore{DB: db},
-		router,
+		deliveryRouter,
 		&delivery.RedisFixedWindowLimiter{Redis: redisBackend},
 		telemetry,
 		delivery.WorkerConfig{Owner: workerID + ":outbox"},
@@ -197,9 +236,16 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 		_ = nodes.Close(context.Background())
 		return nil, err
 	}
+	migrationWorker, err := storagemigration.NewWorker(&storagemigration.SQLStore{DB: db}, &storagemigration.PostgresCopier{Router: storageRouter}, storagemigration.WorkerConfig{Owner: workerID + ":storage-migration"})
+	if err != nil {
+		_ = component.Close(context.Background())
+		_ = nodes.Close(context.Background())
+		return nil, err
+	}
 	closeDB = false
 	closeRedis = false
-	return &durableComponent{inner: component, delivery: outboxWorker, db: db, redis: redisBackend, nodes: nodes}, nil
+	closeStorageRouter = false
+	return &durableComponent{inner: component, delivery: outboxWorker, db: db, redis: redisBackend, nodes: nodes, migrations: migrationWorker, storageRouter: storageRouter}, nil
 }
 
 type deliverySenderKey struct {
@@ -313,7 +359,7 @@ var _ delivery.RouteResolver = (*publishedDeliveryRoutes)(nil)
 
 // productionDecorators mounts the dynamic WeCom and Feishu callback adapters
 // and the authenticated administration API around the gateway.
-func productionDecorators(db *sql.DB, store repository.Store, published *config.PublishedCache, redactor *servicelog.Redactor) []openclaw.HandlerDecorator {
+func productionDecorators(db *sql.DB, store repository.Store, published *config.PublishedCache, redactor *servicelog.Redactor, migrationStore storagemigration.Store, storageRouter *storage.Router) []openclaw.HandlerDecorator {
 	wecomDecorator := func(core *openclaw.Handler, next http.Handler) (http.Handler, error) {
 		adapter, err := wecom.NewDynamicHandler(core, wecomBindingProvider(db, published))
 		if err != nil {
@@ -343,10 +389,30 @@ func productionDecorators(db *sql.DB, store repository.Store, published *config.
 		if err != nil {
 			return nil, err
 		}
+		profileValidator := func(file *config.File) error {
+			if err := validatePersistentProfiles(file); err != nil {
+				return err
+			}
+			for _, configured := range file.Tenants {
+				for _, app := range configured.Apps {
+					if !configured.Enabled || !app.Enabled {
+						continue
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+					err := storageRouter.Preflight(ctx, app.Storage)
+					cancel()
+					if err != nil {
+						return fmt.Errorf("tenant %q app %q: %w", configured.ID, app.ID, err)
+					}
+				}
+			}
+			return nil
+		}
 		service, err := admin.NewService(store,
 			admin.WithAudit(&audit.SQLStore{DB: db, Redactor: redactor}),
 			admin.WithRedactor(redactor),
-			admin.WithProfileValidator(validatePersistentProfiles),
+			admin.WithProfileValidator(profileValidator),
+			admin.WithMigrationStore(migrationStore),
 		)
 		if err != nil {
 			return nil, err
@@ -361,6 +427,36 @@ func productionDecorators(db *sql.DB, store repository.Store, published *config.
 		return mux, nil
 	}
 	return []openclaw.HandlerDecorator{wecomDecorator, feishuDecorator, adminDecorator}
+}
+
+func preflightPublishedStorage(ctx context.Context, db *sql.DB, router *storage.Router) error {
+	rows, err := db.QueryContext(ctx, `SELECT t.tenant_id,cv.config_yaml FROM tenants t JOIN config_versions cv ON cv.tenant_id=t.tenant_id AND cv.version=t.current_config_version WHERE t.enabled`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tenantID string
+		var payload []byte
+		if err := rows.Scan(&tenantID, &payload); err != nil {
+			return err
+		}
+		file, err := config.Load(bytes.NewReader(payload))
+		if err != nil {
+			return fmt.Errorf("tenant %q published storage configuration is invalid: %w", tenantID, err)
+		}
+		for _, configured := range file.Tenants {
+			for _, app := range configured.Apps {
+				if !app.Enabled {
+					continue
+				}
+				if err := router.Preflight(ctx, app.Storage); err != nil {
+					return fmt.Errorf("tenant %q app %q storage preflight: %w", configured.ID, app.ID, err)
+				}
+			}
+		}
+	}
+	return rows.Err()
 }
 
 // expectedCredential resolves the server-owned credential for one published
@@ -547,13 +643,30 @@ func validatePersistentProfiles(file *config.File) error {
 				if _, err := secret.ResolveLocal(app.Model.APIKey); err != nil {
 					return fmt.Errorf("tenant %q app %q: model credential is unavailable", currentTenant.ID, app.ID)
 				}
-				if err := storage.ValidatePostgresProfile(app.Storage); err != nil {
+				if err := storage.ValidateRoutedProfile(app.Storage); err != nil {
 					return fmt.Errorf("tenant %q app %q: %w", currentTenant.ID, app.ID, err)
+				}
+				for domain, route := range map[string]tenant.BackendConfig{"session": app.Storage.Session, "memory": app.Storage.Memory, "summary": app.Storage.Summary, "artifact": app.Storage.Artifact} {
+					for _, candidate := range []tenant.BackendConfig{route, migrationTarget(route)} {
+						if candidate.Type == "" || candidate.Credential.IsZero() {
+							continue
+						}
+						if _, err := secret.ResolveLocal(candidate.Credential); err != nil {
+							return fmt.Errorf("tenant %q app %q: %s storage credential is unavailable", currentTenant.ID, app.ID, domain)
+						}
+					}
 				}
 			}
 		}
 	}
 	return nil
+}
+
+func migrationTarget(route tenant.BackendConfig) tenant.BackendConfig {
+	if route.MigrationTarget == nil {
+		return tenant.BackendConfig{}
+	}
+	return route.MigrationTarget.Clone()
 }
 
 // bootstrapConfig seeds the control plane from the startup file. The database

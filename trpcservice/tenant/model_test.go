@@ -5,6 +5,16 @@ import (
 	"testing"
 )
 
+func TestAgentCloneDeepCopiesStorageMigrationTarget(t *testing.T) {
+	target := BackendConfig{Type: BackendPostgres, Endpoint: "postgres://target/runtime"}
+	app := AgentApp{Storage: StorageProfile{Session: BackendConfig{Type: BackendPostgres, MigrationTarget: &target}}}
+	cloned := app.Clone()
+	cloned.Storage.Session.MigrationTarget.Endpoint = "postgres://changed/runtime"
+	if app.Storage.Session.MigrationTarget.Endpoint != "postgres://target/runtime" {
+		t.Fatal("clone mutated source migration target")
+	}
+}
+
 func TestSecretRefStringRedactsKey(t *testing.T) {
 	ref := SecretRef{Provider: SecretProviderEnv, Key: "VERY_SECRET_ENV_NAME"}
 	formatted := ref.String()

@@ -200,9 +200,17 @@ curl -H 'Authorization: Bearer local-secret' \
 - `worker_nodes` 保存唯一节点 ID、心跳、draining 和停止时间；重复的活跃 `TRPC_AGENT_NODE_ID` 启动失败。关闭时先标记 draining、停止接收；未完成请求释放/失去 lease 后由其他节点有界接管。
 - PostgreSQL/Redis Compose 集成测试可用 `docker compose --profile test run --rm --build integration-test` 重复执行，不要求删除数据卷。
 
+**本 PR（PR12：多后端 Storage Router 与数据迁移 Worker）实现**：
+
+- Runtime Bundle 按不可变配置版本分别路由 Session/Summary、Memory 和 Artifact；各数据域可以使用平台 PostgreSQL或由 SecretRef 指向的独立 PostgreSQL 集群。外部连接池按 SecretRef 身份缓存并在服务关闭时释放。
+- `migration_target` 启用读主库、同步双写目标库；Session 与 Summary 必须使用完全相同的主路由和迁移目标。目标写失败显式返回错误，不允许静默形成不可见的数据缺口。
+- PostgreSQL `migration_jobs` 保存租户、App、配置版本、domain、claim lease、checkpoint、行数、重试和 error type；多个节点使用 `SKIP LOCKED` 竞争批量 backfill，目标端 ledger 与数据写入同事务，checkpoint 丢失后重放也不会重复插入。
+- Admin API 支持计划、列表、查询和取消迁移。source/target 只取自已发布配置，客户端不能上传 DSN 或切换租户；响应、错误和审计均不返回 SecretRef 或解析后的数据库凭据。
+- cutover 必须满足：旧版本已声明目标、对应迁移任务 completed、copied rows 不少于 source snapshot，并通过 expected version。任意改路由或直接回滚到可能陈旧的源库都会被拒绝，需先执行反向迁移。
+- 服务启动、配置 validate/publish 会连接并检查所有路由所需表；SecretRef 缺失、目标不可达或未执行 schema migration 时 fail fast。完整操作步骤见 [Storage Router 与迁移](docs/storage-migrations.md)。
+
 **后续计划**：
 
-- PR12：多后端 Storage Router 与数据迁移 Worker。
 - PR13：Knowledge/RAG、MCP 与业务工具。
 - PR14：持久化治理、OpenTelemetry Collector、Prometheus/Grafana。
 - PR15：Kubernetes、容量测试、故障演练和生产验收。

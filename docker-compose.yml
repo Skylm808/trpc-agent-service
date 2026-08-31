@@ -78,6 +78,7 @@ services:
       - "./trpcservice/idempotency"
       - "./trpcservice/delivery"
       - "./trpcservice/repository"
+      - "./trpcservice/storagemigration"
     environment:
       TRPC_AGENT_POSTGRES_TEST_DSN: postgres://trpc_agent:${POSTGRES_PASSWORD:-local-postgres-password}@postgres:5432/trpc_agent?sslmode=disable
       TRPC_AGENT_REDIS_TEST_URL: redis://redis:6379/0

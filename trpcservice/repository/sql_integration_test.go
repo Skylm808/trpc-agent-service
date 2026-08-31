@@ -42,7 +42,7 @@ func configPayload(tenantID string, version int) []byte {
 tenants:
 - tenant_id: %s
   name: %s
-  enabled: true
+  enabled: false
   config_version: %d
   audit: {enabled: true, retention_days: 30, store_content: false}
   apps:
@@ -72,7 +72,7 @@ func TestSQLStorePublishListCurrentAndRollback(t *testing.T) {
 	}
 	tenantID := fmt.Sprintf("repo-%d", time.Now().UnixNano())
 
-	first, err := store.PublishConfig(ctx, repository.ConfigRecord{TenantID: tenantID, TenantName: tenantID, TenantEnabled: true, Payload: configPayload(tenantID, 1), SHA256: "v1-hash", CreatedBy: "ops"}, 0)
+	first, err := store.PublishConfig(ctx, repository.ConfigRecord{TenantID: tenantID, TenantName: tenantID, TenantEnabled: false, Payload: configPayload(tenantID, 1), SHA256: "v1-hash", CreatedBy: "ops"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storagemigration"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"gopkg.in/yaml.v3"
 )
@@ -24,11 +25,12 @@ var ErrInvalidConfig = errors.New("admin: invalid configuration")
 
 // Service validates and publishes immutable tenant configurations.
 type Service struct {
-	store    repository.Store
-	now      func() time.Time
-	audit    audit.Store
-	redactor *servicelog.Redactor
-	profiles func(*config.File) error
+	store      repository.Store
+	now        func() time.Time
+	audit      audit.Store
+	redactor   *servicelog.Redactor
+	profiles   func(*config.File) error
+	migrations storagemigration.Store
 }
 
 // Option customizes a Service.
@@ -56,6 +58,11 @@ func WithProfileValidator(validator func(*config.File) error) Option {
 	return func(service *Service) { service.profiles = validator }
 }
 
+// WithMigrationStore enables authenticated storage migration administration.
+func WithMigrationStore(store storagemigration.Store) Option {
+	return func(service *Service) { service.migrations = store }
+}
+
 // NewService creates an administration Service.
 func NewService(store repository.Store, options ...Option) (*Service, error) {
 	if store == nil {
@@ -68,6 +75,84 @@ func NewService(store repository.Store, options ...Option) (*Service, error) {
 		}
 	}
 	return service, nil
+}
+
+// PlanMigration validates the current immutable route and creates one durable
+// backfill job. Source/target routes come from the published config, never from
+// client-supplied backend payloads.
+func (service *Service) PlanMigration(ctx context.Context, tenantID, appID string, domain storagemigration.Domain, expected tenant.ConfigVersion) (job storagemigration.Job, err error) {
+	started := service.now()
+	defer func() {
+		service.recordDecision(ctx, tenantID, "storage.migration.plan", expected, expected, err, started)
+	}()
+	if service.migrations == nil {
+		return storagemigration.Job{}, errors.New("admin: storage migrations are unavailable")
+	}
+	record, err := service.store.GetCurrentConfig(ctx, tenantID)
+	if err != nil {
+		return storagemigration.Job{}, err
+	}
+	if record.Version != expected {
+		return storagemigration.Job{}, repository.ErrVersionConflict
+	}
+	file, err := config.Load(bytes.NewReader(record.Payload))
+	if err != nil {
+		return storagemigration.Job{}, errors.New("admin: stored config is invalid")
+	}
+	snapshot, err := file.Snapshot(tenantID, appID)
+	if err != nil {
+		return storagemigration.Job{}, fmt.Errorf("%w: app route is unavailable", ErrInvalidConfig)
+	}
+	route, err := migrationRoute(snapshot.App().Storage, domain)
+	if err != nil {
+		return storagemigration.Job{}, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+	}
+	if route.MigrationTarget == nil {
+		return storagemigration.Job{}, fmt.Errorf("%w: domain has no migration_target", ErrInvalidConfig)
+	}
+	source := route.Clone()
+	target := route.MigrationTarget.Clone()
+	source.MigrationTarget = nil
+	target.MigrationTarget = nil
+	job, err = storagemigration.NewJob(tenantID, appID, record.Version, domain, source, target, ActorFrom(ctx))
+	if err != nil {
+		return storagemigration.Job{}, fmt.Errorf("%w: invalid migration route", ErrInvalidConfig)
+	}
+	return service.migrations.Create(ctx, job)
+}
+
+func (service *Service) ListMigrations(ctx context.Context, tenantID string) ([]storagemigration.Job, error) {
+	if service.migrations == nil {
+		return nil, errors.New("admin: storage migrations are unavailable")
+	}
+	return service.migrations.List(ctx, tenantID)
+}
+func (service *Service) GetMigration(ctx context.Context, tenantID, jobID string) (storagemigration.Job, error) {
+	if service.migrations == nil {
+		return storagemigration.Job{}, errors.New("admin: storage migrations are unavailable")
+	}
+	return service.migrations.Get(ctx, tenantID, jobID)
+}
+func (service *Service) CancelMigration(ctx context.Context, tenantID, jobID string) (err error) {
+	started := service.now()
+	defer func() { service.recordDecision(ctx, tenantID, "storage.migration.cancel", 0, 0, err, started) }()
+	if service.migrations == nil {
+		return errors.New("admin: storage migrations are unavailable")
+	}
+	return service.migrations.Cancel(ctx, tenantID, jobID)
+}
+
+func migrationRoute(profile tenant.StorageProfile, domain storagemigration.Domain) (tenant.BackendConfig, error) {
+	switch domain {
+	case storagemigration.DomainSession:
+		return profile.Session.Clone(), nil
+	case storagemigration.DomainMemory:
+		return profile.Memory.Clone(), nil
+	case storagemigration.DomainArtifact:
+		return profile.Artifact.Clone(), nil
+	default:
+		return tenant.BackendConfig{}, errors.New("unsupported migration domain")
+	}
 }
 
 // Validate validates one tenant configuration without resolving secrets.
@@ -148,12 +233,73 @@ func (service *Service) Rollback(ctx context.Context, tenantID string, expected,
 }
 
 func (service *Service) publish(ctx context.Context, name string, enabled bool, tenantID string, expected tenant.ConfigVersion, payload []byte, apps []tenant.AgentApp, rollback *tenant.ConfigVersion) (repository.ConfigRecord, error) {
+	if err := service.validateStorageTransition(ctx, tenantID, expected, apps); err != nil {
+		return repository.ConfigRecord{}, err
+	}
 	digest := sha256.Sum256(payload)
 	return service.store.PublishConfig(ctx, repository.ConfigRecord{
 		TenantID: tenantID, TenantName: name, TenantEnabled: enabled, Payload: append([]byte(nil), payload...),
 		SHA256: hex.EncodeToString(digest[:]), RolledBackFrom: rollback, Apps: apps,
 		CreatedBy: ActorFrom(ctx), CreatedAt: service.now().UTC(),
 	}, expected)
+}
+
+func (service *Service) validateStorageTransition(ctx context.Context, tenantID string, expected tenant.ConfigVersion, nextApps []tenant.AgentApp) error {
+	if service.migrations == nil || expected == 0 {
+		return nil
+	}
+	current, err := service.store.GetCurrentConfig(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	if current.Version != expected {
+		return repository.ErrVersionConflict
+	}
+	currentFile, err := config.Load(bytes.NewReader(current.Payload))
+	if err != nil {
+		return errors.New("admin: stored config is invalid")
+	}
+	currentApps := make(map[string]tenant.AgentApp)
+	for _, app := range currentFile.Tenants[0].Apps {
+		currentApps[app.ID] = app
+	}
+	jobs, err := service.migrations.List(ctx, tenantID)
+	if err != nil {
+		return errors.New("admin: read storage migration state failed")
+	}
+	for _, next := range nextApps {
+		old, ok := currentApps[next.ID]
+		if !ok {
+			continue
+		}
+		checks := []struct {
+			domain   storagemigration.Domain
+			old, new tenant.BackendConfig
+		}{{storagemigration.DomainSession, old.Storage.Session, next.Storage.Session}, {storagemigration.DomainMemory, old.Storage.Memory, next.Storage.Memory}, {storagemigration.DomainArtifact, old.Storage.Artifact, next.Storage.Artifact}}
+		for _, check := range checks {
+			if samePrimaryRoute(check.old, check.new) {
+				continue
+			}
+			if check.old.MigrationTarget == nil || !samePrimaryRoute(*check.old.MigrationTarget, check.new) {
+				return fmt.Errorf("%w: %s route change must cut over the declared migration_target", ErrInvalidConfig, check.domain)
+			}
+			complete := false
+			for _, job := range jobs {
+				if job.AppID == next.ID && job.ConfigVersion == expected && job.Domain == check.domain && job.Status == storagemigration.StatusCompleted && job.CopiedRows >= job.SourceRows && samePrimaryRoute(job.Source, check.old) && samePrimaryRoute(job.Target, check.new) {
+					complete = true
+					break
+				}
+			}
+			if !complete {
+				return fmt.Errorf("%w: %s migration is not verified for cutover", ErrInvalidConfig, check.domain)
+			}
+		}
+	}
+	return nil
+}
+
+func samePrimaryRoute(left, right tenant.BackendConfig) bool {
+	return left.Type == right.Type && left.Endpoint == right.Endpoint && left.Credential == right.Credential
 }
 
 // recordDecision appends one redacted audit record per publish/rollback call.

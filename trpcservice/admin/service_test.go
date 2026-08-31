@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storagemigration"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -36,6 +38,74 @@ tenants:
       knowledge: {type: inmemory}
       audit: {type: inmemory}
 `, id, id, configVersion))
+}
+
+func storageRouteYAML(id string, version int, cutover bool) []byte {
+	session := `
+        type: postgres
+        endpoint: postgres://source.example/runtime
+        migration_target:
+          type: postgres
+          endpoint: postgres://target.example/runtime`
+	if cutover {
+		session = `{type: postgres, endpoint: postgres://target.example/runtime}`
+	}
+	return []byte(fmt.Sprintf(`schema_version: 1
+tenants:
+- tenant_id: %s
+  name: %s
+  enabled: true
+  config_version: %d
+  audit: {enabled: true, retention_days: 30, store_content: false}
+  apps:
+  - app_id: assistant
+    name: Assistant
+    enabled: true
+    config: {instruction: Help the user.}
+    model: {provider: mock, name: mock}
+    tools: {allow: [echo], deny: [], require_approval: []}
+    channels: [{binding_id: http, type: http, provider_account_id: local, enabled: true}]
+    storage:
+      session: %s
+      memory: {type: postgres}
+      summary: %s
+      artifact: {type: postgres}
+      knowledge: {type: postgres}
+      audit: {type: postgres}
+`, id, id, version, session, session))
+}
+
+func TestStorageCutoverRequiresCompletedMatchingMigration(t *testing.T) {
+	configs := repository.NewMemoryStore()
+	migrations := storagemigration.NewMemoryStore()
+	service, err := NewService(configs, WithMigrationStore(migrations))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithActor(context.Background(), "ops")
+	if _, err := service.Publish(ctx, "tenant-a", 0, storageRouteYAML("tenant-a", 1, false)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Publish(ctx, "tenant-a", 1, storageRouteYAML("tenant-a", 2, true)); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("unverified cutover error=%v", err)
+	}
+	job, err := service.PlanMigration(ctx, "tenant-a", "assistant", storagemigration.DomainSession, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := migrations.Claim(ctx, "worker", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("claim=%v ok=%v", err, ok)
+	}
+	if err := migrations.Save(ctx, claim, storagemigration.Progress{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Publish(ctx, "tenant-a", 1, storageRouteYAML("tenant-a", 2, true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Rollback(ctx, "tenant-a", 2, 1); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("unsafe storage rollback error=%v job=%s", err, job.JobID)
+	}
 }
 
 func TestServicePublishIsolationAndRollback(t *testing.T) {

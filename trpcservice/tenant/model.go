@@ -131,10 +131,11 @@ const (
 
 // BackendConfig selects one backend without embedding credentials.
 type BackendConfig struct {
-	Type       BackendType `json:"type" yaml:"type"`
-	Endpoint   string      `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
-	Credential SecretRef   `json:"credential,omitempty" yaml:"credential,omitempty"`
-	Namespace  string      `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Type            BackendType    `json:"type" yaml:"type"`
+	Endpoint        string         `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+	Credential      SecretRef      `json:"credential,omitempty" yaml:"credential,omitempty"`
+	Namespace       string         `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	MigrationTarget *BackendConfig `json:"migration_target,omitempty" yaml:"migration_target,omitempty"`
 }
 
 // StorageProfile routes each data domain independently.
@@ -179,6 +180,29 @@ func (value AgentApp) Clone() AgentApp {
 		[]string(nil), value.Tools.RequireApproval...,
 	)
 	cloned.Channels = append([]ChannelBinding(nil), value.Channels...)
+	cloned.Storage = value.Storage.Clone()
+	return cloned
+}
+
+// Clone returns a deep copy of all independently routed storage domains.
+func (value StorageProfile) Clone() StorageProfile {
+	cloned := value
+	cloned.Session = value.Session.Clone()
+	cloned.Memory = value.Memory.Clone()
+	cloned.Summary = value.Summary.Clone()
+	cloned.Artifact = value.Artifact.Clone()
+	cloned.Knowledge = value.Knowledge.Clone()
+	cloned.Audit = value.Audit.Clone()
+	return cloned
+}
+
+// Clone returns a deep copy of a route and its one-level migration target.
+func (value BackendConfig) Clone() BackendConfig {
+	cloned := value
+	if value.MigrationTarget != nil {
+		target := value.MigrationTarget.Clone()
+		cloned.MigrationTarget = &target
+	}
 	return cloned
 }
 
