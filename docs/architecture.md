@@ -272,7 +272,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 
 最小可运行环境使用根目录的 Docker Compose：一个 Gateway/Worker 合并进程、PostgreSQL、Redis 和一次性 migration。企业微信通过公网反向代理进入 Adapter；模型、IM 和数据库密钥从挂载的 secret 文件读取。这个形态用来做协议联调和故障回放，不承诺单点容灾。启动与验证命令见 [PostgreSQL + Redis 部署](deployment.md)。
 
-生产环境使用 Kubernetes：Gateway、Worker、Channel Adapter、Outbox Worker 和 Admin API 分别部署，按队列等待、活跃 Runner 和投递积压独立扩容；PostgreSQL、Redis、对象存储和向量库使用托管或高可用集群。Pod 不挂载会话本地盘，也不依赖 sticky session。配置发布先进入少量租户，指标越过阈值即停止灰度并发布回滚版本。数据库迁移由独立 Job 串行执行，不能放在每个应用 Pod 启动流程中并发运行。
+生产推荐最终把 Gateway、Worker、Channel Adapter、Outbox Worker 和 Admin API 按角色拆分，并按队列等待、活跃 Runner 和投递积压独立扩容。当前可执行文件尚无角色选择参数，因此 PR15 Kubernetes manifest 诚实部署三个合并的无状态节点；PostgreSQL、Redis、对象存储和向量库使用托管或高可用集群。Pod 不挂载会话本地盘，也不依赖 sticky session。配置发布先进入少量租户，指标越过阈值即停止灰度并发布回滚版本。数据库迁移由独立 Job 串行执行，不能放在每个应用 Pod 启动流程中并发运行。
 
 ## 9. 框架复用、平台新增与当前边界
 
@@ -284,7 +284,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、租户成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复迁移 Worker、治理审计与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换，以及企业微信和飞书两个 Channel Adapter/Sender。MCP/业务工具、复杂文档解析、Knowledge 跨后端迁移、外置审计归档、投递异常运维页、按租户动态并发配额及 Kubernetes manifest 仍未完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
+当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复迁移 Worker、治理审计与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换、Kubernetes 合并节点基线，以及企业微信和飞书两个 Channel Adapter/Sender。MCP/业务工具、复杂文档解析、Knowledge 跨后端迁移、外置审计归档、投递异常运维页、按角色独立进程和按租户动态并发配额仍未完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
 
 ## 10. 预期效果与时间规划
 
@@ -310,6 +310,8 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | T2a：飞书通道（PR10） | 已完成 | 飞书 Adapter/Sender、事件验签解密、身份映射、动态配置接入 | 代码已完成，待真实飞书账号联调 |
 | T2b：跨节点实时调度（PR11） | 已完成 | Redis Streams、共享 command/event bus、跨节点 cancel/status、预算/审批和节点心跳 | 已完成并通过 PostgreSQL/Redis 双节点集成测试 |
 | T2c：存储路由与迁移（PR12） | 已完成 | 多 PostgreSQL 域路由、双写、checkpoint backfill、校验和安全 cutover | 已完成并通过 PostgreSQL 集成测试 |
-| T3：生产运维补强 | T0 后 5–8 个工作日 | Kubernetes manifests、按租户动态并发配额、DLQ/uncertain 管理接口、容量压测 | 规划中 |
+| T3a：治理与观测（PR14） | 已完成 | OTLP/Collector、Prometheus/Grafana、审计保留 | 已完成，生产 trace 后端由部署方接入 |
+| T3b：生产部署与验收（PR15） | 已完成 | Kubernetes 合并节点 manifest、readiness、容量工具、故障演练和验收门禁 | 代码与离线校验已完成，真实集群演练待部署方执行 |
+| T4：运维增强 | 待排期 | 按角色独立进程、按租户动态并发配额、DLQ/uncertain 管理接口、自定义指标 HPA | 未完成 |
 
 时间从依赖就绪后计算，不含企业微信权限、公网域名、TLS 证书或平台审核等待。

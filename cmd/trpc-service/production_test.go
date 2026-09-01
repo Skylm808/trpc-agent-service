@@ -22,6 +22,44 @@ func postgresStorageProfile() tenant.StorageProfile {
 	return tenant.StorageProfile{Session: postgres, Memory: postgres, Summary: postgres, Artifact: postgres, Knowledge: postgres, Audit: postgres}
 }
 
+func TestPositiveEnvIntBoundsWorkerConcurrency(t *testing.T) {
+	t.Setenv(workerConcurrencyEnv, "")
+	if value, err := positiveEnvInt(workerConcurrencyEnv, 8, 256); err != nil || value != 8 {
+		t.Fatalf("default value=%d err=%v", value, err)
+	}
+	for _, invalid := range []string{"0", "-1", "257", "many"} {
+		t.Run(invalid, func(t *testing.T) {
+			t.Setenv(workerConcurrencyEnv, invalid)
+			if _, err := positiveEnvInt(workerConcurrencyEnv, 8, 256); err == nil {
+				t.Fatalf("accepted %q", invalid)
+			}
+		})
+	}
+	t.Setenv(workerConcurrencyEnv, "32")
+	if value, err := positiveEnvInt(workerConcurrencyEnv, 8, 256); err != nil || value != 32 {
+		t.Fatalf("value=%d err=%v", value, err)
+	}
+}
+
+func TestPositiveEnvDurationBoundsShutdown(t *testing.T) {
+	t.Setenv(shutdownTimeoutEnv, "")
+	if value, err := positiveEnvDuration(shutdownTimeoutEnv, 10*time.Second, time.Second, 10*time.Minute); err != nil || value != 10*time.Second {
+		t.Fatalf("default value=%s err=%v", value, err)
+	}
+	for _, invalid := range []string{"0s", "500ms", "-1s", "11m", "forever"} {
+		t.Run(invalid, func(t *testing.T) {
+			t.Setenv(shutdownTimeoutEnv, invalid)
+			if _, err := positiveEnvDuration(shutdownTimeoutEnv, 10*time.Second, time.Second, 10*time.Minute); err == nil {
+				t.Fatalf("accepted %q", invalid)
+			}
+		})
+	}
+	t.Setenv(shutdownTimeoutEnv, "100s")
+	if value, err := positiveEnvDuration(shutdownTimeoutEnv, 10*time.Second, time.Second, 10*time.Minute); err != nil || value != 100*time.Second {
+		t.Fatalf("value=%s err=%v", value, err)
+	}
+}
+
 func publishedWeComYAML(t *testing.T, version int, agentID, secretKey string) []byte {
 	t.Helper()
 	file := &config.File{SchemaVersion: 1, Tenants: []tenant.Tenant{{

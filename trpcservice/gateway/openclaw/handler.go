@@ -35,6 +35,7 @@ type Handler struct {
 	ClaimOwner string
 	ClaimTTL   time.Duration
 	Telemetry  *servicemetrics.Telemetry
+	Readiness  func(context.Context) error
 }
 
 var _ gateway.InboundAcceptor = (*Handler)(nil)
@@ -87,6 +88,17 @@ func (handler *Handler) RoutesHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", method(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})))
+	mux.Handle("/readyz", method(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if handler.Readiness != nil {
+			ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+			defer cancel()
+			if err := handler.Readiness(ctx); err != nil {
+				writeError(w, http.StatusServiceUnavailable, errors.New("dependencies unavailable"))
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})))
 	mux.Handle("/v1/gateway/status", method(http.MethodGet, http.HandlerFunc(handler.status)))
 	mux.Handle("/v1/gateway/cancel", method(http.MethodPost, http.HandlerFunc(handler.cancel)))

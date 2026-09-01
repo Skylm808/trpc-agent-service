@@ -50,6 +50,33 @@ func (submitter *captureSubmitter) Submit(request gateway.RunRequest) error {
 	return nil
 }
 
+func TestHealthAndReadinessHaveSeparateSemantics(t *testing.T) {
+	ready := atomic.Bool{}
+	handler := (&Handler{Readiness: func(context.Context) error {
+		if !ready.Load() {
+			return fmt.Errorf("database password must not reach response")
+		}
+		return nil
+	}}).RoutesHandler()
+
+	health := httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status=%d body=%s", health.Code, health.Body.String())
+	}
+	unready := httptest.NewRecorder()
+	handler.ServeHTTP(unready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if unready.Code != http.StatusServiceUnavailable || strings.Contains(unready.Body.String(), "password") {
+		t.Fatalf("readiness status=%d body=%s", unready.Code, unready.Body.String())
+	}
+	ready.Store(true)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("readiness status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestMessageAuthenticatesCanonicalizesClaimsAndAcknowledgesDuplicate(t *testing.T) {
 	routes, _ := NewStaticRoutes(Route{TenantID: "tenant-a", AppID: "assistant", BindingID: "binding-a", ChannelType: tenant.ChannelTypeHTTP, ConfigVersion: 1, Credential: "secret-a"})
 	inbox := idempotency.NewMemoryStore()

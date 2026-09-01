@@ -106,7 +106,7 @@ services:
     volumes:
       - ${TRPC_CONFIG_FILE:-./configs/example.yaml}:/etc/trpc-agent/config.yaml:ro
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/readyz"]
       interval: 5s
       timeout: 3s
       retries: 20

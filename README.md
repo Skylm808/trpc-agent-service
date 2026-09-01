@@ -226,11 +226,15 @@ curl -H 'Authorization: Bearer local-secret' \
 - 审计保留策略由后台 Worker 自动执行，多节点通过 PostgreSQL advisory lock 保证每轮只有一个节点清理；策略始终来自当前已发布配置。
 - Compose 的 trace 默认由 Collector `debug` exporter 接收，便于验证但不作为长期存储；生产需要把该 exporter 替换为 Tempo、Jaeger 或托管 OTLP 后端。完整说明见 [生产可观测性](docs/observability.md)。
 
-**后续计划**：
+**本 PR（PR15：Kubernetes、容量测试、故障演练与生产验收）实现**：
 
-- PR15：Kubernetes、容量测试、故障演练和生产验收。
+- 提供三副本 Kubernetes Kustomize 基线：独立 migration Job、滚动更新、PDB、HPA、拓扑分散、NetworkPolicy、非 root/只读文件系统和外部 Secret 引用；仓库不渲染或提交 Secret。
+- `/healthz` 只表示进程存活，`/readyz` 在两秒上限内检查 PostgreSQL/Redis；依赖不可用时 Pod 退出 Service endpoints，但不会因 liveness 重启风暴丢失排障现场。
+- Worker 并发由 `TRPC_AGENT_WORKER_CONCURRENCY` 显式配置，合法范围 1–256；非法值启动失败。容量工具提供有界 health/readiness/gateway 压测和聚合 p50/p95/p99 报告。
+- Kubernetes 静态安全校验、默认只预览且双重确认的单 Pod 演练、默认只读且可选择真实 Runner 消息的生产验收脚本均已纳入 CI/运维文档。
+- 当前二进制仍是 Gateway、Worker、Channel、Delivery 与 Admin 合并进程，Kubernetes 按无状态组合节点扩缩容；尚未实现按角色独立 Deployment，文档和 manifest 不把该规划写成已完成。
 
-MCP、业务工具和复杂文档解析仍是未排期能力；本次 PR14 不把它们标成已完成。
+真实飞书账号联调、按角色拆分进程、队列自定义指标扩缩容、持久 trace 后端、外置不可变审计归档、MCP/业务工具和复杂文档解析仍是后续能力，本次 PR15 不把它们标成已完成。
 
 ## Admin API
 
@@ -275,7 +279,10 @@ Inbox/fencing/Outbox 与 OpenClaw HTTP 链路见
 主动回复见 [`docs/wecom.md`](docs/wecom.md)，飞书事件订阅验签解密、身份映射和
 Sender 见 [`docs/feishu.md`](docs/feishu.md)。
 PostgreSQL + Redis 的 Compose 启动、验证和生产拓扑边界见
-[`docs/deployment.md`](docs/deployment.md)。
+[`docs/deployment.md`](docs/deployment.md)。Kubernetes 部署见
+[`deploy/kubernetes/README.md`](deploy/kubernetes/README.md)，容量、故障演练和上线门禁见
+[`docs/capacity.md`](docs/capacity.md)、[`docs/fault-drills.md`](docs/fault-drills.md) 和
+[`docs/production-acceptance.md`](docs/production-acceptance.md)。
 
 PR7 的企业微信协议测试和 PR10 的飞书协议测试都不需要真实账号：
 

@@ -1,0 +1,17 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: trpc-agent-service-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              trpc-agent.io/ingress: allowed
+      ports:
+        - {port: 8080, protocol: TCP}

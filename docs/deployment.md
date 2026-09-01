@@ -56,6 +56,8 @@ Admin API 与 Gateway 共用 HTTP 端口，所有 `/v1/tenants/{tenant_id}/confi
 - `TRPC_AGENT_POSTGRES_DSN`：完整 PostgreSQL DSN，只从环境或 Secret 挂载注入；
 - `TRPC_AGENT_REDIS_URL`：Redis URL；
 - `TRPC_AGENT_NODE_ID`：节点唯一标识；未设置时使用 hostname，Kubernetes 推荐注入 Pod UID；
+- `TRPC_AGENT_WORKER_CONCURRENCY`：每节点 Worker 并发，默认 8，生产合法范围 1–256；非法值启动失败；
+- `TRPC_AGENT_SHUTDOWN_TIMEOUT`：收到 SIGTERM 后排空组件的总上限，默认 10 秒、合法范围 1 秒到 10 分钟；Kubernetes 基线设置 100 秒并保留 preStop/退出余量；
 - `DEEPSEEK_API_KEY`：DeepSeek API Key，由模型配置中的 SecretRef 引用；
 - `TRPC_AGENT_GATEWAY_TOKEN_<BINDING_ID>`：HTTP Channel token；
 - `TRPC_AGENT_ADMIN_TOKENS`：Admin API 管理员凭据（`名称=令牌:租户列表`，`;` 分隔，`*` 表示全部租户）；未配置时 Admin API 拒绝一切请求；
@@ -74,7 +76,7 @@ Prometheus 位于 `http://127.0.0.1:9090`，Grafana 位于 `http://127.0.0.1:300
 
 ## 生产推荐拓扑
 
-生产环境把 Gateway、Worker、Outbox Delivery Worker、Channel Adapter 和 Admin API 分开扩容，PostgreSQL 与 Redis 使用托管高可用集群。migration 作为单独 Job 执行；迁移在事务内获取 PostgreSQL advisory lock，业务 Pod 不负责建表。Session 和 Memory 不保存在 Worker 本地，因此不要求 sticky session。
+生产推荐最终把 Gateway、Worker、Outbox Delivery Worker、Channel Adapter 和 Admin API 分开扩容；当前二进制没有角色选择参数，PR15 Kubernetes 基线部署三个合并的无状态节点，不虚构独立 Deployment。PostgreSQL 与 Redis 使用托管高可用集群。migration 作为单独 Job 执行；迁移在事务内获取 PostgreSQL advisory lock，业务 Pod 不负责建表。Session 和 Memory 不保存在 Worker 本地，因此不要求 sticky session。
 
 当前 Compose 仍把 Gateway 与 Worker 合并在一个进程，但生产路径已经使用 Redis Streams
 consumer group，不再依赖进程内 dispatcher。每个节点同时从 PostgreSQL 竞争捞取到期 retry
@@ -83,8 +85,8 @@ claim 使用 `SKIP LOCKED`，同 session 按 `inbox_seq` 提交，超过最大�
 在调用模型前或写入时被拒绝。
 
 企业微信 Outbox 已装配 PostgreSQL 多节点 claim、租约、重试、DLQ、结果不确定隔离和
-Redis 跨节点限流。Compose 中它与 Gateway/Worker 合并运行；生产可使用相同 Store 和
-Sender 将 Delivery Worker 拆成独立 Deployment。
+Redis 跨节点限流。Compose 与当前 Kubernetes manifest 都让它和 Gateway/Worker 合并运行；
+独立 Delivery Deployment 需要先实现角色选择参数。
 
 跨节点请求状态、取消意图、预算、人工审批和节点心跳均保存在共享后端；取消命令另用 Redis
 Pub/Sub 做低延迟通知。仍未生产化的部分包括 `uncertain` / DLQ 的 Admin 运维页面、按租户
@@ -108,17 +110,13 @@ PR13 增加 PGVector/Qdrant Knowledge 和 S3-compatible Artifact。启用 Knowle
 
 迁移不能直接修改 endpoint。先发布带 `migration_target` 的双写配置，再调用受认证的 migration API backfill；任务 completed 后才发布下一版本完成 cutover。旧源库保留只读回滚窗口，不会自动清理。命令与故障恢复步骤见 [Storage Router 与迁移](storage-migrations.md)。
 
-## 容量估算
+## Kubernetes、容量和验收
 
-容量评估先用压测取得单次请求的模型等待时间、Tool 耗时、token 用量和数据库操作数，再按峰值而不是日均流量计算。单节点并发上限取以下约束中的最小值：Runner 内存/CPU 上限、模型 Provider 并发额度、Tool 连接池、PostgreSQL 连接池和租户限流额度。建议从 60% 目标利用率起步，给模型长尾和节点迁移预留余量。
-
-- 活跃 Runner 约等于 `峰值请求每秒 × p95 完整执行秒数`；再按租户预算和节点数分配。
-- 模型 token 吞吐约等于 `峰值请求每秒 × 每请求 p95 token`，输入和输出分别统计。
-- PostgreSQL QPS 按每个 turn 的 Inbox claim、Session/Event 事务、投影、Outbox 和审计写入次数估算，并单独压测热点 session 的行锁等待。
-- Redis QPS 至少包含 lease acquire/renew/release、fencing `INCR`、限流和 event bus；lease 续期间隔会明显放大 QPS。
-- IM 容量使用平台回调峰值、单账号发送额度和 Outbox backlog 估算，不能只看 Gateway HTTP 吞吐。
-
-扩容优先观察 queue wait、活跃 Runner、数据库连接池等待和 Outbox backlog。CPU 很低但模型请求大量等待时，仍可能需要增加 Worker；反过来，Provider 配额已经饱和时继续扩 Worker 不会提高吞吐。
+Kubernetes 有序部署与 Secret 合约见 [manifest 说明](../deploy/kubernetes/README.md)。
+`/healthz` 只用于 liveness；`/readyz` 有界检查 PostgreSQL/Redis，用于 Service readiness。
+容量估算和工具见[容量测试](capacity.md)，故障注入见[演练手册](fault-drills.md)，上线硬门禁见
+[生产验收](production-acceptance.md)。HPA 的 CPU/内存只是初始基线，不能代替 Provider 配额、
+完整执行耗时、queue depth 和 Outbox backlog 的容量判定。
 
 停止环境但保留数据：
 
@@ -126,8 +124,4 @@ PR13 增加 PGVector/Qdrant Knowledge 和 S3-compatible Artifact。启用 Knowle
 docker compose down
 ```
 
-连同本地测试数据卷一起清理：
-
-```bash
-docker compose down -v
-```
+数据卷清理由环境所有者单独审批，本手册不把删除数据作为部署或验收步骤。

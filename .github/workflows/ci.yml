@@ -10,12 +10,15 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.24.x"
           cache: true
       - run: go mod download
       - run: ./check.sh
+      - run: ./scripts/kubernetes_validate.sh
+      - run: docker build -t trpc-agent-service:ci .
       - run: ./scripts/postgres_migrations_test.sh

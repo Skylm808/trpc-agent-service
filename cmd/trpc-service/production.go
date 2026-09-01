@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,10 +41,12 @@ import (
 )
 
 const (
-	postgresDSNEnv  = "TRPC_AGENT_POSTGRES_DSN"
-	redisURLEnv     = "TRPC_AGENT_REDIS_URL"
-	adminTokensEnv  = "TRPC_AGENT_ADMIN_TOKENS"
-	bindingLookupQL = `SELECT cb.tenant_id, cb.app_id, t.current_config_version
+	postgresDSNEnv       = "TRPC_AGENT_POSTGRES_DSN"
+	redisURLEnv          = "TRPC_AGENT_REDIS_URL"
+	adminTokensEnv       = "TRPC_AGENT_ADMIN_TOKENS"
+	workerConcurrencyEnv = "TRPC_AGENT_WORKER_CONCURRENCY"
+	shutdownTimeoutEnv   = "TRPC_AGENT_SHUTDOWN_TIMEOUT"
+	bindingLookupQL      = `SELECT cb.tenant_id, cb.app_id, t.current_config_version
 		FROM channel_bindings cb
 		JOIN tenants t ON t.tenant_id = cb.tenant_id
 		JOIN agent_apps a ON a.tenant_id = cb.tenant_id AND a.app_id = cb.app_id
@@ -219,6 +222,10 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 	redactor := servicelog.NewRedactor(nil, nil)
 	bus := &openclaw.RedisEventBus{Backend: redisBackend}
 	workerID := nodeID()
+	workerConcurrency, err := positiveEnvInt(workerConcurrencyEnv, 8, 256)
+	if err != nil {
+		return nil, err
+	}
 	telemetryProviders, err := servicemetrics.ConfigureOTLP(connectCtx, "trpc-agent-service", workerID)
 	if err != nil {
 		return nil, err
@@ -252,19 +259,23 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 	}
 	auditStore := &audit.SQLStore{DB: db, Redactor: redactor}
 	component, err := openclaw.NewComponent(ctx, address, file, routes, openclaw.ComponentDependencies{
-		Inbox:          &idempotency.SQLStore{DB: db},
-		Coordinator:    coordinator,
-		Writes:         writes,
-		RuntimeFactory: factory,
-		Audit:          auditStore,
-		EventBus:       bus,
-		Status:         statusStore,
-		QueueBackend:   redisBackend,
-		ControlBackend: redisBackend,
-		Cancellations:  statusStore,
-		Policy:         policyEngine,
-		WorkerID:       workerID,
-		Snapshots:      gateway.StoreSnapshotResolver{Published: published},
+		Inbox:             &idempotency.SQLStore{DB: db},
+		Coordinator:       coordinator,
+		Writes:            writes,
+		RuntimeFactory:    factory,
+		Audit:             auditStore,
+		EventBus:          bus,
+		Status:            statusStore,
+		QueueBackend:      redisBackend,
+		ControlBackend:    redisBackend,
+		Cancellations:     statusStore,
+		Policy:            policyEngine,
+		WorkerID:          workerID,
+		WorkerConcurrency: workerConcurrency,
+		Snapshots:         gateway.StoreSnapshotResolver{Published: published},
+		Readiness: func(readinessCtx context.Context) error {
+			return errors.Join(db.PingContext(readinessCtx), redisBackend.Ping(readinessCtx))
+		},
 	}, productionDecorators(db, store, published, redactor, &storagemigration.SQLStore{DB: db}, storageRouter)...)
 	if err != nil {
 		_ = nodes.Close(context.Background())
@@ -672,6 +683,30 @@ func nodeID() string {
 		return hostname
 	}
 	return "worker"
+}
+
+func positiveEnvInt(name string, fallback, maximum int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 || parsed > maximum {
+		return 0, fmt.Errorf("%s must be an integer between 1 and %d", name, maximum)
+	}
+	return parsed, nil
+}
+
+func positiveEnvDuration(name string, fallback, minimum, maximum time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < minimum || parsed > maximum {
+		return 0, fmt.Errorf("%s must be a duration between %s and %s", name, minimum, maximum)
+	}
+	return parsed, nil
 }
 
 func migrateSchema(ctx context.Context) error {

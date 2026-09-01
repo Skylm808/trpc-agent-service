@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 	"unicode"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
@@ -67,6 +68,12 @@ func run(args []string) int {
 		}
 		options = append(options, trpcservice.WithComponents(component))
 	}
+	shutdownTimeout, err := positiveEnvDuration(shutdownTimeoutEnv, 10*time.Second, time.Second, 10*time.Minute)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "initialize service: %v\n", err)
+		return 1
+	}
+	options = append(options, trpcservice.WithShutdownTimeout(shutdownTimeout))
 	app, err := trpcservice.NewApp(options...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "initialize service: %v\n", err)

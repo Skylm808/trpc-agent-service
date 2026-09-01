@@ -14,6 +14,16 @@ import (
 // Redis adapts go-redis to session fencing and the shared run-event bus.
 type Redis struct{ client *redis.Client }
 
+// Ping verifies that the shared coordination backend is currently reachable.
+// It intentionally returns the driver error only to trusted in-process callers;
+// public health handlers must replace it with a generic response.
+func (backend *Redis) Ping(ctx context.Context) error {
+	if backend == nil || backend.client == nil || ctx == nil {
+		return errors.New("backend: Redis client and context are required")
+	}
+	return backend.client.Ping(ctx).Err()
+}
+
 // OpenRedis creates and verifies a Redis client from a redis:// URL.
 func OpenRedis(ctx context.Context, rawURL string) (*Redis, error) {
 	if ctx == nil || rawURL == "" {

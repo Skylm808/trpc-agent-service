@@ -50,6 +50,9 @@ type ComponentDependencies struct {
 	Policy            *policy.Engine
 	WorkerID          string
 	WorkerConcurrency int
+	// Readiness checks production dependencies without exposing driver errors.
+	// Nil is appropriate only for the self-contained offline component.
+	Readiness func(context.Context) error
 	// Snapshots optionally resolves pinned published versions from the
 	// control-plane store. Nil falls back to the static startup file, which
 	// is only appropriate for offline development.
@@ -166,7 +169,7 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 		_ = runtimes.Close(context.Background())
 		return nil, err
 	}
-	core := &Handler{Routes: routes, Inbox: dependencies.Inbox, Submitter: submitter, Hub: bus, Status: status, Canceler: canceler, Approver: policyEngine, ClaimOwner: dependencies.WorkerID + ":gateway", Telemetry: telemetry}
+	core := &Handler{Routes: routes, Inbox: dependencies.Inbox, Submitter: submitter, Hub: bus, Status: status, Canceler: canceler, Approver: policyEngine, ClaimOwner: dependencies.WorkerID + ":gateway", Telemetry: telemetry, Readiness: dependencies.Readiness}
 	var handler http.Handler = core.RoutesHandler()
 	for _, decorate := range decorators {
 		if decorate == nil {
@@ -190,7 +193,7 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 	// adapter extract traceparent before entering the shared Inbox pipeline.
 	// Keep one bounded span name instead of using tenant-bearing URL paths.
 	handler = otelhttp.NewHandler(handler, "http.server", otelhttp.WithFilter(func(request *http.Request) bool {
-		return request.URL.Path != "/healthz"
+		return request.URL.Path != "/healthz" && request.URL.Path != "/readyz"
 	}))
 	return &LocalComponent{server: &Server{Address: address, Handler: handler}, poller: poller, dispatcher: dispatch, queue: queue, cancelBus: cancelBus, runtimes: runtimes}, nil
 }
