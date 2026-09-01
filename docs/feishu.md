@@ -150,4 +150,4 @@ go test ./cmd/trpc-service -run Feishu
 
 - 出站只投递文本；交互卡片回复、图片/文件受控下载是后续扩展（`MediaDownloader`）。
 - 群聊 thread/topic 回复暂归入群会话，不单独建 thread session。
-- `uncertain` / DLQ 的 Admin 运维页面仍未实现，留待后续运维控制面补齐。
+- PR17 已提供 `uncertain` / DLQ 的 Admin 运维 API；可视化 Web 运维页面仍未实现。

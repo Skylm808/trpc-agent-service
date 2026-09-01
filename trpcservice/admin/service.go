@@ -13,6 +13,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/recovery"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storagemigration"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -31,6 +32,7 @@ type Service struct {
 	redactor   *servicelog.Redactor
 	profiles   func(*config.File) error
 	migrations storagemigration.Store
+	recovery   recovery.Store
 }
 
 // Option customizes a Service.
@@ -61,6 +63,12 @@ func WithProfileValidator(validator func(*config.File) error) Option {
 // WithMigrationStore enables authenticated storage migration administration.
 func WithMigrationStore(store storagemigration.Store) Option {
 	return func(service *Service) { service.migrations = store }
+}
+
+// WithRecoveryStore enables durable Inbox/Outbox operator recovery. Production
+// passes a PostgreSQL store; there is no in-memory runtime fallback.
+func WithRecoveryStore(store recovery.Store) Option {
+	return func(service *Service) { service.recovery = store }
 }
 
 // NewService creates an administration Service.
@@ -207,6 +215,39 @@ func (service *Service) Current(ctx context.Context, tenantID string) (repositor
 	return service.store.GetCurrentConfig(ctx, tenantID)
 }
 
+// RecoveryItems lists only operational metadata for tenant-scoped failed work.
+func (service *Service) RecoveryItems(ctx context.Context, tenantID string, kind recovery.Kind, statuses []recovery.Status, limit int) ([]recovery.Item, error) {
+	if service.recovery == nil {
+		return nil, errors.New("admin: message recovery is unavailable")
+	}
+	return service.recovery.List(ctx, tenantID, kind, statuses, limit)
+}
+
+// RedriveRecovery moves an exact DLQ item back to retry using a status CAS.
+func (service *Service) RedriveRecovery(ctx context.Context, tenantID string, kind recovery.Kind, id string, expected recovery.Status, reason string) (item recovery.Item, err error) {
+	started := service.now()
+	defer func() {
+		service.recordRecoveryDecision(ctx, tenantID, "message."+string(kind)+".redrive", id, string(expected), string(item.Status), reason, err, started)
+	}()
+	if service.recovery == nil {
+		return recovery.Item{}, errors.New("admin: message recovery is unavailable")
+	}
+	return service.recovery.Redrive(ctx, tenantID, kind, id, expected)
+}
+
+// ResolveUncertain records an explicit human decision for an ambiguous Outbox
+// delivery. Retrying is deliberately distinct from ordinary DLQ redrive.
+func (service *Service) ResolveUncertain(ctx context.Context, tenantID, id string, expected, decision recovery.Status, reason string) (item recovery.Item, err error) {
+	started := service.now()
+	defer func() {
+		service.recordRecoveryDecision(ctx, tenantID, "message.outbox.resolve", id, string(expected), string(item.Status), reason, err, started)
+	}()
+	if service.recovery == nil {
+		return recovery.Item{}, errors.New("admin: message recovery is unavailable")
+	}
+	return service.recovery.ResolveOutbox(ctx, tenantID, id, expected, decision)
+}
+
 // Rollback republishes an old payload as a new version; history is never rewritten.
 func (service *Service) Rollback(ctx context.Context, tenantID string, expected, target tenant.ConfigVersion) (record repository.ConfigRecord, err error) {
 	started := service.now()
@@ -332,4 +373,27 @@ func (service *Service) recordDecision(ctx context.Context, tenantID, action str
 		TenantID: tenantID, AgentName: action, Decision: decision, Latency: service.now().Sub(started),
 		ErrorType: errorType, TraceID: traceID, RequestID: traceID, Details: details,
 	})
+}
+
+func (service *Service) recordRecoveryDecision(ctx context.Context, tenantID, action, id, oldStatus, newStatus, reason string, callErr error, started time.Time) {
+	if service.audit == nil || tenantID == "" {
+		return
+	}
+	decision, errorType := "allow", ""
+	if callErr != nil {
+		decision = "error"
+		errorType = fmt.Sprintf("%T", callErr)
+	}
+	traceID := TraceFrom(ctx)
+	if traceID == "" {
+		traceID = "admin:" + action
+	}
+	reasonDigest := sha256.Sum256([]byte(reason))
+	details := map[string]any{"actor": ActorFrom(ctx), "action": action, "message_id": id, "old_status": oldStatus, "new_status": newStatus, "reason_hash": hex.EncodeToString(reasonDigest[:])}
+	if callErr != nil {
+		details["error"] = service.redactor.RedactString(callErr.Error())
+	}
+	auditCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = service.audit.Append(auditCtx, audit.Record{TenantID: tenantID, AgentName: action, Decision: decision, Latency: service.now().Sub(started), ErrorType: errorType, TraceID: traceID, RequestID: traceID, Details: details})
 }

@@ -30,6 +30,7 @@ import (
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	servicemetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/policy"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/recovery"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/sessioncoord"
@@ -510,6 +511,7 @@ func productionDecorators(db *sql.DB, store repository.Store, published *config.
 			admin.WithRedactor(redactor),
 			admin.WithProfileValidator(profileValidator),
 			admin.WithMigrationStore(migrationStore),
+			admin.WithRecoveryStore(&recovery.SQLStore{DB: db}),
 		)
 		if err != nil {
 			return nil, err

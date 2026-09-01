@@ -112,6 +112,8 @@ postgres_port="$(docker port "$CONTAINER" 5432/tcp | sed 's/.*://')"
   TRPC_AGENT_POSTGRES_TEST_DSN="postgres://postgres:test-only@127.0.0.1:${postgres_port}/${DATABASE}?sslmode=disable" \
     go test ./trpcservice/delivery -run TestSQLStoreClaimsOutboxAcrossWorkersAndRecovers -count=1
   TRPC_AGENT_POSTGRES_TEST_DSN="postgres://postgres:test-only@127.0.0.1:${postgres_port}/${DATABASE}?sslmode=disable" \
+    go test ./trpcservice/recovery -run TestPostgresTenantScopedInboxOutboxRecovery -count=1
+  TRPC_AGENT_POSTGRES_TEST_DSN="postgres://postgres:test-only@127.0.0.1:${postgres_port}/${DATABASE}?sslmode=disable" \
     go test ./trpcservice/cluster -run TestPostgresCrossNodeStatusCancelHeartbeatBudgetAndApproval -count=1
   TRPC_AGENT_POSTGRES_TEST_DSN="postgres://postgres:test-only@127.0.0.1:${postgres_port}/${DATABASE}?sslmode=disable" \
     go test ./trpcservice/storagemigration -run TestPostgresMigrationWorkerResumesAndCopiesTenantMemory -count=1
@@ -125,4 +127,4 @@ if [[ "$remaining" != "0" ]]; then
 fi
 
 up
-echo "PostgreSQL migrations and integration paths through storage migration: up/up/down/up passed"
+echo "PostgreSQL migrations and integration paths through message recovery and storage migration: up/up/down/up passed"

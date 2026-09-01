@@ -242,7 +242,14 @@ curl -H 'Authorization: Bearer local-secret' \
 - 每份 Runtime Bundle 固定自己的 MCP 会话和业务工具；新请求使用新版本，旧请求完成后才关闭旧会话。工具继续经过租户 allow/deny、危险工具审批、预算、trace 和审计链路。
 - 提供固定 POST JSON 业务工具：Bearer SecretRef、请求体/响应体上限、有界超时、禁止 redirect、`X-Idempotency-Key` 和结构化递归脱敏。详细配置与边界见 [生产 MCP 与业务工具](docs/mcp-tools.md)。
 
-真实飞书账号联调、按角色拆分进程、队列自定义指标扩缩容、持久 trace 后端、外置不可变审计归档、复杂文档解析和 Knowledge 跨向量后端迁移仍是后续能力。
+**本 PR（PR17：生产消息故障恢复控制面）实现**：
+
+- Admin API 可按租户查询 Inbox DLQ、Outbox DLQ 和 Outbox `uncertain`，响应只包含受控运维元数据，不返回消息正文、外部身份、session、收件人、平台错误或 SecretRef。
+- DLQ 重放使用 `(tenant_id, message_id, expected_status)` 状态 CAS；并发操作只有一个成功，其余返回 409，同名 ID 不会跨租户读取或修改。
+- `uncertain` 禁止走普通重放。管理员必须显式确认“已送达”，或在声明承担重复投递风险后重新排队；旧 claim 会被清理，新 Worker 从共享 PostgreSQL 安全接管。
+- 每次重放和人工裁决都写追加式脱敏审计，包含 actor、action、message id、旧/新状态、decision、error type、latency、trace id、reason hash 和 timestamp。接口与值班流程见 [Inbox / Outbox 故障恢复](docs/message-recovery.md)。
+
+真实飞书账号联调、按角色拆分进程、按租户动态并发配额、队列自定义指标扩缩容、持久 trace 后端、外置不可变审计归档、复杂文档解析和 Knowledge 跨向量后端迁移仍是后续能力。
 
 ## Admin API
 

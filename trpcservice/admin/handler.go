@@ -11,6 +11,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledgebase"
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/recovery"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storagemigration"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -64,6 +65,10 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 	if parts[3] == "storage" {
 		handler.serveStorage(writer, request, tenantID, parts)
+		return
+	}
+	if parts[3] == "operations" {
+		handler.serveRecovery(writer, request, tenantID, parts)
 		return
 	}
 	if parts[3] != "configs" {
@@ -162,6 +167,131 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeJSON(writer, http.StatusOK, metadata(record))
 	default:
 		http.NotFound(writer, request)
+	}
+}
+
+func (handler *Handler) serveRecovery(writer http.ResponseWriter, request *http.Request, tenantID string, parts []string) {
+	if len(parts) < 5 || len(parts) > 6 {
+		http.NotFound(writer, request)
+		return
+	}
+	kind := recovery.Kind(parts[4])
+	if kind != recovery.KindInbox && kind != recovery.KindOutbox {
+		http.NotFound(writer, request)
+		return
+	}
+	if len(parts) == 5 {
+		if request.Method != http.MethodGet {
+			methodNotAllowed(writer)
+			return
+		}
+		statuses, ok := recoveryStatuses(writer, request, kind)
+		if !ok {
+			return
+		}
+		limit := 50
+		if raw := request.URL.Query().Get("limit"); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil || value < 1 || value > 200 {
+				writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "limit must be between 1 and 200"})
+				return
+			}
+			limit = value
+		}
+		items, err := handler.service.RecoveryItems(request.Context(), tenantID, kind, statuses, limit)
+		if err != nil {
+			handler.writeRecoveryError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, items)
+		return
+	}
+	if request.Method != http.MethodPost {
+		methodNotAllowed(writer)
+		return
+	}
+	var body struct {
+		ID             string          `json:"id"`
+		ExpectedStatus recovery.Status `json:"expected_status"`
+		Decision       recovery.Status `json:"decision"`
+		Reason         string          `json:"reason"`
+		Acknowledge    bool            `json:"acknowledge_duplicate_risk"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<14))
+	decoder.DisallowUnknownFields()
+	decodeErr := decoder.Decode(&body)
+	if decodeErr == nil {
+		var trailing any
+		if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+			decodeErr = errors.New("trailing JSON value")
+		}
+	}
+	if decodeErr != nil || strings.TrimSpace(body.ID) == "" || len(body.ID) > 512 || len(strings.TrimSpace(body.Reason)) < 3 || len(body.Reason) > 512 {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "id and a reason between 3 and 512 characters are required"})
+		return
+	}
+	var (
+		item recovery.Item
+		err  error
+	)
+	switch parts[5] {
+	case "redrive":
+		if body.Decision != "" || body.Acknowledge {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "decision fields are not valid for DLQ redrive"})
+			return
+		}
+		item, err = handler.service.RedriveRecovery(request.Context(), tenantID, kind, body.ID, body.ExpectedStatus, strings.TrimSpace(body.Reason))
+	case "resolve":
+		if kind != recovery.KindOutbox || (body.Decision == recovery.StatusRetry && !body.Acknowledge) {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "retrying uncertain delivery requires acknowledge_duplicate_risk=true"})
+			return
+		}
+		item, err = handler.service.ResolveUncertain(request.Context(), tenantID, body.ID, body.ExpectedStatus, body.Decision, strings.TrimSpace(body.Reason))
+	default:
+		http.NotFound(writer, request)
+		return
+	}
+	if err != nil {
+		handler.writeRecoveryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, item)
+}
+
+func recoveryStatuses(writer http.ResponseWriter, request *http.Request, kind recovery.Kind) ([]recovery.Status, bool) {
+	raw := strings.TrimSpace(request.URL.Query().Get("status"))
+	if raw == "" {
+		if kind == recovery.KindInbox {
+			return []recovery.Status{recovery.StatusDLQ}, true
+		}
+		return []recovery.Status{recovery.StatusDLQ, recovery.StatusUncertain}, true
+	}
+	parts := strings.Split(raw, ",")
+	statuses := make([]recovery.Status, 0, len(parts))
+	seen := make(map[recovery.Status]bool)
+	for _, part := range parts {
+		status := recovery.Status(strings.TrimSpace(part))
+		valid := status == recovery.StatusDLQ || (kind == recovery.KindOutbox && status == recovery.StatusUncertain)
+		if !valid || seen[status] {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "unsupported or duplicate recovery status"})
+			return nil, false
+		}
+		seen[status] = true
+		statuses = append(statuses, status)
+	}
+	return statuses, true
+}
+
+func (handler *Handler) writeRecoveryError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, recovery.ErrConflict):
+		handler.writeError(writer, http.StatusConflict, err)
+	case errors.Is(err, recovery.ErrNotFound):
+		handler.writeError(writer, http.StatusNotFound, err)
+	case errors.Is(err, recovery.ErrInvalid):
+		handler.writeError(writer, http.StatusUnprocessableEntity, err)
+	default:
+		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 	}
 }
 

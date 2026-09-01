@@ -89,8 +89,9 @@ Redis 跨节点限流。Compose 与当前 Kubernetes manifest 都让它和 Gatew
 独立 Delivery Deployment 需要先实现角色选择参数。
 
 跨节点请求状态、取消意图、预算、人工审批和节点心跳均保存在共享后端；取消命令另用 Redis
-Pub/Sub 做低延迟通知。仍未生产化的部分包括 `uncertain` / DLQ 的 Admin 运维页面、按租户
-动态并发配额和自动扩缩容控制器。真实企业微信账号、
+Pub/Sub 做低延迟通知。PR17 已提供受认证、租户隔离并带审计的 `uncertain` / DLQ Admin
+运维 API，操作流程见[消息故障恢复](message-recovery.md)；Web 运维页面仍未实现。尚未生产化的
+部分包括按租户动态并发配额和自动扩缩容控制器。真实企业微信账号、
 公网 HTTPS 回调和平台 IP 白名单仍需部署方配置。
 
 共享后端集成测试不需要暴露 PostgreSQL/Redis 到宿主机：
