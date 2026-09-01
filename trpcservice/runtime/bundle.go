@@ -63,6 +63,7 @@ type Bundle struct {
 	tools                    map[string]tool.CallableTool
 	runner                   runner.Runner
 	services                 *storage.Services
+	externalToolsClose       func() error
 	drainTimeout             time.Duration
 	closeOnce                sync.Once
 	closeErr                 error
@@ -86,6 +87,12 @@ func NewTestBundle(snapshot config.RuntimeSnapshot, plugins ...plugin.Plugin) (*
 
 // NewBundleWithServices assembles a Bundle with tenant-routed services owned by it.
 func NewBundleWithServices(snapshot config.RuntimeSnapshot, services *storage.Services, plugins ...plugin.Plugin) (*Bundle, error) {
+	return NewBundleWithServicesAndTools(snapshot, services, nil, nil, plugins...)
+}
+
+// NewBundleWithServicesAndTools assembles a Bundle with version-pinned MCP
+// and business tools. closeTools becomes part of the Bundle drain lifecycle.
+func NewBundleWithServicesAndTools(snapshot config.RuntimeSnapshot, services *storage.Services, externalTools map[string]tool.Tool, closeTools func() error, plugins ...plugin.Plugin) (*Bundle, error) {
 	servicelog.InstallUpstreamRedaction()
 	pluginNames := make(map[string]struct{}, len(plugins))
 	for _, candidate := range plugins {
@@ -112,11 +119,20 @@ func NewBundleWithServices(snapshot config.RuntimeSnapshot, services *storage.Se
 	if err != nil {
 		return nil, err
 	}
-	extras := make(map[string]tool.Tool)
+	extras := make(map[string]tool.Tool, len(externalTools)+1)
+	for name, candidate := range externalTools {
+		if name == "" || candidate == nil {
+			return nil, errors.New("runtime: external tool name and implementation are required")
+		}
+		extras[name] = candidate
+	}
 	if services != nil && services.Knowledge != nil {
 		maxResults := app.Knowledge.MaxResults
 		if maxResults == 0 {
 			maxResults = 10
+		}
+		if _, exists := extras["knowledge_search"]; exists {
+			return nil, errors.New("runtime: external tool conflicts with knowledge_search")
 		}
 		extras["knowledge_search"] = knowledgetool.NewKnowledgeSearchTool(services.Knowledge, knowledgetool.WithMaxResults(maxResults), knowledgetool.WithMinScore(app.Knowledge.MinScore))
 	}
@@ -141,7 +157,7 @@ func NewBundleWithServices(snapshot config.RuntimeSnapshot, services *storage.Se
 	}
 	agent := llmagent.New(app.Name, llmagent.WithModel(runtimeModel), llmagent.WithInstruction(app.Config.Instruction), llmagent.WithTools(tools), llmagent.WithGenerationConfig(generation))
 	run := runner.NewRunner(appName, agent, runner.WithSessionService(services.Session), runner.WithMemoryService(services.Memory), runner.WithArtifactService(services.Artifact), runner.WithPlugins(plugins...))
-	return &Bundle{tenantID: snapshot.TenantID(), appID: snapshot.AppID(), appName: appName, version: snapshot.Version(), toolNames: append([]string(nil), toolNames...), toolPolicy: app.Tools, tools: callableTools, runner: run, services: services, drainTimeout: time.Second}, nil
+	return &Bundle{tenantID: snapshot.TenantID(), appID: snapshot.AppID(), appName: appName, version: snapshot.Version(), toolNames: append([]string(nil), toolNames...), toolPolicy: app.Tools, tools: callableTools, runner: run, services: services, externalToolsClose: closeTools, drainTimeout: time.Second}, nil
 }
 
 // Scope returns the immutable bundle identity.
@@ -264,7 +280,14 @@ func (bundle *Bundle) Close() error {
 		if bundle.runner != nil {
 			runnerErr = bundle.runner.Close()
 		}
-		bundle.closeErr = errors.Join(runnerErr, bundle.services.Close())
+		var toolErr, servicesErr error
+		if bundle.externalToolsClose != nil {
+			toolErr = bundle.externalToolsClose()
+		}
+		if bundle.services != nil {
+			servicesErr = bundle.services.Close()
+		}
+		bundle.closeErr = errors.Join(runnerErr, toolErr, servicesErr)
 	})
 	return bundle.closeErr
 }

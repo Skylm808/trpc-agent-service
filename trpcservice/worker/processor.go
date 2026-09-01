@@ -19,8 +19,10 @@ import (
 	serviceruntime "github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/sessioncoord"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // Processor executes one already-claimed Inbox message.
@@ -67,8 +69,17 @@ func TestRuntimeFactory(writes PlatformStore) serviceruntime.Factory {
 // ServicesFactory resolves the storage services owned by one immutable Bundle.
 type ServicesFactory func(config.RuntimeSnapshot) (*storage.Services, error)
 
+// ToolCatalogFactory resolves version-pinned external tools for one Bundle.
+type ToolCatalogFactory func(config.RuntimeSnapshot) (*servicetool.Catalog, error)
+
 // RuntimeFactoryWithServices builds fenced runtimes from an injected backend.
 func RuntimeFactoryWithServices(writes PlatformStore, servicesFactory ServicesFactory) serviceruntime.Factory {
+	return RuntimeFactoryWithServicesAndTools(writes, servicesFactory, nil)
+}
+
+// RuntimeFactoryWithServicesAndTools builds fenced storage and external tools
+// as one immutable lifecycle unit.
+func RuntimeFactoryWithServicesAndTools(writes PlatformStore, servicesFactory ServicesFactory, toolFactory ToolCatalogFactory) serviceruntime.Factory {
 	return func(snapshot config.RuntimeSnapshot) (serviceruntime.Runtime, error) {
 		if writes == nil || servicesFactory == nil {
 			return nil, errors.New("worker: platform store and services factory are required")
@@ -83,8 +94,25 @@ func RuntimeFactoryWithServices(writes PlatformStore, servicesFactory ServicesFa
 			return nil, err
 		}
 		services.Session = fenced
-		bundle, err := serviceruntime.NewBundleWithServices(snapshot, services)
+		var catalog *servicetool.Catalog
+		if toolFactory != nil {
+			catalog, err = toolFactory(snapshot)
+			if err != nil {
+				_ = services.Close()
+				return nil, err
+			}
+		}
+		var externalTools map[string]trpctool.Tool
+		var closeTools func() error
+		if catalog != nil {
+			externalTools = catalog.Tools()
+			closeTools = catalog.Close
+		}
+		bundle, err := serviceruntime.NewBundleWithServicesAndTools(snapshot, services, externalTools, closeTools)
 		if err != nil {
+			if catalog != nil {
+				_ = catalog.Close()
+			}
 			_ = services.Close()
 			return nil, err
 		}

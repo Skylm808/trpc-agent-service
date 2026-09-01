@@ -234,7 +234,15 @@ curl -H 'Authorization: Bearer local-secret' \
 - Kubernetes 静态安全校验、默认只预览且双重确认的单 Pod 演练、默认只读且可选择真实 Runner 消息的生产验收脚本均已纳入 CI/运维文档。
 - 当前二进制仍是 Gateway、Worker、Channel、Delivery 与 Admin 合并进程，Kubernetes 按无状态组合节点扩缩容；尚未实现按角色独立 Deployment，文档和 manifest 不把该规划写成已完成。
 
-真实飞书账号联调、按角色拆分进程、队列自定义指标扩缩容、持久 trace 后端、外置不可变审计归档、MCP/业务工具和复杂文档解析仍是后续能力，本次 PR15 不把它们标成已完成。
+**本 PR（PR16：生产 MCP Registry 与业务工具）实现**：
+
+- Agent App 可发布多个命名的 MCP Streamable HTTP 服务和 HTTPS JSON 业务工具；远端 MCP 工具以 `mcp__<server_id>__<tool_name>` 暴露，多个租户/App 或同名远端工具互不覆盖。
+- MCP/业务工具的 endpoint、允许工具集合、超时和认证 SecretRef 只能由 Admin 配置发布，模型不能提交临时 URL、认证头或启动 stdio 进程。生产只接受 HTTPS，禁止 URL userinfo、query、fragment 和重定向。
+- Admin validate/publish 和服务启动会初始化 MCP、执行 ListTools 并核对发布白名单；SecretRef 缺失、服务不可达或工具不存在时 fail fast，发布失败继续使用旧配置版本。
+- 每份 Runtime Bundle 固定自己的 MCP 会话和业务工具；新请求使用新版本，旧请求完成后才关闭旧会话。工具继续经过租户 allow/deny、危险工具审批、预算、trace 和审计链路。
+- 提供固定 POST JSON 业务工具：Bearer SecretRef、请求体/响应体上限、有界超时、禁止 redirect、`X-Idempotency-Key` 和结构化递归脱敏。详细配置与边界见 [生产 MCP 与业务工具](docs/mcp-tools.md)。
+
+真实飞书账号联调、按角色拆分进程、队列自定义指标扩缩容、持久 trace 后端、外置不可变审计归档、复杂文档解析和 Knowledge 跨向量后端迁移仍是后续能力。
 
 ## Admin API
 

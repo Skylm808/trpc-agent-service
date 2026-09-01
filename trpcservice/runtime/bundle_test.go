@@ -12,6 +12,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/policy"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -20,9 +21,14 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 func runtimeSnapshot(t *testing.T, tenantID string, version int) config.RuntimeSnapshot {
+	return runtimeSnapshotWithTools(t, tenantID, version, "[echo, calculator]")
+}
+
+func runtimeSnapshotWithTools(t *testing.T, tenantID string, version int, allowed string) config.RuntimeSnapshot {
 	t.Helper()
 	payload := fmt.Sprintf(`schema_version: 1
 tenants:
@@ -37,7 +43,7 @@ tenants:
     enabled: true
     config: {instruction: Echo the user.}
     model: {provider: mock, name: offline-mock}
-    tools: {allow: [echo, calculator], deny: []}
+    tools: {allow: %s, deny: []}
     channels: [{binding_id: http, type: http, provider_account_id: local, enabled: true}]
     storage:
       session: {type: inmemory}
@@ -46,7 +52,7 @@ tenants:
       artifact: {type: inmemory}
       knowledge: {type: inmemory}
       audit: {type: inmemory}
-`, tenantID, version)
+`, tenantID, version, allowed)
 	file, err := config.Load(strings.NewReader(payload))
 	if err != nil {
 		t.Fatal(err)
@@ -56,6 +62,43 @@ tenants:
 		t.Fatal(err)
 	}
 	return snapshot
+}
+
+type externalCallable struct{ name string }
+
+func (tool externalCallable) Declaration() *trpctool.Declaration {
+	return &trpctool.Declaration{Name: tool.name, Description: "external fixture", InputSchema: &trpctool.Schema{Type: "object"}}
+}
+func (externalCallable) Call(context.Context, []byte) (any, error) {
+	return map[string]any{"ok": true}, nil
+}
+
+func TestBundleOwnsVersionPinnedExternalToolLifecycle(t *testing.T) {
+	snapshot := runtimeSnapshotWithTools(t, "tenant-a", 1, "[business_lookup]")
+	services, err := storage.NewTestServices(snapshot.App().Storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closes atomic.Int32
+	bundle, err := NewBundleWithServicesAndTools(snapshot, services, map[string]trpctool.Tool{"business_lookup": externalCallable{name: "business_lookup"}}, func() error {
+		closes.Add(1)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := bundle.ToolNames(); len(names) != 1 || names[0] != "business_lookup" {
+		t.Fatalf("external tools = %v", names)
+	}
+	if err := bundle.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := bundle.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if closes.Load() != 1 {
+		t.Fatalf("external close count = %d", closes.Load())
+	}
 }
 
 func TestBundleRunsPublicTRPCAgentChain(t *testing.T) {

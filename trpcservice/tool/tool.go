@@ -20,6 +20,12 @@ func (tool Guarded) Declaration() *trpctool.Declaration {
 	}
 	return tool.Delegate.Declaration()
 }
+
+// ToolMetadata preserves upstream safety annotations while the final callable
+// guard adds authorization and telemetry.
+func (tool Guarded) ToolMetadata() trpctool.ToolMetadata {
+	return trpctool.MetadataOf(tool.Delegate)
+}
 func (tool Guarded) Call(ctx context.Context, args []byte) (result any, callErr error) {
 	if tool.Delegate == nil {
 		return nil, errors.New("tool: nil delegate")
@@ -67,3 +73,4 @@ func WrapAll(tools []trpctool.Tool) []trpctool.Tool {
 }
 
 var _ trpctool.CallableTool = Guarded{}
+var _ trpctool.MetadataProvider = Guarded{}

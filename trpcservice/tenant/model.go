@@ -51,15 +51,17 @@ type Tenant struct {
 
 // AgentApp contains one tenant-owned Agent application's runtime policy.
 type AgentApp struct {
-	ID        string           `json:"app_id" yaml:"app_id"`
-	Name      string           `json:"name" yaml:"name"`
-	Enabled   bool             `json:"enabled" yaml:"enabled"`
-	Config    AppConfig        `json:"config" yaml:"config"`
-	Model     ModelProfile     `json:"model" yaml:"model"`
-	Tools     ToolPolicy       `json:"tools" yaml:"tools"`
-	Channels  []ChannelBinding `json:"channels" yaml:"channels"`
-	Storage   StorageProfile   `json:"storage" yaml:"storage"`
-	Knowledge KnowledgePolicy  `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
+	ID            string             `json:"app_id" yaml:"app_id"`
+	Name          string             `json:"name" yaml:"name"`
+	Enabled       bool               `json:"enabled" yaml:"enabled"`
+	Config        AppConfig          `json:"config" yaml:"config"`
+	Model         ModelProfile       `json:"model" yaml:"model"`
+	Tools         ToolPolicy         `json:"tools" yaml:"tools"`
+	MCPServers    []MCPServer        `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
+	BusinessTools []HTTPBusinessTool `json:"business_tools,omitempty" yaml:"business_tools,omitempty"`
+	Channels      []ChannelBinding   `json:"channels" yaml:"channels"`
+	Storage       StorageProfile     `json:"storage" yaml:"storage"`
+	Knowledge     KnowledgePolicy    `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
 }
 
 // KnowledgePolicy configures the optional tenant-scoped RAG tool. The API key
@@ -103,6 +105,31 @@ type ToolPolicy struct {
 	RequireApproval        []string `json:"require_approval,omitempty" yaml:"require_approval,omitempty"`
 	RequestTokenBudget     int64    `json:"request_token_budget,omitempty" yaml:"request_token_budget,omitempty"`
 	MonthlyCostBudgetCents int64    `json:"monthly_cost_budget_cents,omitempty" yaml:"monthly_cost_budget_cents,omitempty"`
+}
+
+// MCPServer is one administrator-published, tenant-scoped remote MCP server.
+// Production accepts only named Streamable HTTP endpoints; models cannot
+// supply ad-hoc URLs or start local stdio processes.
+type MCPServer struct {
+	ID               string    `json:"server_id" yaml:"server_id"`
+	Endpoint         string    `json:"endpoint" yaml:"endpoint"`
+	Credential       SecretRef `json:"credential,omitempty" yaml:"credential,omitempty"`
+	CredentialHeader string    `json:"credential_header,omitempty" yaml:"credential_header,omitempty"`
+	CredentialScheme string    `json:"credential_scheme,omitempty" yaml:"credential_scheme,omitempty"`
+	AllowedTools     []string  `json:"allowed_tools" yaml:"allowed_tools"`
+	TimeoutSeconds   int       `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	Enabled          bool      `json:"enabled" yaml:"enabled"`
+}
+
+// HTTPBusinessTool exposes one fixed HTTPS JSON endpoint as a function tool.
+// The endpoint and credential are immutable configuration, never model input.
+type HTTPBusinessTool struct {
+	Name           string    `json:"name" yaml:"name"`
+	Description    string    `json:"description" yaml:"description"`
+	Endpoint       string    `json:"endpoint" yaml:"endpoint"`
+	Credential     SecretRef `json:"credential,omitempty" yaml:"credential,omitempty"`
+	TimeoutSeconds int       `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	Enabled        bool      `json:"enabled" yaml:"enabled"`
 }
 
 // ChannelType identifies a supported inbound and outbound surface.
@@ -199,6 +226,12 @@ func (value AgentApp) Clone() AgentApp {
 	cloned.Tools.RequireApproval = append(
 		[]string(nil), value.Tools.RequireApproval...,
 	)
+	cloned.MCPServers = make([]MCPServer, len(value.MCPServers))
+	for i := range value.MCPServers {
+		cloned.MCPServers[i] = value.MCPServers[i]
+		cloned.MCPServers[i].AllowedTools = append([]string(nil), value.MCPServers[i].AllowedTools...)
+	}
+	cloned.BusinessTools = append([]HTTPBusinessTool(nil), value.BusinessTools...)
 	cloned.Channels = append([]ChannelBinding(nil), value.Channels...)
 	cloned.Storage = value.Storage.Clone()
 	return cloned

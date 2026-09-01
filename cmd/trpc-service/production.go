@@ -36,6 +36,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storagemigration"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 	"gopkg.in/yaml.v3"
 )
@@ -214,10 +215,21 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 	if err := preflightPublishedStorage(connectCtx, db, storageRouter); err != nil {
 		return nil, err
 	}
-	factory := worker.RuntimeFactoryWithServices(writes, func(snapshot config.RuntimeSnapshot) (*storage.Services, error) {
+	toolRegistry, err := servicetool.NewCatalogRegistry(secret.ResolveLocal)
+	if err != nil {
+		return nil, err
+	}
+	if err := preflightPublishedTools(connectCtx, db, toolRegistry); err != nil {
+		return nil, err
+	}
+	factory := worker.RuntimeFactoryWithServicesAndTools(writes, func(snapshot config.RuntimeSnapshot) (*storage.Services, error) {
 		routeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
 		return storageRouter.ServicesForApp(routeCtx, snapshot.TenantID(), snapshot.App())
+	}, func(snapshot config.RuntimeSnapshot) (*servicetool.Catalog, error) {
+		toolCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		return toolRegistry.Build(toolCtx, snapshot.App())
 	})
 	redactor := servicelog.NewRedactor(nil, nil)
 	bus := &openclaw.RedisEventBus{Backend: redisBackend}
@@ -276,7 +288,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 		Readiness: func(readinessCtx context.Context) error {
 			return errors.Join(db.PingContext(readinessCtx), redisBackend.Ping(readinessCtx))
 		},
-	}, productionDecorators(db, store, published, redactor, &storagemigration.SQLStore{DB: db}, storageRouter)...)
+	}, productionDecorators(db, store, published, redactor, &storagemigration.SQLStore{DB: db}, storageRouter, toolRegistry)...)
 	if err != nil {
 		_ = nodes.Close(context.Background())
 		return nil, err
@@ -439,7 +451,7 @@ var _ delivery.RouteResolver = (*publishedDeliveryRoutes)(nil)
 
 // productionDecorators mounts the dynamic WeCom and Feishu callback adapters
 // and the authenticated administration API around the gateway.
-func productionDecorators(db *sql.DB, store repository.Store, published *config.PublishedCache, redactor *servicelog.Redactor, migrationStore storagemigration.Store, storageRouter *storage.Router) []openclaw.HandlerDecorator {
+func productionDecorators(db *sql.DB, store repository.Store, published *config.PublishedCache, redactor *servicelog.Redactor, migrationStore storagemigration.Store, storageRouter *storage.Router, toolRegistry *servicetool.CatalogRegistry) []openclaw.HandlerDecorator {
 	wecomDecorator := func(core *openclaw.Handler, next http.Handler) (http.Handler, error) {
 		adapter, err := wecom.NewDynamicHandler(core, wecomBindingProvider(db, published))
 		if err != nil {
@@ -480,9 +492,14 @@ func productionDecorators(db *sql.DB, store repository.Store, published *config.
 					}
 					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 					err := storageRouter.PreflightApp(ctx, configured.ID, app)
+					if err != nil {
+						cancel()
+						return fmt.Errorf("tenant %q app %q: %w", configured.ID, app.ID, err)
+					}
+					err = toolRegistry.Preflight(ctx, app)
 					cancel()
 					if err != nil {
-						return fmt.Errorf("tenant %q app %q: %w", configured.ID, app.ID, err)
+						return fmt.Errorf("tenant %q app %q tool preflight: %w", configured.ID, app.ID, err)
 					}
 				}
 			}
@@ -542,6 +559,39 @@ func preflightPublishedStorage(ctx context.Context, db *sql.DB, router *storage.
 				}
 				if err := router.PreflightApp(ctx, configured.ID, app); err != nil {
 					return fmt.Errorf("tenant %q app %q storage preflight: %w", configured.ID, app.ID, err)
+				}
+			}
+		}
+	}
+	return rows.Err()
+}
+
+func preflightPublishedTools(ctx context.Context, db *sql.DB, registry *servicetool.CatalogRegistry) error {
+	rows, err := db.QueryContext(ctx, `SELECT t.tenant_id,cv.config_yaml FROM tenants t JOIN config_versions cv ON cv.tenant_id=t.tenant_id AND cv.version=t.current_config_version WHERE t.enabled`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tenantID string
+		var payload []byte
+		if err := rows.Scan(&tenantID, &payload); err != nil {
+			return err
+		}
+		file, err := config.Load(bytes.NewReader(payload))
+		if err != nil {
+			return fmt.Errorf("tenant %q published tool configuration is invalid: %w", tenantID, err)
+		}
+		if len(file.Tenants) != 1 || file.Tenants[0].ID != tenantID {
+			return fmt.Errorf("tenant %q published tool configuration scope is invalid", tenantID)
+		}
+		for _, configured := range file.Tenants {
+			for _, app := range configured.Apps {
+				if !configured.Enabled || !app.Enabled {
+					continue
+				}
+				if err := registry.Preflight(ctx, app); err != nil {
+					return fmt.Errorf("tenant %q app %q tool preflight: %w", configured.ID, app.ID, err)
 				}
 			}
 		}

@@ -1,6 +1,6 @@
 # 多租户节点化 Agent 平台架构设计
 
-> 2026-08-27 方案提交入口。正文包含架构图、核心时序、数据模型、幂等、多后端、预期效果与排期。配套材料：[数据模型](data-model.md)、[消息运行时](message-runtime.md)、[治理与可观测性](governance.md)、[风险清单](risks.md)、[企业微信](wecom.md)和[部署说明](deployment.md)。
+> 2026-08-27 方案提交入口。正文包含架构图、核心时序、数据模型、幂等、多后端、预期效果与排期。配套材料：[数据模型](data-model.md)、[消息运行时](message-runtime.md)、[治理与可观测性](governance.md)、[生产 MCP 与业务工具](mcp-tools.md)、[风险清单](risks.md)、[企业微信](wecom.md)和[部署说明](deployment.md)。
 
 ## 1. 目标与边界
 
@@ -48,6 +48,13 @@ flowchart TB
         WK2[Agent Worker]
         RB[Runtime Bundle<br/>Runner + LLMAgent]
         GOV[Plugin / Guardrail<br/>权限/预算/审批/脱敏]
+        TC[版本固定 Tool Catalog<br/>MCP + HTTPS 业务工具]
+    end
+
+    subgraph TOOLS[外部工具服务]
+        direction LR
+        MCP[MCP Streamable HTTP]
+        BIZ[业务 HTTPS JSON API]
     end
 
     subgraph DATA["5. Storage Adapter"]
@@ -85,6 +92,9 @@ flowchart TB
     WK1 --> RB
     WK2 --> RB
     RB --> GOV
+    GOV --> TC
+    TC --> MCP
+    TC --> BIZ
     GOV --> ROUTER
     ROUTER --> PG
     ROUTER --> REDIS
@@ -284,7 +294,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、租户成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复迁移 Worker、治理审计与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换、Kubernetes 合并节点基线，以及企业微信和飞书两个 Channel Adapter/Sender。MCP/业务工具、复杂文档解析、Knowledge 跨后端迁移、外置审计归档、投递异常运维页、按角色独立进程和按租户动态并发配额仍未完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
+当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复迁移 Worker、治理审计与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换、Kubernetes 合并节点基线、生产 MCP Registry、HTTPS JSON 业务工具，以及企业微信和飞书两个 Channel Adapter/Sender。复杂文档解析、Knowledge 跨后端迁移、外置审计归档、投递异常运维页、按角色独立进程和按租户动态并发配额仍未完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
 
 ## 10. 预期效果与时间规划
 
@@ -312,6 +322,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | T2c：存储路由与迁移（PR12） | 已完成 | 多 PostgreSQL 域路由、双写、checkpoint backfill、校验和安全 cutover | 已完成并通过 PostgreSQL 集成测试 |
 | T3a：治理与观测（PR14） | 已完成 | OTLP/Collector、Prometheus/Grafana、审计保留 | 已完成，生产 trace 后端由部署方接入 |
 | T3b：生产部署与验收（PR15） | 已完成 | Kubernetes 合并节点 manifest、readiness、容量工具、故障演练和验收门禁 | 代码与离线校验已完成，真实集群演练待部署方执行 |
+| T3c：MCP 与业务工具（PR16） | 已完成 | 租户 MCP Registry、SecretRef、固定 HTTPS JSON 工具、发布预检和 Bundle 生命周期 | 已完成并通过真实 Streamable HTTP MCP 协议测试 |
 | T4：运维增强 | 待排期 | 按角色独立进程、按租户动态并发配额、DLQ/uncertain 管理接口、自定义指标 HPA | 未完成 |
 
 时间从依赖就绪后计算，不含企业微信权限、公网域名、TLS 证书或平台审核等待。

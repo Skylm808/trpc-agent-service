@@ -70,6 +70,16 @@ func (redactor *Redactor) RedactMap(value map[string]any) map[string]any {
 	}
 	return result
 }
+
+// RedactValue recursively sanitizes strings and secret-bearing map fields
+// while preserving the original structured value shape.
+func (redactor *Redactor) RedactValue(value any) any {
+	if redactor == nil {
+		redactor = NewRedactor(nil, nil)
+	}
+	return redactor.redactValue(value)
+}
+
 func (redactor *Redactor) redactValue(value any) any {
 	switch typed := value.(type) {
 	case string:

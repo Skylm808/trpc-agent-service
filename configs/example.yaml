@@ -34,6 +34,22 @@ tenants:
           require_approval: []
           request_token_budget: 10000
           monthly_cost_budget_cents: 10000
+        # PR16 MCP/业务工具默认不启用，避免示例环境启动时访问外部服务。
+        # 启用后还必须把暴露名加入 tools.allow；完整示例见 docs/mcp-tools.md。
+        # mcp_servers:
+        #   - server_id: crm
+        #     endpoint: https://mcp.example.com/mcp
+        #     credential: {provider: env, key: CRM_MCP_TOKEN}
+        #     allowed_tools: [lookup_customer]
+        #     timeout_seconds: 10
+        #     enabled: true
+        # business_tools:
+        #   - name: create_ticket
+        #     description: Create a support ticket through the approved service.
+        #     endpoint: https://tools.example.com/v1/tickets
+        #     credential: {provider: env, key: TICKET_API_TOKEN}
+        #     timeout_seconds: 10
+        #     enabled: true
         # PR13 Knowledge/RAG 默认关闭。启用时还需把 knowledge_search 加入
         # tools.allow，并配置 embedding SecretRef；完整示例见 docs/knowledge.md。
         knowledge:

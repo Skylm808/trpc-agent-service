@@ -29,13 +29,17 @@ func TestSecretRefStringRedactsKey(t *testing.T) {
 func TestAgentAppCloneIsDeep(t *testing.T) {
 	temperature := 0.5
 	original := AgentApp{
-		Model:    ModelProfile{Temperature: &temperature},
-		Tools:    ToolPolicy{Allow: []string{"calculator"}},
-		Channels: []ChannelBinding{{ID: "binding-a"}},
+		Model:         ModelProfile{Temperature: &temperature},
+		Tools:         ToolPolicy{Allow: []string{"calculator"}},
+		MCPServers:    []MCPServer{{ID: "crm", AllowedTools: []string{"lookup"}}},
+		BusinessTools: []HTTPBusinessTool{{Name: "ticket_lookup"}},
+		Channels:      []ChannelBinding{{ID: "binding-a"}},
 	}
 	cloned := original.Clone()
 	*cloned.Model.Temperature = 1.5
 	cloned.Tools.Allow[0] = "other"
+	cloned.MCPServers[0].AllowedTools[0] = "other"
+	cloned.BusinessTools[0].Name = "other"
 	cloned.Channels[0].ID = "binding-b"
 
 	if *original.Model.Temperature != 0.5 {
@@ -46,5 +50,8 @@ func TestAgentAppCloneIsDeep(t *testing.T) {
 	}
 	if original.Channels[0].ID != "binding-a" {
 		t.Fatalf("original channels mutated: %v", original.Channels)
+	}
+	if original.MCPServers[0].AllowedTools[0] != "lookup" || original.BusinessTools[0].Name != "ticket_lookup" {
+		t.Fatalf("original tool integrations mutated: %+v %+v", original.MCPServers, original.BusinessTools)
 	}
 }

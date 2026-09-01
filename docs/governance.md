@@ -6,6 +6,11 @@
 `WithToolFilter`、`WithToolExecutionFilter`、`WithToolPermissionPolicy` 和最终
 `Guarded.Call` 保护，直接调用不能绕开 tenant/request scope。
 
+PR16 的 MCP 与 HTTPS 业务工具也进入同一条链路。配置发布只把显式命名且列入
+`tools.allow` 的工具放进版本固定 Catalog；远端 metadata 在安全包装后继续保留，所有
+结果、callback payload 和 metadata 在进入 Agent Event 或审计前递归脱敏。MCP 与业务
+接口的原始错误正文不会返回给模型或写入审计。
+
 `require_approval` 工具不会自动执行。Worker 发布 `run.approval_required`，审批方使用
 认证后的 `POST /v1/gateway/approve` 提交 `request_id` 与 `tool_name`；共享审批存储唤醒
 持有请求的 Worker，Worker 调用 guarded tool，并用 `model.NewToolMessage` 在原 session

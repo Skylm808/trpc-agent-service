@@ -155,7 +155,8 @@ func migrationRoute(profile tenant.StorageProfile, domain storagemigration.Domai
 	}
 }
 
-// Validate validates one tenant configuration without resolving secrets.
+// Validate validates one tenant configuration and runs the production profile
+// preflight when configured. Responses never contain resolved secret values.
 func (service *Service) Validate(payload []byte) (*config.File, error) {
 	file, err := config.Load(bytes.NewReader(payload))
 	if err != nil {

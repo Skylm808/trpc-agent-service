@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 )
 
 var (
+	toolNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 	sessionBackends = backendSet(
 		tenant.BackendInMemory,
 		tenant.BackendRedis,
@@ -127,6 +129,9 @@ func validateApp(
 	if err := validateTools(path+".tools", app.Tools); err != nil {
 		return err
 	}
+	if err := validateToolIntegrations(path, app); err != nil {
+		return err
+	}
 	if len(app.Channels) == 0 {
 		return fmt.Errorf("config: %s.channels must not be empty", path)
 	}
@@ -172,7 +177,154 @@ func validateApp(
 	if app.Knowledge.Enabled && !containsString(app.Tools.Allow, "knowledge_search") {
 		return fmt.Errorf("config: %s.tools.allow must include knowledge_search when knowledge is enabled", path)
 	}
+	if !app.Knowledge.Enabled && containsString(app.Tools.Allow, "knowledge_search") {
+		return fmt.Errorf("config: %s.tools.allow must not include knowledge_search when knowledge is disabled", path)
+	}
 	return validateBackend(path+".storage.audit", app.Storage.Audit, auditBackends)
+}
+
+func validateToolIntegrations(path string, app *tenant.AgentApp) error {
+	if len(app.MCPServers) > 16 {
+		return fmt.Errorf("config: %s.mcp_servers exceeds 16 entries", path)
+	}
+	if len(app.BusinessTools) > 32 {
+		return fmt.Errorf("config: %s.business_tools exceeds 32 entries", path)
+	}
+	serverIDs := make(map[string]struct{}, len(app.MCPServers))
+	exposedNames := map[string]struct{}{
+		"echo":             {},
+		"calculator":       {},
+		"knowledge_search": {},
+	}
+	for index, server := range app.MCPServers {
+		serverPath := fmt.Sprintf("%s.mcp_servers[%d]", path, index)
+		if err := validateToolName(serverPath+".server_id", server.ID); err != nil {
+			return err
+		}
+		if _, exists := serverIDs[server.ID]; exists {
+			return fmt.Errorf("config: duplicate MCP server_id %q", server.ID)
+		}
+		serverIDs[server.ID] = struct{}{}
+		if len(server.AllowedTools) > 64 || (server.Enabled && len(server.AllowedTools) == 0) {
+			return fmt.Errorf("config: %s.allowed_tools must contain between 1 and 64 tools", serverPath)
+		}
+		remoteNames := make(map[string]struct{}, len(server.AllowedTools))
+		for toolIndex, remoteName := range server.AllowedTools {
+			if err := validateToolName(fmt.Sprintf("%s.allowed_tools[%d]", serverPath, toolIndex), remoteName); err != nil {
+				return err
+			}
+			if _, exists := remoteNames[remoteName]; exists {
+				return fmt.Errorf("config: duplicate MCP tool %q in server %q", remoteName, server.ID)
+			}
+			remoteNames[remoteName] = struct{}{}
+			exposed := "mcp__" + server.ID + "__" + remoteName
+			if len(exposed) > 64 {
+				return fmt.Errorf("config: exposed MCP tool name %q exceeds 64 bytes", exposed)
+			}
+			if _, exists := exposedNames[exposed]; exists {
+				return fmt.Errorf("config: duplicate exposed tool %q", exposed)
+			}
+			exposedNames[exposed] = struct{}{}
+			if server.Enabled && !containsString(app.Tools.Allow, exposed) {
+				return fmt.Errorf("config: %s.tools.allow must include %q", path, exposed)
+			}
+			if !server.Enabled && containsString(app.Tools.Allow, exposed) {
+				return fmt.Errorf("config: %s.tools.allow must not include disabled tool %q", path, exposed)
+			}
+		}
+		if !server.Enabled {
+			continue
+		}
+		if err := validateHTTPSURL(serverPath+".endpoint", server.Endpoint); err != nil {
+			return err
+		}
+		if server.TimeoutSeconds < 0 || server.TimeoutSeconds > 30 {
+			return fmt.Errorf("config: %s.timeout_seconds must be between 1 and 30 when set", serverPath)
+		}
+		if err := validateMCPAuth(serverPath, server); err != nil {
+			return err
+		}
+	}
+	for index, business := range app.BusinessTools {
+		toolPath := fmt.Sprintf("%s.business_tools[%d]", path, index)
+		if err := validateToolName(toolPath+".name", business.Name); err != nil {
+			return err
+		}
+		if _, exists := exposedNames[business.Name]; exists {
+			return fmt.Errorf("config: duplicate exposed tool %q", business.Name)
+		}
+		exposedNames[business.Name] = struct{}{}
+		if !business.Enabled {
+			if containsString(app.Tools.Allow, business.Name) {
+				return fmt.Errorf("config: %s.tools.allow must not include disabled tool %q", path, business.Name)
+			}
+			continue
+		}
+		if strings.TrimSpace(business.Description) == "" || len(business.Description) > 512 {
+			return fmt.Errorf("config: %s.description must contain between 1 and 512 bytes", toolPath)
+		}
+		if err := validateHTTPSURL(toolPath+".endpoint", business.Endpoint); err != nil {
+			return err
+		}
+		if err := validateSecretRef(toolPath+".credential", business.Credential, true); err != nil {
+			return err
+		}
+		if business.TimeoutSeconds < 0 || business.TimeoutSeconds > 30 {
+			return fmt.Errorf("config: %s.timeout_seconds must be between 1 and 30 when set", toolPath)
+		}
+		if !containsString(app.Tools.Allow, business.Name) {
+			return fmt.Errorf("config: %s.tools.allow must include %q", path, business.Name)
+		}
+	}
+	return nil
+}
+
+func validateMCPAuth(path string, server tenant.MCPServer) error {
+	if server.Credential.IsZero() {
+		if server.CredentialHeader != "" || server.CredentialScheme != "" {
+			return fmt.Errorf("config: %s credential header/scheme require a credential SecretRef", path)
+		}
+		return nil
+	}
+	if err := validateSecretRef(path+".credential", server.Credential, true); err != nil {
+		return err
+	}
+	header := strings.ToLower(strings.TrimSpace(server.CredentialHeader))
+	if header == "" {
+		header = "authorization"
+	}
+	if header != "authorization" && header != "x-api-key" {
+		return fmt.Errorf("config: %s.credential_header must be authorization or x-api-key", path)
+	}
+	scheme := strings.TrimSpace(server.CredentialScheme)
+	if header == "authorization" && scheme != "" && scheme != "Bearer" {
+		return fmt.Errorf("config: %s.credential_scheme must be Bearer for authorization", path)
+	}
+	if header == "x-api-key" && scheme != "" {
+		return fmt.Errorf("config: %s.credential_scheme must be empty for x-api-key", path)
+	}
+	return nil
+}
+
+func validateToolName(path, value string) error {
+	if value == "" || len(value) > 64 || !toolNamePattern.MatchString(value) {
+		return fmt.Errorf("config: %s must match [A-Za-z0-9_-]+ and not exceed 64 bytes", path)
+	}
+	return nil
+}
+
+func validateHTTPSURL(path, value string) error {
+	if err := validateHTTPURL(path, value, true); err != nil {
+		return err
+	}
+	parsed, _ := url.Parse(value)
+	if parsed == nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return fmt.Errorf("config: %s must be an HTTPS URL with a host", path)
+	}
+	if len(value) > 2048 {
+		return fmt.Errorf("config: %s exceeds 2048 bytes", path)
+	}
+	return nil
 }
 
 func containsString(values []string, expected string) bool {
