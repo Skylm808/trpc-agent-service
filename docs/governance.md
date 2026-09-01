@@ -18,13 +18,14 @@ BudgetStore 的等价动态计价）；无法计价时 fail closed，禁止把�
 
 审计遵循 tenant `AuditPolicy`：`enabled=false` 不写；`store_content=false` 不保存错误
 正文；`redact_fields` 在结构化字段写入前生效；`RetentionDays` 由定时任务调用
-`audit.PruneTenant`。审计写使用两秒 deadline，当前选择 fail-open 并记录低基数
+`audit.RetentionWorker` 自动执行 `audit.PruneTenant`，多节点使用 PostgreSQL advisory lock
+串行化每轮清理。审计写使用两秒 deadline，当前选择 fail-open 并记录低基数
 `operation=audit,status=failed` 指标，避免审计后端拖死消息处理。
 
-OpenTelemetry trace 从 HTTP `traceparent` 提取并传播到队列，覆盖 callback、Inbox、
+生产入口由 `otelhttp` 从 HTTP `traceparent` 提取并传播到队列，覆盖 callback、Inbox、
 lease、Runner、model stream、Tool、Session、Summary/Memory 和 Outbox。metrics 标签只允许
 tenant、app、channel、operation、status；request/user/session/message ID 只允许进入
-trace/audit。默认与 tenant redactor 会处理日志、SSE error、Inbox last_error、回复和
+trace/audit。SDK 经 OTLP/gRPC 输出到 Collector，Collector 再向 Prometheus 暴露指标；默认与 tenant redactor 会处理日志、SSE error、Inbox last_error、回复和
 审计 details，tRPC-Agent-Go 的上下文 logger 也在 Bundle 构建时安装脱敏包装。
 
 ## 监控指标

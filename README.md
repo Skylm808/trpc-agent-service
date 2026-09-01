@@ -218,12 +218,19 @@ curl -H 'Authorization: Bearer local-secret' \
 - 配置 validate/publish 和启动 preflight 会验证 PGVector/Qdrant、S3 凭据与可达性；初始化或切换失败不会替换上一份有效 Bundle，错误不包含解析后的凭据。配置和操作说明见 [Knowledge/RAG 与 S3 Artifact](docs/knowledge.md)。
 - 本 PR 不交付 MCP、业务 Tool、复杂 PDF/OCR 文档流水线、Knowledge 跨向量后端自动迁移或真实飞书联调；这些不能写成已经实现。
 
+**本 PR（PR14：持久化治理与可观测性）实现**：
+
+- 生产进程安装 OpenTelemetry SDK Provider，经 OTLP/gRPC 向 Collector 导出 trace 与 metrics；所有 HTTP/企业微信/飞书入口统一提取 `traceparent`，关闭时有界 flush。
+- Collector 使用内存保护和 batch pipeline，Prometheus 持久化 15 天指标，Grafana 自动 provision 数据源和租户请求、p95、Inbox/Outbox/DLQ、token/cost dashboard。
+- 新增模型首事件耗时、低基数队列深度、活跃 Worker、PostgreSQL 健康与延迟指标；request/user/session/message ID 不进入 metrics label。
+- 审计保留策略由后台 Worker 自动执行，多节点通过 PostgreSQL advisory lock 保证每轮只有一个节点清理；策略始终来自当前已发布配置。
+- Compose 的 trace 默认由 Collector `debug` exporter 接收，便于验证但不作为长期存储；生产需要把该 exporter 替换为 Tempo、Jaeger 或托管 OTLP 后端。完整说明见 [生产可观测性](docs/observability.md)。
+
 **后续计划**：
 
-- PR14：持久化治理、OpenTelemetry Collector、Prometheus/Grafana。
 - PR15：Kubernetes、容量测试、故障演练和生产验收。
 
-MCP、业务工具和复杂文档解析仍是未排期能力；本次 PR13 不把它们标成已完成。
+MCP、业务工具和复杂文档解析仍是未排期能力；本次 PR14 不把它们标成已完成。
 
 ## Admin API
 

@@ -58,6 +58,9 @@ type durableComponent struct {
 	nodes         *cluster.NodeRegistry
 	migrations    *storagemigration.Worker
 	storageRouter *storage.Router
+	retention     *audit.RetentionWorker
+	telemetry     *servicemetrics.Providers
+	sqlObserver   *servicemetrics.SQLObserver
 }
 
 func (component *durableComponent) Start(ctx context.Context) error {
@@ -88,6 +91,21 @@ func (component *durableComponent) Start(ctx context.Context) error {
 			return err
 		}
 	}
+	if component.retention != nil {
+		if err := component.retention.Start(ctx); err != nil {
+			if component.migrations != nil {
+				_ = component.migrations.Close(context.Background())
+			}
+			if component.delivery != nil {
+				_ = component.delivery.Close(context.Background())
+			}
+			_ = component.inner.Close(context.Background())
+			if component.nodes != nil {
+				_ = component.nodes.Close(context.Background())
+			}
+			return err
+		}
+	}
 	return nil
 }
 
@@ -101,6 +119,10 @@ func (component *durableComponent) Close(ctx context.Context) error {
 	if component.migrations != nil {
 		migrationErr = component.migrations.Close(ctx)
 	}
+	var retentionErr error
+	if component.retention != nil {
+		retentionErr = component.retention.Close(ctx)
+	}
 	var deliveryErr error
 	if component.delivery != nil {
 		deliveryErr = component.delivery.Close(ctx)
@@ -113,7 +135,15 @@ func (component *durableComponent) Close(ctx context.Context) error {
 	if component.storageRouter != nil {
 		routerErr = component.storageRouter.Close()
 	}
-	return errors.Join(drainErr, innerErr, migrationErr, deliveryErr, nodeErr, routerErr, component.redis.Close(), component.db.Close())
+	var observerErr error
+	if component.sqlObserver != nil {
+		observerErr = component.sqlObserver.Close()
+	}
+	var telemetryErr error
+	if component.telemetry != nil {
+		telemetryErr = component.telemetry.Shutdown(ctx)
+	}
+	return errors.Join(drainErr, innerErr, migrationErr, retentionErr, deliveryErr, nodeErr, routerErr, observerErr, telemetryErr, component.redis.Close(), component.db.Close())
 }
 
 func newDurableComponent(ctx context.Context, address string, file *config.File) (trpcservice.Component, error) {
@@ -189,6 +219,26 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 	redactor := servicelog.NewRedactor(nil, nil)
 	bus := &openclaw.RedisEventBus{Backend: redisBackend}
 	workerID := nodeID()
+	telemetryProviders, err := servicemetrics.ConfigureOTLP(connectCtx, "trpc-agent-service", workerID)
+	if err != nil {
+		return nil, err
+	}
+	closeTelemetry := true
+	defer func() {
+		if closeTelemetry {
+			_ = telemetryProviders.Shutdown(context.Background())
+		}
+	}()
+	sqlObserver, err := servicemetrics.RegisterSQLObserver(db)
+	if err != nil {
+		return nil, err
+	}
+	closeObserver := true
+	defer func() {
+		if closeObserver {
+			_ = sqlObserver.Close()
+		}
+	}()
 	nodes, err := cluster.NewNodeRegistry(ctx, db, workerID, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("register worker node: %w", err)
@@ -200,12 +250,13 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 		Approvals:          &policy.SQLApprovals{DB: db},
 		CostMicrosPerToken: 1,
 	}
+	auditStore := &audit.SQLStore{DB: db, Redactor: redactor}
 	component, err := openclaw.NewComponent(ctx, address, file, routes, openclaw.ComponentDependencies{
 		Inbox:          &idempotency.SQLStore{DB: db},
 		Coordinator:    coordinator,
 		Writes:         writes,
 		RuntimeFactory: factory,
-		Audit:          &audit.SQLStore{DB: db, Redactor: redactor},
+		Audit:          auditStore,
 		EventBus:       bus,
 		Status:         statusStore,
 		QueueBackend:   redisBackend,
@@ -218,6 +269,20 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 	if err != nil {
 		_ = nodes.Close(context.Background())
 		return nil, err
+	}
+	retentionWorker := &audit.RetentionWorker{
+		Store:    auditStore,
+		Policies: &audit.SQLPolicySource{DB: db},
+		OnResult: func(_ int64, retentionErr error) {
+			status := "success"
+			if retentionErr != nil {
+				status = "failed"
+			}
+			telemetry, telemetryErr := servicemetrics.New("trpc-agent-service")
+			if telemetryErr == nil {
+				telemetry.Request(context.Background(), servicemetrics.Labels{Operation: "audit_retention", Status: status}, 0, 0, 0)
+			}
+		},
 	}
 	deliveryRouter := &publishedDeliveryRoutes{db: db, published: published, senders: make(map[deliverySenderKey]channels.TextSender)}
 	telemetry, err := servicemetrics.New("trpc-agent-service")
@@ -247,7 +312,9 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 	closeDB = false
 	closeRedis = false
 	closeStorageRouter = false
-	return &durableComponent{inner: component, delivery: outboxWorker, db: db, redis: redisBackend, nodes: nodes, migrations: migrationWorker, storageRouter: storageRouter}, nil
+	closeTelemetry = false
+	closeObserver = false
+	return &durableComponent{inner: component, delivery: outboxWorker, db: db, redis: redisBackend, nodes: nodes, migrations: migrationWorker, storageRouter: storageRouter, retention: retentionWorker, telemetry: telemetryProviders, sqlObserver: sqlObserver}, nil
 }
 
 type deliverySenderKey struct {

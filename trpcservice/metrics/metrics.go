@@ -44,6 +44,7 @@ type Telemetry struct {
 	propagator propagation.TextMapPropagator
 	requests   metric.Int64Counter
 	duration   metric.Float64Histogram
+	firstToken metric.Float64Histogram
 	tokens     metric.Int64Counter
 	cost       metric.Int64Counter
 	delivery   metric.Int64Counter
@@ -60,6 +61,10 @@ func New(name string) (*Telemetry, error) {
 		return nil, err
 	}
 	duration, err := meter.Float64Histogram("agent.operation.duration", metric.WithUnit("ms"))
+	if err != nil {
+		return nil, err
+	}
+	firstToken, err := meter.Float64Histogram("agent.model.first_token.duration", metric.WithUnit("ms"))
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +85,16 @@ func New(name string) (*Telemetry, error) {
 		return nil, err
 	}
 	propagator := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
-	return &Telemetry{tracer: otel.Tracer(name), propagator: propagator, requests: requests, duration: duration, tokens: tokens, cost: cost, delivery: delivery, backlog: backlog}, nil
+	return &Telemetry{tracer: otel.Tracer(name), propagator: propagator, requests: requests, duration: duration, firstToken: firstToken, tokens: tokens, cost: cost, delivery: delivery, backlog: backlog}, nil
+}
+
+// ModelFirstToken records time to the first model event. The label set is the
+// same bounded set used by all other service metrics.
+func (telemetry *Telemetry) ModelFirstToken(ctx context.Context, labels Labels, duration time.Duration) {
+	if telemetry == nil {
+		return
+	}
+	telemetry.firstToken.Record(ctx, float64(duration.Microseconds())/1000, metric.WithAttributes(labels.attributes()...))
 }
 func (telemetry *Telemetry) Start(ctx context.Context, name string, fields SpanFields) (context.Context, trace.Span) {
 	if telemetry == nil {

@@ -17,6 +17,7 @@ import (
 	serviceruntime "github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/sessioncoord"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // LocalComponent is a minimal runnable single-process composition for development.
@@ -185,6 +186,12 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 			return nil, err
 		}
 	}
+	// Instrument the final surface so provider callbacks and every channel
+	// adapter extract traceparent before entering the shared Inbox pipeline.
+	// Keep one bounded span name instead of using tenant-bearing URL paths.
+	handler = otelhttp.NewHandler(handler, "http.server", otelhttp.WithFilter(func(request *http.Request) bool {
+		return request.URL.Path != "/healthz"
+	}))
 	return &LocalComponent{server: &Server{Address: address, Handler: handler}, poller: poller, dispatcher: dispatch, queue: queue, cancelBus: cancelBus, runtimes: runtimes}, nil
 }
 

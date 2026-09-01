@@ -105,7 +105,7 @@ flowchart TB
     OTEL --> MON
 
     classDef planned stroke-dasharray: 5 5,color:#666;
-    class VECTOR,OBJECT,MEMORY,OTEL,MON planned;
+    class MEMORY planned;
 ```
 
 Agent Gateway 和 Worker 都是无状态节点，不要求负载均衡器提供 sticky session。Gateway 只根据已认证的 `channel_binding` 得到 `tenant_id`、`app_id` 和配置版本，再生成 canonical user/session。实际状态保存在共享后端；任何 Worker 取得队列消息和 session lease 后都能继续执行。
@@ -284,7 +284,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、租户成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复迁移 Worker、治理审计、OpenTelemetry 链路、Compose 最小部署、生产 Admin 控制面与动态 Bundle 切换，以及企业微信和飞书两个 Channel Adapter/Sender。MCP/业务工具、复杂文档解析、Knowledge 跨后端迁移、外置审计、投递异常运维页、按租户动态并发配额及 Kubernetes manifest 仍未完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
+当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复迁移 Worker、治理审计与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换，以及企业微信和飞书两个 Channel Adapter/Sender。MCP/业务工具、复杂文档解析、Knowledge 跨后端迁移、外置审计归档、投递异常运维页、按租户动态并发配额及 Kubernetes manifest 仍未完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
 
 ## 10. 预期效果与时间规划
 

@@ -187,8 +187,8 @@ func (bundle *Bundle) ResumeTool(ctx context.Context, resume ToolResume) (RunRes
 }
 
 func (bundle *Bundle) runMessage(ctx context.Context, input RunInput, message model.Message) (result RunResult, runErr error) {
+	modelStarted := time.Now()
 	if telemetry, ok := servicemetrics.FromContext(ctx); ok {
-		started := time.Now()
 		modelCtx, modelSpan := telemetry.Telemetry.Start(ctx, "model.stream", telemetry.Fields)
 		ctx = modelCtx
 		defer func() {
@@ -197,7 +197,7 @@ func (bundle *Bundle) runMessage(ctx context.Context, input RunInput, message mo
 			if runErr != nil {
 				status = "failed"
 			}
-			telemetry.Telemetry.Request(modelCtx, servicemetrics.Labels{TenantID: telemetry.Fields.TenantID, AppID: telemetry.Fields.AppID, Channel: telemetry.Fields.Channel, Operation: "model", Status: status}, time.Since(started), 0, 0)
+			telemetry.Telemetry.Request(modelCtx, servicemetrics.Labels{TenantID: telemetry.Fields.TenantID, AppID: telemetry.Fields.AppID, Channel: telemetry.Fields.Channel, Operation: "model", Status: status}, time.Since(modelStarted), 0, 0)
 		}()
 	}
 	options := []trpcagent.RunOption{trpcagent.WithRequestID(input.RequestID), trpcagent.WithAppName(bundle.appName)}
@@ -215,6 +215,7 @@ func (bundle *Bundle) runMessage(ctx context.Context, input RunInput, message mo
 		return RunResult{}, err
 	}
 	var canceled bool
+	var observedFirstToken bool
 	var drain <-chan time.Time
 	for {
 		select {
@@ -226,6 +227,12 @@ func (bundle *Bundle) runMessage(ctx context.Context, input RunInput, message mo
 				return result, nil
 			}
 			if item != nil {
+				if !observedFirstToken {
+					if telemetry, ok := servicemetrics.FromContext(ctx); ok {
+						telemetry.Telemetry.ModelFirstToken(ctx, servicemetrics.Labels{TenantID: telemetry.Fields.TenantID, AppID: telemetry.Fields.AppID, Channel: telemetry.Fields.Channel, Operation: "model", Status: "success"}, time.Since(modelStarted))
+					}
+					observedFirstToken = true
+				}
 				result.Events = append(result.Events, item)
 				if input.Observer != nil {
 					input.Observer(item)
