@@ -14,6 +14,7 @@ type queueBackend struct {
 	items chan StreamMessage
 	next  atomic.Int64
 	acks  atomic.Int64
+	reads atomic.Int64
 }
 
 func newQueueBackend() *queueBackend                                            { return &queueBackend{items: make(chan StreamMessage, 128)} }
@@ -24,6 +25,7 @@ func (backend *queueBackend) AddStream(_ context.Context, _ string, payload []by
 	return nil
 }
 func (backend *queueBackend) ReadGroup(ctx context.Context, _, _, _, start string, _ int64, block time.Duration) ([]StreamMessage, error) {
+	backend.reads.Add(1)
 	if start == "0" {
 		return nil, nil
 	}
@@ -36,6 +38,24 @@ func (backend *queueBackend) ReadGroup(ctx context.Context, _, _, _, start strin
 		return []StreamMessage{item}, nil
 	case <-timer.C:
 		return nil, nil
+	}
+}
+
+func TestWorkSubmitterNeverStartsAConsumer(t *testing.T) {
+	backend := newQueueBackend()
+	submitter, err := NewWorkSubmitter(context.Background(), backend, "role-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := submitter.Submit(gateway.RunRequest{InboxID: "inbox", ClaimToken: "claim"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if backend.reads.Load() != 0 {
+		t.Fatalf("producer-only submitter performed %d reads", backend.reads.Load())
+	}
+	if backend.next.Load() != 1 {
+		t.Fatalf("published=%d", backend.next.Load())
 	}
 }
 func (backend *queueBackend) AckStream(context.Context, string, string, string) error {

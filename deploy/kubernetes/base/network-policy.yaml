@@ -6,6 +6,7 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/component: gateway
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -15,3 +16,15 @@ spec:
               trpc-agent.io/ingress: allowed
       ports:
         - {port: 8080, protocol: TCP}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: trpc-agent-worker-deny-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/component: worker
+  policyTypes: [Ingress]
+  ingress: []

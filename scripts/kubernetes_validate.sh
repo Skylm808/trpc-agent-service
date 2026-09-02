@@ -31,6 +31,26 @@ require_text 'secretKeyRef:' "$render_dir/base.yaml"
 require_text 'automountServiceAccountToken: false' "$render_dir/base.yaml"
 require_text 'readOnlyRootFilesystem: true' "$render_dir/base.yaml"
 require_text 'maxUnavailable: 0' "$render_dir/base.yaml"
+require_text 'name: trpc-agent-gateway' "$render_dir/base.yaml"
+require_text 'name: trpc-agent-worker' "$render_dir/base.yaml"
+require_text 'app.kubernetes.io/component: gateway' "$render_dir/base.yaml"
+require_text 'app.kubernetes.io/component: worker' "$render_dir/base.yaml"
+require_text 'name: trpc-agent-worker-deny-ingress' "$render_dir/base.yaml"
+
+deployment_count="$(grep -c '^kind: Deployment$' "$render_dir/base.yaml")"
+hpa_count="$(grep -c '^kind: HorizontalPodAutoscaler$' "$render_dir/base.yaml")"
+if [[ "$deployment_count" != "2" || "$hpa_count" != "2" ]]; then
+  echo "base must render exactly two role Deployments and two HPAs" >&2
+  exit 1
+fi
+if ! grep -A190 '^  name: trpc-agent-gateway$' "$render_dir/base.yaml" | grep -q -- '- gateway'; then
+  echo "Gateway Deployment must select the gateway process role" >&2
+  exit 1
+fi
+if ! grep -A190 '^  name: trpc-agent-worker$' "$render_dir/base.yaml" | grep -q -- '- worker'; then
+  echo "Worker Deployment must select the worker process role" >&2
+  exit 1
+fi
 
 if grep -Eq '^kind: Secret$|^[[:space:]]*stringData:' "$render_dir/base.yaml" "$render_dir/migration.yaml"; then
   echo "rendered manifests must not contain Kubernetes Secret values" >&2

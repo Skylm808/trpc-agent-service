@@ -6,6 +6,7 @@ spec:
   type: ClusterIP
   selector:
     app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: gateway
   ports:
     - name: http
       port: 8080

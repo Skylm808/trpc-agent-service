@@ -31,6 +31,24 @@ type LocalComponent struct {
 	runtimes   *serviceruntime.Manager
 }
 
+// ComponentMode selects which process responsibilities are started. Gateway
+// processes own HTTP ingress and only produce queue entries; Worker processes
+// own Runner consumption and Inbox recovery. Combined preserves the local and
+// Compose-compatible all-in-one topology.
+type ComponentMode uint8
+
+const (
+	GatewayMode ComponentMode = 1 << iota
+	WorkerMode
+	CombinedMode = GatewayMode | WorkerMode
+)
+
+func (mode ComponentMode) gatewayEnabled() bool { return mode&GatewayMode != 0 }
+func (mode ComponentMode) workerEnabled() bool  { return mode&WorkerMode != 0 }
+func (mode ComponentMode) valid() bool {
+	return mode != 0 && mode&^CombinedMode == 0
+}
+
 // HandlerDecorator mounts a provider adapter around the shared local Gateway.
 type HandlerDecorator func(*Handler, http.Handler) (http.Handler, error)
 
@@ -82,18 +100,28 @@ func NewLocalComponent(parent context.Context, address string, file *config.File
 // NewComponent wires a single-process Gateway and Worker to injected durable
 // stores. The caller owns the database and Redis clients behind dependencies.
 func NewComponent(parent context.Context, address string, file *config.File, routes Routes, dependencies ComponentDependencies, decorators ...HandlerDecorator) (*LocalComponent, error) {
-	if parent == nil || address == "" || file == nil || routes == nil {
-		return nil, errors.New("openclaw: context, address, config, and routes are required")
+	return NewComponentForMode(parent, address, file, routes, dependencies, CombinedMode, decorators...)
+}
+
+// NewComponentForMode constructs a real role boundary rather than merely
+// hiding endpoints. A Gateway-only component has no Runtime Manager, queue
+// consumer, cancel subscription, or Inbox recovery poller. A Worker-only
+// component has no listener or channel/Admin HTTP surface.
+func NewComponentForMode(parent context.Context, address string, file *config.File, routes Routes, dependencies ComponentDependencies, mode ComponentMode, decorators ...HandlerDecorator) (*LocalComponent, error) {
+	if parent == nil || file == nil || !mode.valid() {
+		return nil, errors.New("openclaw: context, config, and at least one process role are required")
 	}
-	if dependencies.Inbox == nil || dependencies.Coordinator == nil || dependencies.Writes == nil || dependencies.RuntimeFactory == nil || dependencies.Audit == nil {
-		return nil, errors.New("openclaw: inbox, coordinator, writes, runtime factory, and audit are required")
+	if dependencies.Inbox == nil {
+		return nil, errors.New("openclaw: inbox is required")
+	}
+	if mode.gatewayEnabled() && (address == "" || routes == nil) {
+		return nil, errors.New("openclaw: gateway address and routes are required")
+	}
+	if mode.workerEnabled() && (dependencies.Coordinator == nil || dependencies.Writes == nil || dependencies.RuntimeFactory == nil || dependencies.Audit == nil) {
+		return nil, errors.New("openclaw: worker coordinator, writes, runtime factory, and audit are required")
 	}
 	if dependencies.WorkerID == "" {
 		dependencies.WorkerID = "worker"
-	}
-	runtimes, err := serviceruntime.NewManager(dependencies.RuntimeFactory)
-	if err != nil {
-		return nil, err
 	}
 	bus := dependencies.EventBus
 	if bus == nil {
@@ -105,7 +133,6 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 	}
 	telemetry, err := servicemetrics.New("trpc-agent-service")
 	if err != nil {
-		_ = runtimes.Close(context.Background())
 		return nil, err
 	}
 	redactor := servicelog.NewRedactor(nil, nil)
@@ -122,63 +149,77 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 	if snapshots == nil {
 		snapshots = gateway.FileSnapshotResolver{File: file}
 	}
-	processor := &worker.Processor{WorkerID: dependencies.WorkerID, Inbox: dependencies.Inbox, Coordinator: dependencies.Coordinator, Writes: dependencies.Writes, Runtimes: runtimes, Snapshots: snapshots, Publisher: MultiPublisher{bus, status}, Policy: policyEngine, Audit: dependencies.Audit, Redactor: redactor, Telemetry: telemetry, Cancellations: dependencies.Cancellations, RunLimiter: dependencies.RunLimiter}
+	component := &LocalComponent{}
+	var processor *worker.Processor
+	if mode.workerEnabled() {
+		component.runtimes, err = serviceruntime.NewManager(dependencies.RuntimeFactory)
+		if err != nil {
+			return nil, err
+		}
+		processor = &worker.Processor{WorkerID: dependencies.WorkerID, Inbox: dependencies.Inbox, Coordinator: dependencies.Coordinator, Writes: dependencies.Writes, Runtimes: component.runtimes, Snapshots: snapshots, Publisher: MultiPublisher{bus, status}, Policy: policyEngine, Audit: dependencies.Audit, Redactor: redactor, Telemetry: telemetry, Cancellations: dependencies.Cancellations, RunLimiter: dependencies.RunLimiter}
+	}
 	var cancelBus *cluster.CancelBus
-	var canceler Canceler = processor
-	if dependencies.ControlBackend != nil {
+	var canceler Canceler
+	if mode.workerEnabled() && dependencies.ControlBackend != nil {
 		durable, ok := status.(cluster.DurableCanceler)
 		if !ok {
-			_ = runtimes.Close(context.Background())
+			_ = component.runtimes.Close(context.Background())
 			return nil, errors.New("openclaw: shared control backend requires a durable cancel status store")
 		}
 		cancelBus, err = cluster.NewCancelBus(parent, dependencies.ControlBackend, durable, processor.Cancel, "")
 		if err != nil {
-			_ = runtimes.Close(context.Background())
+			_ = component.runtimes.Close(context.Background())
 			return nil, err
 		}
-		canceler = cancelBus
+		if mode.gatewayEnabled() {
+			canceler = cancelBus
+		}
+	} else if mode.gatewayEnabled() && dependencies.ControlBackend != nil {
+		durable, ok := status.(cluster.DurableCanceler)
+		if !ok {
+			return nil, errors.New("openclaw: shared control backend requires a durable cancel status store")
+		}
+		canceler, err = cluster.NewCancelPublisher(dependencies.ControlBackend, durable, "")
+		if err != nil {
+			return nil, err
+		}
+	} else if mode.gatewayEnabled() {
+		canceler = processor
 	}
 	var dispatch *dispatcher.Dispatcher
 	var queue *cluster.WorkQueue
 	var submitter worker.RequestSubmitter
-	if dependencies.QueueBackend != nil {
+	if mode.workerEnabled() && dependencies.QueueBackend != nil {
 		queue, err = cluster.NewWorkQueue(parent, dependencies.QueueBackend, processor.Process, cluster.WorkQueueConfig{NodeID: dependencies.WorkerID, Concurrency: dependencies.WorkerConcurrency})
 		if err != nil {
 			_ = cancelBus.Close()
-			_ = runtimes.Close(context.Background())
+			_ = component.runtimes.Close(context.Background())
 			return nil, err
 		}
 		submitter = queue
-	} else {
+	} else if mode.workerEnabled() {
 		dispatch, err = dispatcher.New(parent, processor.Process)
 		if err != nil {
 			_ = cancelBus.Close()
-			_ = runtimes.Close(context.Background())
+			_ = component.runtimes.Close(context.Background())
 			return nil, err
 		}
 		submitter = dispatch
 	}
-	poller, err := worker.NewInboxPoller(parent, dependencies.Inbox, submitter, worker.InboxPollerConfig{Owner: dependencies.WorkerID + ":inbox"})
-	if err != nil {
-		if dispatch != nil {
-			_ = dispatch.Close(context.Background())
+	if mode.gatewayEnabled() && !mode.workerEnabled() {
+		if dependencies.QueueBackend == nil {
+			_ = cancelBus.Close()
+			return nil, errors.New("openclaw: gateway-only role requires a shared queue backend")
 		}
-		if queue != nil {
-			_ = queue.Close(context.Background())
-		}
-		_ = cancelBus.Close()
-		_ = runtimes.Close(context.Background())
-		return nil, err
-	}
-	core := &Handler{Routes: routes, Inbox: dependencies.Inbox, Submitter: submitter, Hub: bus, Status: status, Canceler: canceler, Approver: policyEngine, ClaimOwner: dependencies.WorkerID + ":gateway", Telemetry: telemetry, Readiness: dependencies.Readiness}
-	var handler http.Handler = core.RoutesHandler()
-	for _, decorate := range decorators {
-		if decorate == nil {
-			continue
-		}
-		handler, err = decorate(core, handler)
+		submitter, err = cluster.NewWorkSubmitter(parent, dependencies.QueueBackend, "")
 		if err != nil {
-			_ = poller.Close(context.Background())
+			_ = cancelBus.Close()
+			return nil, err
+		}
+	}
+	if mode.workerEnabled() {
+		component.poller, err = worker.NewInboxPoller(parent, dependencies.Inbox, submitter, worker.InboxPollerConfig{Owner: dependencies.WorkerID + ":inbox"})
+		if err != nil {
 			if dispatch != nil {
 				_ = dispatch.Close(context.Background())
 			}
@@ -186,30 +227,72 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 				_ = queue.Close(context.Background())
 			}
 			_ = cancelBus.Close()
-			_ = runtimes.Close(context.Background())
+			_ = component.runtimes.Close(context.Background())
 			return nil, err
 		}
 	}
-	// Instrument the final surface so provider callbacks and every channel
-	// adapter extract traceparent before entering the shared Inbox pipeline.
-	// Keep one bounded span name instead of using tenant-bearing URL paths.
-	handler = otelhttp.NewHandler(handler, "http.server", otelhttp.WithFilter(func(request *http.Request) bool {
-		return request.URL.Path != "/healthz" && request.URL.Path != "/readyz"
-	}))
-	return &LocalComponent{server: &Server{Address: address, Handler: handler}, poller: poller, dispatcher: dispatch, queue: queue, cancelBus: cancelBus, runtimes: runtimes}, nil
+	if mode.gatewayEnabled() {
+		core := &Handler{Routes: routes, Inbox: dependencies.Inbox, Submitter: submitter, Hub: bus, Status: status, Canceler: canceler, Approver: policyEngine, ClaimOwner: dependencies.WorkerID + ":gateway", Telemetry: telemetry, Readiness: dependencies.Readiness}
+		var handler http.Handler = core.RoutesHandler()
+		for _, decorate := range decorators {
+			if decorate == nil {
+				continue
+			}
+			handler, err = decorate(core, handler)
+			if err != nil {
+				if component.poller != nil {
+					_ = component.poller.Close(context.Background())
+				}
+				if dispatch != nil {
+					_ = dispatch.Close(context.Background())
+				}
+				if queue != nil {
+					_ = queue.Close(context.Background())
+				}
+				_ = cancelBus.Close()
+				if component.runtimes != nil {
+					_ = component.runtimes.Close(context.Background())
+				}
+				return nil, err
+			}
+		}
+		// Instrument the final surface so provider callbacks and every channel
+		// adapter extract traceparent before entering the shared Inbox pipeline.
+		// Keep one bounded span name instead of using tenant-bearing URL paths.
+		handler = otelhttp.NewHandler(handler, "http.server", otelhttp.WithFilter(func(request *http.Request) bool {
+			return request.URL.Path != "/healthz" && request.URL.Path != "/readyz"
+		}))
+		component.server = &Server{Address: address, Handler: handler}
+	}
+	component.dispatcher, component.queue, component.cancelBus = dispatch, queue, cancelBus
+	return component, nil
 }
 
 // Start starts the local HTTP gateway.
-func (component *LocalComponent) Start(ctx context.Context) error { return component.server.Start(ctx) }
+func (component *LocalComponent) Start(ctx context.Context) error {
+	if component.server == nil {
+		return nil
+	}
+	return component.server.Start(ctx)
+}
 
 // Close drains ingress, queued requests, and Runtime Bundles in dependency order.
 func (component *LocalComponent) Close(ctx context.Context) error {
-	var dispatchErr, queueErr error
+	var serverErr, pollerErr, dispatchErr, queueErr, runtimeErr error
+	if component.server != nil {
+		serverErr = component.server.Close(ctx)
+	}
+	if component.poller != nil {
+		pollerErr = component.poller.Close(ctx)
+	}
 	if component.dispatcher != nil {
 		dispatchErr = component.dispatcher.Close(ctx)
 	}
 	if component.queue != nil {
 		queueErr = component.queue.Close(ctx)
 	}
-	return errors.Join(component.server.Close(ctx), component.poller.Close(ctx), dispatchErr, queueErr, component.cancelBus.Close(), component.runtimes.Close(ctx))
+	if component.runtimes != nil {
+		runtimeErr = component.runtimes.Close(ctx)
+	}
+	return errors.Join(serverErr, pollerErr, dispatchErr, queueErr, component.cancelBus.Close(), runtimeErr)
 }

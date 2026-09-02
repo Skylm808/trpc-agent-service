@@ -31,6 +31,44 @@ type StreamBackend interface {
 // RunHandler executes one durable request after the stream chooses a node.
 type RunHandler func(context.Context, gateway.RunRequest) error
 
+// WorkSubmitter is the producer-only side of the shared Redis Stream. Keeping
+// it separate from WorkQueue is what lets a Gateway enqueue requests without
+// accidentally starting Runner consumers in the same process.
+type WorkSubmitter struct {
+	backend StreamBackend
+	ctx     context.Context
+	stream  string
+}
+
+// NewWorkSubmitter creates the consumer group before accepting ingress, so
+// work published while all Worker processes are down remains available when a
+// Worker comes back.
+func NewWorkSubmitter(parent context.Context, backend StreamBackend, prefix string) (*WorkSubmitter, error) {
+	if parent == nil || backend == nil {
+		return nil, errors.New("cluster: submitter context and backend are required")
+	}
+	if prefix == "" {
+		prefix = "trpc-agent-service"
+	}
+	stream, group := prefix+":work", prefix+":workers"
+	if err := backend.CreateConsumerGroup(parent, stream, group); err != nil {
+		return nil, err
+	}
+	return &WorkSubmitter{backend: backend, ctx: parent, stream: stream}, nil
+}
+
+// Submit appends an immutable claimed request and never consumes it locally.
+func (submitter *WorkSubmitter) Submit(request gateway.RunRequest) error {
+	if submitter == nil || submitter.backend == nil || request.InboxID == "" || request.ClaimToken == "" {
+		return errors.New("cluster: complete claimed request is required")
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return errors.New("cluster: encode work request")
+	}
+	return submitter.backend.AddStream(submitter.ctx, submitter.stream, payload)
+}
+
 // WorkQueueConfig bounds Redis stream scheduling and per-node concurrency.
 type WorkQueueConfig struct {
 	NodeID      string

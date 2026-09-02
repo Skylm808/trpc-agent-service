@@ -55,6 +55,24 @@ const (
 		WHERE cb.binding_id = $1 AND cb.channel_type = $2 AND cb.enabled AND a.enabled AND t.enabled`
 )
 
+type processRole string
+
+const (
+	roleAll     processRole = "all"
+	roleGateway processRole = "gateway"
+	roleWorker  processRole = "worker"
+)
+
+func parseProcessRole(value string) (processRole, error) {
+	role := processRole(strings.ToLower(strings.TrimSpace(value)))
+	switch role {
+	case roleAll, roleGateway, roleWorker:
+		return role, nil
+	default:
+		return "", errors.New("role must be one of all, gateway, or worker")
+	}
+}
+
 type durableComponent struct {
 	inner         trpcservice.Component
 	delivery      *delivery.Worker
@@ -151,7 +169,10 @@ func (component *durableComponent) Close(ctx context.Context) error {
 	return errors.Join(drainErr, innerErr, migrationErr, retentionErr, deliveryErr, nodeErr, routerErr, observerErr, telemetryErr, component.redis.Close(), component.db.Close())
 }
 
-func newDurableComponent(ctx context.Context, address string, file *config.File) (trpcservice.Component, error) {
+func newDurableComponent(ctx context.Context, address string, file *config.File, role processRole) (trpcservice.Component, error) {
+	if _, err := parseProcessRole(string(role)); err != nil {
+		return nil, err
+	}
 	servicelog.InstallUpstreamRedaction()
 	if err := validatePersistentProfiles(file); err != nil {
 		return nil, err
@@ -259,9 +280,12 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 			_ = sqlObserver.Close()
 		}
 	}()
-	nodes, err := cluster.NewNodeRegistry(ctx, db, workerID, 5*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("register worker node: %w", err)
+	var nodes *cluster.NodeRegistry
+	if role != roleGateway {
+		nodes, err = cluster.NewNodeRegistry(ctx, db, workerID, 5*time.Second)
+		if err != nil {
+			return nil, fmt.Errorf("register worker node: %w", err)
+		}
 	}
 	statusStore := &openclaw.SQLStatusStore{DB: db}
 	policyEngine := &policy.Engine{
@@ -271,7 +295,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 		CostMicrosPerToken: 1,
 	}
 	auditStore := &audit.SQLStore{DB: db, Redactor: redactor}
-	component, err := openclaw.NewComponent(ctx, address, file, routes, openclaw.ComponentDependencies{
+	dependencies := openclaw.ComponentDependencies{
 		Inbox:             &idempotency.SQLStore{DB: db},
 		Coordinator:       coordinator,
 		Writes:            writes,
@@ -290,24 +314,39 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 		Readiness: func(readinessCtx context.Context) error {
 			return errors.Join(db.PingContext(readinessCtx), redisBackend.Ping(readinessCtx))
 		},
-	}, productionDecorators(db, store, published, redactor, &storagemigration.SQLStore{DB: db}, storageRouter, toolRegistry)...)
+	}
+	mode := openclaw.CombinedMode
+	var decorators []openclaw.HandlerDecorator
+	switch role {
+	case roleGateway:
+		mode = openclaw.GatewayMode
+		decorators = productionDecorators(db, store, published, redactor, &storagemigration.SQLStore{DB: db}, storageRouter, toolRegistry)
+	case roleWorker:
+		mode = openclaw.WorkerMode
+	default:
+		decorators = productionDecorators(db, store, published, redactor, &storagemigration.SQLStore{DB: db}, storageRouter, toolRegistry)
+	}
+	component, err := openclaw.NewComponentForMode(ctx, address, file, routes, dependencies, mode, decorators...)
 	if err != nil {
 		_ = nodes.Close(context.Background())
 		return nil, err
 	}
-	retentionWorker := &audit.RetentionWorker{
-		Store:    auditStore,
-		Policies: &audit.SQLPolicySource{DB: db},
-		OnResult: func(_ int64, retentionErr error) {
-			status := "success"
-			if retentionErr != nil {
-				status = "failed"
-			}
-			telemetry, telemetryErr := servicemetrics.New("trpc-agent-service")
-			if telemetryErr == nil {
-				telemetry.Request(context.Background(), servicemetrics.Labels{Operation: "audit_retention", Status: status}, 0, 0, 0)
-			}
-		},
+	var retentionWorker *audit.RetentionWorker
+	if role != roleGateway {
+		retentionWorker = &audit.RetentionWorker{
+			Store:    auditStore,
+			Policies: &audit.SQLPolicySource{DB: db},
+			OnResult: func(_ int64, retentionErr error) {
+				status := "success"
+				if retentionErr != nil {
+					status = "failed"
+				}
+				telemetry, telemetryErr := servicemetrics.New("trpc-agent-service")
+				if telemetryErr == nil {
+					telemetry.Request(context.Background(), servicemetrics.Labels{Operation: "audit_retention", Status: status}, 0, 0, 0)
+				}
+			},
+		}
 	}
 	deliveryRouter := &publishedDeliveryRoutes{db: db, published: published, senders: make(map[deliverySenderKey]channels.TextSender)}
 	telemetry, err := servicemetrics.New("trpc-agent-service")
@@ -316,23 +355,27 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 		_ = nodes.Close(context.Background())
 		return nil, err
 	}
-	outboxWorker, err := delivery.NewWorker(
-		&delivery.SQLStore{DB: db},
-		deliveryRouter,
-		&delivery.RedisFixedWindowLimiter{Redis: redisBackend},
-		telemetry,
-		delivery.WorkerConfig{Owner: workerID + ":outbox"},
-	)
-	if err != nil {
-		_ = component.Close(context.Background())
-		_ = nodes.Close(context.Background())
-		return nil, err
-	}
-	migrationWorker, err := storagemigration.NewWorker(&storagemigration.SQLStore{DB: db}, &storagemigration.PostgresCopier{Router: storageRouter}, storagemigration.WorkerConfig{Owner: workerID + ":storage-migration"})
-	if err != nil {
-		_ = component.Close(context.Background())
-		_ = nodes.Close(context.Background())
-		return nil, err
+	var outboxWorker *delivery.Worker
+	var migrationWorker *storagemigration.Worker
+	if role != roleGateway {
+		outboxWorker, err = delivery.NewWorker(
+			&delivery.SQLStore{DB: db},
+			deliveryRouter,
+			&delivery.RedisFixedWindowLimiter{Redis: redisBackend},
+			telemetry,
+			delivery.WorkerConfig{Owner: workerID + ":outbox"},
+		)
+		if err != nil {
+			_ = component.Close(context.Background())
+			_ = nodes.Close(context.Background())
+			return nil, err
+		}
+		migrationWorker, err = storagemigration.NewWorker(&storagemigration.SQLStore{DB: db}, &storagemigration.PostgresCopier{Router: storageRouter}, storagemigration.WorkerConfig{Owner: workerID + ":storage-migration"})
+		if err != nil {
+			_ = component.Close(context.Background())
+			_ = nodes.Close(context.Background())
+			return nil, err
+		}
 	}
 	closeDB = false
 	closeRedis = false

@@ -8,8 +8,9 @@ import (
 )
 
 type controlPubSub struct {
-	mu   sync.Mutex
-	subs map[string][]chan []byte
+	mu            sync.Mutex
+	subs          map[string][]chan []byte
+	subscriptions int
 }
 
 func (backend *controlPubSub) Publish(_ context.Context, channel string, payload []byte) error {
@@ -26,9 +27,26 @@ func (backend *controlPubSub) Subscribe(_ context.Context, channel string) (<-ch
 	if backend.subs == nil {
 		backend.subs = make(map[string][]chan []byte)
 	}
+	backend.subscriptions++
 	stream := make(chan []byte, 4)
 	backend.subs[channel] = append(backend.subs[channel], stream)
 	return stream, func() error { return nil }, nil
+}
+
+func TestCancelPublisherDoesNotSubscribeGatewayToWorkerControl(t *testing.T) {
+	backend := &controlPubSub{}
+	publisher, err := NewCancelPublisher(backend, &durableCancelStub{allowed: true}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !publisher.Cancel("tenant-a", "request") {
+		t.Fatal("cancel was not accepted")
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.subscriptions != 0 {
+		t.Fatalf("gateway publisher opened %d subscriptions", backend.subscriptions)
+	}
 }
 
 type durableCancelStub struct{ allowed bool }

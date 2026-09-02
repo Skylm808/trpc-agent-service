@@ -26,6 +26,7 @@ func TestRunNonBlockingFlags(t *testing.T) {
 		{name: "version", args: []string{"--version"}, want: 0},
 		{name: "unknown flag", args: []string{"--unknown"}, want: 2},
 		{name: "unexpected argument", args: []string{"unexpected"}, want: 2},
+		{name: "invalid role", args: []string{"--role", "scheduler"}, want: 2},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -33,6 +34,17 @@ func TestRunNonBlockingFlags(t *testing.T) {
 				t.Fatalf("run(%v) = %d, want %d", test.args, got, test.want)
 			}
 		})
+	}
+}
+
+func TestParseProcessRole(t *testing.T) {
+	for _, value := range []string{"all", "gateway", "worker", " GATEWAY "} {
+		if _, err := parseProcessRole(value); err != nil {
+			t.Fatalf("role %q: %v", value, err)
+		}
+	}
+	if _, err := parseProcessRole(""); err == nil {
+		t.Fatal("empty role accepted")
 	}
 }
 

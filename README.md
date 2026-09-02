@@ -232,7 +232,7 @@ curl -H 'Authorization: Bearer local-secret' \
 - `/healthz` 只表示进程存活，`/readyz` 在两秒上限内检查 PostgreSQL/Redis；依赖不可用时 Pod 退出 Service endpoints，但不会因 liveness 重启风暴丢失排障现场。
 - Worker 并发由 `TRPC_AGENT_WORKER_CONCURRENCY` 显式配置，合法范围 1–256；非法值启动失败。容量工具提供有界 health/readiness/gateway 压测和聚合 p50/p95/p99 报告。
 - Kubernetes 静态安全校验、默认只预览且双重确认的单 Pod 演练、默认只读且可选择真实 Runner 消息的生产验收脚本均已纳入 CI/运维文档。
-- 当前二进制仍是 Gateway、Worker、Channel、Delivery 与 Admin 合并进程，Kubernetes 按无状态组合节点扩缩容；尚未实现按角色独立 Deployment，文档和 manifest 不把该规划写成已完成。
+- PR15 首次交付时使用合并进程基线；PR19 已在不改变其可靠性约束的前提下升级为 Gateway/Worker 独立 Deployment。Delivery 和 maintenance 仍随 Worker 运行。
 
 **本 PR（PR16：生产 MCP Registry 与业务工具）实现**：
 
@@ -256,7 +256,13 @@ curl -H 'Authorization: Bearer local-secret' \
 - 缩小配额时先排空旧请求再接纳新请求；Worker 崩溃后 permit 自动过期，正常/延迟释放使用精确成员，旧 claim 不能释放新 claim。
 - 配额等待采用有界窗口并轮询共享取消；超时通过不消耗 attempt 的 Inbox `Defer` 无损让出 Worker，避免超额租户饿死其他租户。Redis 异常或 permit 续租失败时 fail closed，不允许绕过配额调用模型。真实 Redis 两节点测试纳入 CI，详见[租户级 Runner 并发配额](docs/tenant-concurrency.md)。
 
-真实飞书账号联调、按角色拆分进程、队列自定义指标扩缩容、持久 trace 后端、外置不可变审计归档、复杂文档解析和 Knowledge 跨向量后端迁移仍是后续能力。
+**本 PR（PR19：Gateway / Worker 角色拆分）实现**：
+
+- 可执行文件新增 `--role all|gateway|worker`。Gateway 只负责 HTTP/Admin/Channel 入口和 Redis Stream 生产，不构造 Runtime Bundle、不启动队列消费者或 Inbox recovery；Worker 不绑定 HTTP 端口，只消费共享队列并执行 Runner。
+- 取消控制拆成 Gateway producer 与 Worker subscriber，持久取消意图仍落 PostgreSQL；默认 `all` 保持 Docker Compose 兼容。Kubernetes 使用独立 Gateway/Worker Deployment、PDB 和 HPA，回调与模型负载可分别扩缩容。
+- 本增量仍把 Outbox、Storage migration 和审计 retention 放在 Worker 角色；独立后台角色和基于队列指标的 HPA 属于下一步，不写成已完成。
+
+真实飞书账号联调、Outbox/maintenance 独立进程、队列自定义指标扩缩容、持久 trace 后端、外置不可变审计归档、复杂文档解析和 Knowledge 跨向量后端迁移仍是后续能力。
 
 ## Admin API
 

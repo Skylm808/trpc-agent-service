@@ -2,7 +2,7 @@
 
 ## 最小可运行环境
 
-根目录的 `docker-compose.yml` 启动 PostgreSQL、Redis、一次性 migration、合并部署的 Gateway/Worker，以及 OpenTelemetry Collector、Prometheus、Grafana。服务启动时把 `configs/example.yaml` 当作**种子**：租户在控制面还没有任何已发布版本时才写入 version 1；一旦通过 Admin API 发布过新版本，数据库就是唯一事实源，重启不再校验文件与数据库一致，也不要求重建环境。启动文件中的版本号超过数据库已发布版本时拒绝启动，避免节点使用未发布配置。
+根目录的 `docker-compose.yml` 启动 PostgreSQL、Redis、一次性 migration、兼容模式的合并 Gateway/Worker，以及 OpenTelemetry Collector、Prometheus、Grafana。Kubernetes 基线则使用 `--role gateway` 与 `--role worker` 拆成独立 Deployment。服务启动时把 `configs/example.yaml` 当作**种子**：租户在控制面还没有任何已发布版本时才写入 version 1；一旦通过 Admin API 发布过新版本，数据库就是唯一事实源，重启不再校验文件与数据库一致，也不要求重建环境。启动文件中的版本号超过数据库已发布版本时拒绝启动，避免节点使用未发布配置。
 
 首次启动前执行 `cp .env.example .env`，然后只在本机 `.env` 中填写
 `DEEPSEEK_API_KEY`。生产 Runtime 使用 tRPC-Agent-Go 的 OpenAI-compatible Model
@@ -76,7 +76,7 @@ Prometheus 位于 `http://127.0.0.1:9090`，Grafana 位于 `http://127.0.0.1:300
 
 ## 生产推荐拓扑
 
-生产推荐最终把 Gateway、Worker、Outbox Delivery Worker、Channel Adapter 和 Admin API 分开扩容；当前二进制没有角色选择参数，PR15 Kubernetes 基线部署三个合并的无状态节点，不虚构独立 Deployment。PostgreSQL 与 Redis 使用托管高可用集群。migration 作为单独 Job 执行；迁移在事务内获取 PostgreSQL advisory lock，业务 Pod 不负责建表。Session 和 Memory 不保存在 Worker 本地，因此不要求 sticky session。
+Kubernetes 基线已把 Gateway 与 Runner Worker 分开扩容：Gateway 挂载 Channel/Admin HTTP，Worker 只消费 Redis Stream。Outbox Delivery、Storage migration Worker 和审计 retention 当前仍随 Worker 运行，尚未成为独立角色。PostgreSQL 与 Redis 使用托管高可用集群。migration schema 仍作为单独 Job 执行；迁移在事务内获取 PostgreSQL advisory lock，业务 Pod 不负责建表。Session 和 Memory 不保存在 Worker 本地，因此不要求 sticky session。
 
 当前 Compose 仍把 Gateway 与 Worker 合并在一个进程，但生产路径已经使用 Redis Streams
 consumer group，不再依赖进程内 dispatcher。每个节点同时从 PostgreSQL 竞争捞取到期 retry
@@ -85,14 +85,14 @@ claim 使用 `SKIP LOCKED`，同 session 按 `inbox_seq` 提交，超过最大�
 在调用模型前或写入时被拒绝。
 
 企业微信 Outbox 已装配 PostgreSQL 多节点 claim、租约、重试、DLQ、结果不确定隔离和
-Redis 跨节点限流。Compose 与当前 Kubernetes manifest 都让它和 Gateway/Worker 合并运行；
-独立 Delivery Deployment 需要先实现角色选择参数。
+Redis 跨节点限流。Compose 仍使用 `all` 合并模式；Kubernetes 中 Delivery 随 Worker 运行。
+独立 Delivery Deployment 需要扩展新的受约束角色和专属探针，当前尚未实现。
 
 跨节点请求状态、取消意图、预算、人工审批和节点心跳均保存在共享后端；取消命令另用 Redis
 Pub/Sub 做低延迟通知。PR17 已提供受认证、租户隔离并带审计的 `uncertain` / DLQ Admin
 运维 API，操作流程见[消息故障恢复](message-recovery.md)；Web 运维页面仍未实现。
-PR18 已实现按租户动态 Runner 并发配额；尚未生产化的部分包括按角色独立进程和基于队列
-自定义指标的自动扩缩容控制器。真实企业微信账号、
+PR18 已实现按租户动态 Runner 并发配额，PR19 已拆分 Gateway/Worker；尚未生产化的部分包括
+Delivery/maintenance 独立角色和基于队列自定义指标的自动扩缩容控制器。真实企业微信账号、
 公网 HTTPS 回调和平台 IP 白名单仍需部署方配置。
 
 共享后端集成测试不需要暴露 PostgreSQL/Redis 到宿主机：

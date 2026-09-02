@@ -39,6 +39,29 @@ type cancelCommand struct {
 	RequestID string `json:"request_id"`
 }
 
+// CancelPublisher is the Gateway-only half of cancellation control. It writes
+// durable intent and publishes the low-latency notification without opening a
+// Worker subscription in an ingress-only process.
+type CancelPublisher struct {
+	backend PubSubBackend
+	store   DurableCanceler
+	channel string
+}
+
+func NewCancelPublisher(backend PubSubBackend, store DurableCanceler, prefix string) (*CancelPublisher, error) {
+	if backend == nil || store == nil {
+		return nil, errors.New("cluster: cancel backend and store are required")
+	}
+	if prefix == "" {
+		prefix = "trpc-agent-service"
+	}
+	return &CancelPublisher{backend: backend, store: store, channel: prefix + ":run-control:cancel"}, nil
+}
+
+func (publisher *CancelPublisher) Cancel(tenantID, requestID string) bool {
+	return publishCancellation(publisher.backend, publisher.store, publisher.channel, tenantID, requestID)
+}
+
 // NewCancelBus subscribes this node before accepting cancellation requests.
 func NewCancelBus(ctx context.Context, backend PubSubBackend, store DurableCanceler, local LocalCancel, prefix string) (*CancelBus, error) {
 	if ctx == nil || backend == nil || store == nil || local == nil {
@@ -59,7 +82,14 @@ func NewCancelBus(ctx context.Context, backend PubSubBackend, store DurableCance
 
 // Cancel records durable intent and then sends a low-latency notification.
 func (bus *CancelBus) Cancel(tenantID, requestID string) bool {
-	if bus == nil || tenantID == "" || requestID == "" || !bus.store.Cancel(tenantID, requestID) {
+	if bus == nil {
+		return false
+	}
+	return publishCancellation(bus.backend, bus.store, bus.channel, tenantID, requestID)
+}
+
+func publishCancellation(backend PubSubBackend, store DurableCanceler, channel, tenantID, requestID string) bool {
+	if backend == nil || store == nil || tenantID == "" || requestID == "" || !store.Cancel(tenantID, requestID) {
 		return false
 	}
 	payload, err := json.Marshal(cancelCommand{TenantID: tenantID, RequestID: requestID})
@@ -67,7 +97,7 @@ func (bus *CancelBus) Cancel(tenantID, requestID string) bool {
 		return true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	_ = bus.backend.Publish(ctx, bus.channel, payload)
+	_ = backend.Publish(ctx, channel, payload)
 	cancel()
 	return true
 }

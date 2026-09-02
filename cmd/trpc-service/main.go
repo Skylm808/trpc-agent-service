@@ -29,6 +29,7 @@ func run(args []string) int {
 	migrateOnly := flags.Bool("migrate-only", false, "apply PostgreSQL migrations and exit")
 	configPath := flags.String("config", "", "validated tenant config for the gateway")
 	listenAddress := flags.String("listen", "127.0.0.1:8080", "OpenClaw HTTP listen address")
+	roleName := flags.String("role", string(roleAll), "process role: all, gateway, or worker")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -42,6 +43,11 @@ func run(args []string) int {
 	if *showVersion {
 		fmt.Printf("trpc-agent-service %s\n", trpcservice.Version)
 		return 0
+	}
+	role, err := parseProcessRole(*roleName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "initialize service: %v\n", err)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(
@@ -61,7 +67,7 @@ func run(args []string) int {
 
 	var options []trpcservice.Option
 	if *configPath != "" {
-		component, err := gatewayComponent(ctx, *configPath, *listenAddress)
+		component, err := gatewayComponent(ctx, *configPath, *listenAddress, role)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "initialize gateway: %v\n", err)
 			return 1
@@ -93,7 +99,7 @@ func run(args []string) int {
 // snapshots and outbound senders all resolve from the control-plane database
 // at request time, so Admin API publishes take effect without restarting the
 // service.
-func gatewayComponent(ctx context.Context, path, address string) (trpcservice.Component, error) {
+func gatewayComponent(ctx context.Context, path, address string, role processRole) (trpcservice.Component, error) {
 	fileHandle, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -103,7 +109,7 @@ func gatewayComponent(ctx context.Context, path, address string) (trpcservice.Co
 	if err != nil {
 		return nil, err
 	}
-	return newDurableComponent(ctx, address, file)
+	return newDurableComponent(ctx, address, file, role)
 }
 
 func resolveLocalSecret(ref tenant.SecretRef) (string, error) {
