@@ -90,8 +90,9 @@ Redis 跨节点限流。Compose 与当前 Kubernetes manifest 都让它和 Gatew
 
 跨节点请求状态、取消意图、预算、人工审批和节点心跳均保存在共享后端；取消命令另用 Redis
 Pub/Sub 做低延迟通知。PR17 已提供受认证、租户隔离并带审计的 `uncertain` / DLQ Admin
-运维 API，操作流程见[消息故障恢复](message-recovery.md)；Web 运维页面仍未实现。尚未生产化的
-部分包括按租户动态并发配额和自动扩缩容控制器。真实企业微信账号、
+运维 API，操作流程见[消息故障恢复](message-recovery.md)；Web 运维页面仍未实现。
+PR18 已实现按租户动态 Runner 并发配额；尚未生产化的部分包括按角色独立进程和基于队列
+自定义指标的自动扩缩容控制器。真实企业微信账号、
 公网 HTTPS 回调和平台 IP 白名单仍需部署方配置。
 
 共享后端集成测试不需要暴露 PostgreSQL/Redis 到宿主机：
@@ -101,7 +102,7 @@ docker compose --profile test run --rm --build integration-test
 ```
 
 测试覆盖 Redis 双节点 consumer group、PostgreSQL 状态/取消、节点 ID 冲突与重启、共享预算/
-审批、Storage Migration checkpoint/cutover，以及 Inbox/Outbox/配置版本回归；使用唯一测试作用域，可在保留数据卷时重复执行。
+审批、跨节点租户并发配额、Storage Migration checkpoint/cutover，以及 Inbox/Outbox/配置版本回归；使用唯一测试作用域，可在保留数据卷时重复执行。
 
 ## Storage Router 与迁移
 

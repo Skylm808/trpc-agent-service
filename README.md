@@ -249,7 +249,14 @@ curl -H 'Authorization: Bearer local-secret' \
 - `uncertain` 禁止走普通重放。管理员必须显式确认“已送达”，或在声明承担重复投递风险后重新排队；旧 claim 会被清理，新 Worker 从共享 PostgreSQL 安全接管。
 - 每次重放和人工裁决都写追加式脱敏审计，包含 actor、action、message id、旧/新状态、decision、error type、latency、trace id、reason hash 和 timestamp。接口与值班流程见 [Inbox / Outbox 故障恢复](docs/message-recovery.md)。
 
-真实飞书账号联调、按角色拆分进程、按租户动态并发配额、队列自定义指标扩缩容、持久 trace 后端、外置不可变审计归档、复杂文档解析和 Knowledge 跨向量后端迁移仍是后续能力。
+**本 PR（PR18：跨节点租户 Runner 并发配额）实现**：
+
+- 租户配置新增 `runtime.max_concurrent_runs`（1–256，历史版本缺省为 8）；配置发布后新请求立即按新配额准入，旧请求不被中断。
+- 所有 Worker 通过 Redis 过期信号量共享活跃 Runner 计数；tenant/request/claim 只以哈希进入 Redis，租户之间不共享 key，同名请求不会互相占用。
+- 缩小配额时先排空旧请求再接纳新请求；Worker 崩溃后 permit 自动过期，正常/延迟释放使用精确成员，旧 claim 不能释放新 claim。
+- 配额等待采用有界窗口并轮询共享取消；超时通过不消耗 attempt 的 Inbox `Defer` 无损让出 Worker，避免超额租户饿死其他租户。Redis 异常或 permit 续租失败时 fail closed，不允许绕过配额调用模型。真实 Redis 两节点测试纳入 CI，详见[租户级 Runner 并发配额](docs/tenant-concurrency.md)。
+
+真实飞书账号联调、按角色拆分进程、队列自定义指标扩缩容、持久 trace 后端、外置不可变审计归档、复杂文档解析和 Knowledge 跨向量后端迁移仍是后续能力。
 
 ## Admin API
 

@@ -22,3 +22,4 @@ jobs:
       - run: ./scripts/kubernetes_validate.sh
       - run: docker build -t trpc-agent-service:ci .
       - run: ./scripts/postgres_migrations_test.sh
+      - run: ./scripts/redis_integration_test.sh

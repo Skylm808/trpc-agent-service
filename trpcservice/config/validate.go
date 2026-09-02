@@ -87,6 +87,9 @@ func (file *File) Validate() error {
 		if err := validateAudit(path+".audit", current.Audit); err != nil {
 			return err
 		}
+		if current.Runtime.MaxConcurrentRuns < 0 || current.Runtime.MaxConcurrentRuns > 256 {
+			return fmt.Errorf("config: %s.runtime.max_concurrent_runs must be between 1 and 256 when configured", path)
+		}
 		if len(current.Apps) == 0 {
 			return fmt.Errorf("config: %s.apps must not be empty", path)
 		}

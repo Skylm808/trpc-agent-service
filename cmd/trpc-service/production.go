@@ -282,6 +282,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File)
 		QueueBackend:      redisBackend,
 		ControlBackend:    redisBackend,
 		Cancellations:     statusStore,
+		RunLimiter:        &worker.RedisRunLimiter{Redis: redisBackend},
 		Policy:            policyEngine,
 		WorkerID:          workerID,
 		WorkerConcurrency: workerConcurrency,

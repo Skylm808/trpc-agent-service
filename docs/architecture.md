@@ -294,7 +294,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、租户成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复迁移 Worker、治理审计与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换、Kubernetes 合并节点基线、生产 MCP Registry、HTTPS JSON 业务工具，以及企业微信和飞书两个 Channel Adapter/Sender。复杂文档解析、Knowledge 跨后端迁移、外置审计归档、投递异常运维页、按角色独立进程和按租户动态并发配额仍未完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
+当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、租户 Runner 动态并发配额、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复迁移 Worker、治理审计与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换、Kubernetes 合并节点基线、生产 MCP Registry、HTTPS JSON 业务工具，以及企业微信和飞书两个 Channel Adapter/Sender。复杂文档解析、Knowledge 跨后端迁移、外置审计归档、投递异常 Web 运维页和按角色独立进程仍未完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
 
 ## 10. 预期效果与时间规划
 
@@ -324,6 +324,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | T3b：生产部署与验收（PR15） | 已完成 | Kubernetes 合并节点 manifest、readiness、容量工具、故障演练和验收门禁 | 代码与离线校验已完成，真实集群演练待部署方执行 |
 | T3c：MCP 与业务工具（PR16） | 已完成 | 租户 MCP Registry、SecretRef、固定 HTTPS JSON 工具、发布预检和 Bundle 生命周期 | 已完成并通过真实 Streamable HTTP MCP 协议测试 |
 | T3d：消息恢复控制面（PR17） | 已完成 | 租户级 DLQ 查询/重放、uncertain 人工裁决、状态 CAS 与审计 | 已完成并通过 PostgreSQL 并发集成测试 |
-| T4：运维增强 | 待排期 | 按角色独立进程、按租户动态并发配额、自定义指标 HPA | 未完成 |
+| T3e：租户并发配额（PR18） | 已完成 | Redis 跨节点 Runner semaphore、动态配置、续租与崩溃恢复 | 已完成并通过真实 Redis 双节点测试 |
+| T4：运维增强 | 待排期 | 按角色独立进程、自定义指标 HPA | 未完成 |
 
 时间从依赖就绪后计算，不含企业微信权限、公网域名、TLS 证书或平台审核等待。

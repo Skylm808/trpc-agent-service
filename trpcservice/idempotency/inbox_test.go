@@ -84,6 +84,26 @@ func TestRetryWaitsUntilScheduledTime(t *testing.T) {
 	}
 }
 
+func TestCapacityDeferDoesNotConsumeRetryAttempt(t *testing.T) {
+	store := NewMemoryStore()
+	now := time.Unix(100, 0)
+	store.now = func() time.Time { return now }
+	claim, won, err := store.Claim(context.Background(), testMessage("tenant-a"), "gateway", time.Minute)
+	if err != nil || !won || claim.Attempt != 1 {
+		t.Fatalf("claim=%+v won=%v err=%v", claim, won, err)
+	}
+	if err := store.Defer(context.Background(), claim, now); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := store.ClaimReady(context.Background(), "worker", time.Minute, 1)
+	if err != nil || len(ready) != 1 || ready[0].Attempt != 1 {
+		t.Fatalf("deferred ready=%+v err=%v", ready, err)
+	}
+	if err := store.Defer(context.Background(), claim, now); !errors.Is(err, ErrClaimOwner) {
+		t.Fatalf("stale defer error=%v", err)
+	}
+}
+
 func TestRejectedInboxIsTerminal(t *testing.T) {
 	store := NewMemoryStore()
 	message := testMessage("tenant-a")

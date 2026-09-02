@@ -46,7 +46,23 @@ type Tenant struct {
 	Enabled       bool          `json:"enabled" yaml:"enabled"`
 	ConfigVersion ConfigVersion `json:"config_version" yaml:"config_version"`
 	Audit         AuditPolicy   `json:"audit" yaml:"audit"`
+	Runtime       RuntimePolicy `json:"runtime,omitempty" yaml:"runtime,omitempty"`
 	Apps          []AgentApp    `json:"apps" yaml:"apps"`
+}
+
+// RuntimePolicy bounds shared execution resources for one tenant. Zero uses
+// the documented conservative default so existing published versions remain
+// valid while a later version can change the quota without restarting nodes.
+type RuntimePolicy struct {
+	MaxConcurrentRuns int `json:"max_concurrent_runs,omitempty" yaml:"max_concurrent_runs,omitempty"`
+}
+
+// ConcurrentRunLimit returns the effective cross-node Runner quota.
+func (policy RuntimePolicy) ConcurrentRunLimit() int {
+	if policy.MaxConcurrentRuns > 0 {
+		return policy.MaxConcurrentRuns
+	}
+	return 8
 }
 
 // AgentApp contains one tenant-owned Agent application's runtime policy.

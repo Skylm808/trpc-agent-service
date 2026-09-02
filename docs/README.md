@@ -5,6 +5,7 @@
 - [数据模型](data-model.md)：PostgreSQL 表、配置版本和迁移约束。
 - [多节点消息运行时](message-runtime.md)：Inbox、fencing、提交顺序和 Outbox。
 - [消息故障恢复](message-recovery.md)：DLQ 查询/重放、uncertain 人工裁决、并发保护和审计。
+- [租户 Runner 并发配额](tenant-concurrency.md)：Redis 跨节点准入、动态配额、续租与崩溃恢复。
 - [Runtime Bundle](runtime.md)：tRPC-Agent-Go Runner 的构建、版本和生命周期。
 - [治理、审计与可观测性](governance.md)：权限、预算、审批、脱敏和 tracing。
 - [生产可观测性](observability.md)：OTLP、Collector、Prometheus/Grafana、指标基数和审计保留。

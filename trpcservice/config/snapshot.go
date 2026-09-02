@@ -14,6 +14,7 @@ type RuntimeSnapshot struct {
 	version  tenant.ConfigVersion
 	app      tenant.AgentApp
 	audit    tenant.AuditPolicy
+	runtime  tenant.RuntimePolicy
 }
 
 // Snapshot resolves one tenant application into an immutable runtime view.
@@ -43,6 +44,7 @@ func (file *File) Snapshot(tenantID, appID string) (RuntimeSnapshot, error) {
 					version:  currentTenant.ConfigVersion,
 					app:      app.Clone(),
 					audit:    currentTenant.Audit.Clone(),
+					runtime:  currentTenant.Runtime,
 				}, nil
 			}
 		}
@@ -69,3 +71,6 @@ func (snapshot RuntimeSnapshot) App() tenant.AgentApp { return snapshot.app.Clon
 func (snapshot RuntimeSnapshot) Audit() tenant.AuditPolicy {
 	return snapshot.audit.Clone()
 }
+
+// Runtime returns the immutable tenant execution policy pinned to this request.
+func (snapshot RuntimeSnapshot) Runtime() tenant.RuntimePolicy { return snapshot.runtime }

@@ -11,6 +11,10 @@ tenants:
       redact_fields:
         - authorization
         - api_key
+    runtime:
+      # Shared across every Worker node. A new published version changes
+      # admission for new runs without interrupting active requests.
+      max_concurrent_runs: 8
     apps:
       - app_id: assistant
         name: Demo Assistant

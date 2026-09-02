@@ -41,10 +41,15 @@ type Processor struct {
 	Redactor      *servicelog.Redactor
 	Telemetry     *servicemetrics.Telemetry
 	Cancellations CancellationStore
+	RunLimiter    RunLimiter
+	QuotaWait     time.Duration
 	activeMu      sync.Mutex
 	active        map[string]context.CancelFunc
 	canceled      map[string]bool
 }
+
+var errCanceledWhileWaitingForQuota = errors.New("worker: run canceled while waiting for tenant quota")
+var errTenantQuotaBusy = errors.New("worker: tenant run quota is busy")
 
 // RuntimeFactory creates tenant services and gates every session mutation with the current fence.
 type PlatformStore interface {
@@ -209,6 +214,40 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 		processor.publish(request, gateway.RunEvent{Type: "run.canceled", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Terminal: true})
 		return nil
 	}
+	snapshot, err := processor.Snapshots.Resolve(ctx, request.TenantID, request.AppID, request.ConfigVersion)
+	if err != nil {
+		return err
+	}
+	quotaStarted := time.Now()
+	permit, claim, err := processor.waitForRunPermit(ctx, request, claim, snapshot.Runtime().ConcurrentRunLimit())
+	quotaStatus := "success"
+	if errors.Is(err, errTenantQuotaBusy) {
+		quotaStatus = "deferred"
+	} else if err != nil {
+		quotaStatus = "failed"
+	}
+	processor.observeOperationStatus(ctx, request, "tenant_run_quota", quotaStatus, quotaStarted)
+	if errors.Is(err, errCanceledWhileWaitingForQuota) {
+		if cancelErr := processor.Inbox.Cancel(context.Background(), claim); cancelErr != nil {
+			return cancelErr
+		}
+		completed = true
+		processor.publish(request, gateway.RunEvent{Type: "run.canceled", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Terminal: true})
+		return nil
+	}
+	if errors.Is(err, errTenantQuotaBusy) {
+		if deferErr := processor.Inbox.Defer(ctx, claim, time.Now().UTC().Add(processor.retryDelay())); deferErr != nil {
+			return deferErr
+		}
+		processor.publish(request, gateway.RunEvent{Type: "run.queued", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Stage: "tenant_quota"})
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if processor.RunLimiter != nil {
+		defer processor.RunLimiter.Release(permit)
+	}
 	leaseCtx, leaseSpan := processor.Telemetry.Start(ctx, "session.lease", processor.spanFields(request))
 	leaseStarted := time.Now()
 	lease, err := processor.Coordinator.Acquire(leaseCtx, request.Key(), processor.WorkerID, processor.leaseTTL())
@@ -218,10 +257,6 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 		return err
 	}
 	defer processor.Coordinator.Release(lease)
-	snapshot, err := processor.Snapshots.Resolve(ctx, request.TenantID, request.AppID, request.ConfigVersion)
-	if err != nil {
-		return err
-	}
 	auditPolicy := snapshot.Audit()
 	auditEnabled, auditStoreContent = auditPolicy.Enabled, auditPolicy.StoreContent
 	tenantRedactor = servicelog.NewRedactor(auditPolicy.RedactFields, nil)
@@ -244,6 +279,18 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 		return err
 	}
 	defer runtimeLease.Release()
+	ownershipStarted := time.Now()
+	lease, err = processor.Coordinator.Renew(ctx, lease, processor.leaseTTL())
+	if err == nil {
+		claim, err = processor.Inbox.Renew(ctx, claim, processor.leaseTTL())
+	}
+	if err == nil && processor.RunLimiter != nil {
+		err = processor.RunLimiter.Renew(ctx, permit, processor.leaseTTL())
+	}
+	processor.observeOperation(ctx, request, "execution_ownership_preflight", ownershipStarted, err)
+	if err != nil {
+		return fmt.Errorf("worker: execution ownership preflight: %w", err)
+	}
 	processor.publish(request, gateway.RunEvent{Type: "run.started", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID})
 	runCtx, cancelRun := context.WithCancel(ctx)
 	runCtx = policy.WithRequest(runCtx, processor.Policy, policyRequest)
@@ -258,7 +305,7 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	defer processor.unregister(request.TenantID, request.InboxID)
 	renewDone := make(chan struct{})
 	renewFailure := make(chan error, 1)
-	go processor.renew(runCtx, cancelRun, request, lease, claim, renewDone, renewFailure)
+	go processor.renew(runCtx, cancelRun, request, lease, claim, permit, renewDone, renewFailure)
 	runnerCtx, runnerSpan := processor.Telemetry.Start(sessioncoord.WithLease(runCtx, lease), "runner.execute", processor.spanFields(request))
 	runInput := serviceruntime.RunInput{RequestID: request.InboxID, UserID: request.UserID, SessionID: request.SessionID, Text: request.Text, Observer: projection.Observe, ToolFilter: controls.Visibility, ToolExecutionFilter: controls.Execution, ToolPermissionPolicy: controls.Permission}
 	_, err = runtimeLease.Runtime.Run(runnerCtx, runInput)
@@ -429,6 +476,12 @@ func (processor *Processor) retryDelay() time.Duration {
 	}
 	return time.Second
 }
+func (processor *Processor) quotaWait() time.Duration {
+	if processor.QuotaWait > 0 {
+		return processor.QuotaWait
+	}
+	return 500 * time.Millisecond
+}
 func (processor *Processor) publish(request gateway.RunRequest, event gateway.RunEvent) {
 	if processor.Publisher != nil {
 		event.TenantID = request.TenantID
@@ -438,7 +491,54 @@ func (processor *Processor) publish(request gateway.RunRequest, event gateway.Ru
 	}
 }
 
-func (processor *Processor) renew(ctx context.Context, cancel context.CancelFunc, request gateway.RunRequest, lease sessioncoord.Lease, claim idempotency.Claim, done chan<- struct{}, failure chan<- error) {
+func (processor *Processor) waitForRunPermit(ctx context.Context, request gateway.RunRequest, claim idempotency.Claim, limit int) (RunPermit, idempotency.Claim, error) {
+	if processor.RunLimiter == nil {
+		return RunPermit{}, claim, nil
+	}
+	ttl := processor.leaseTTL()
+	retryEvery := 200 * time.Millisecond
+	if ttl/6 < retryEvery {
+		retryEvery = ttl / 6
+	}
+	if retryEvery <= 0 {
+		retryEvery = time.Millisecond
+	}
+	nextRenew := time.Now().Add(ttl / 3)
+	deadline := time.Now().Add(processor.quotaWait())
+	for {
+		permit, acquired, err := processor.RunLimiter.TryAcquire(ctx, request.TenantID, request.InboxID, request.ClaimToken, limit, ttl)
+		if err != nil {
+			return RunPermit{}, claim, err
+		}
+		if acquired {
+			return permit, claim, nil
+		}
+		if processor.cancellationRequested(ctx, request) {
+			return RunPermit{}, claim, errCanceledWhileWaitingForQuota
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return RunPermit{}, claim, errTenantQuotaBusy
+		}
+		wait := min(retryEvery, remaining)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return RunPermit{}, claim, ctx.Err()
+		case <-timer.C:
+		}
+		if !time.Now().Before(nextRenew) {
+			claim, err = processor.Inbox.Renew(ctx, claim, ttl)
+			if err != nil {
+				return RunPermit{}, claim, fmt.Errorf("worker: renew inbox while waiting for tenant quota: %w", err)
+			}
+			nextRenew = time.Now().Add(ttl / 3)
+		}
+	}
+}
+
+func (processor *Processor) renew(ctx context.Context, cancel context.CancelFunc, request gateway.RunRequest, lease sessioncoord.Lease, claim idempotency.Claim, permit RunPermit, done chan<- struct{}, failure chan<- error) {
 	defer close(done)
 	interval := processor.leaseTTL() / 3
 	if interval <= 0 {
@@ -468,6 +568,13 @@ func (processor *Processor) renew(ctx context.Context, cancel context.CancelFunc
 				failure <- fmt.Errorf("worker: renew inbox claim: %w", err)
 				cancel()
 				return
+			}
+			if processor.RunLimiter != nil {
+				if err := processor.RunLimiter.Renew(ctx, permit, processor.leaseTTL()); err != nil {
+					failure <- fmt.Errorf("worker: renew tenant run quota: %w", err)
+					cancel()
+					return
+				}
 			}
 		}
 	}
@@ -602,5 +709,9 @@ func (processor *Processor) observeOperation(ctx context.Context, request gatewa
 	if err != nil {
 		status = "failed"
 	}
+	processor.observeOperationStatus(ctx, request, operation, status, started)
+}
+
+func (processor *Processor) observeOperationStatus(ctx context.Context, request gateway.RunRequest, operation, status string, started time.Time) {
 	processor.Telemetry.Request(ctx, servicemetrics.Labels{TenantID: request.TenantID, AppID: request.AppID, Channel: request.BindingID, Operation: operation, Status: status}, time.Since(started), 0, 0)
 }

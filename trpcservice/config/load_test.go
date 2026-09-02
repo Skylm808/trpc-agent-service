@@ -21,6 +21,8 @@ tenants:
       retention_days: 30
       store_content: false
       redact_fields: [authorization]
+    runtime:
+      max_concurrent_runs: 4
     apps:
       - app_id: support
         name: Support Agent
@@ -85,6 +87,32 @@ func TestLoadValidConfiguration(t *testing.T) {
 	}
 	if file.Tenants[0].ConfigVersion != 3 {
 		t.Fatalf("config version = %d", file.Tenants[0].ConfigVersion)
+	}
+	if file.Tenants[0].Runtime.ConcurrentRunLimit() != 4 {
+		t.Fatalf("runtime quota = %d", file.Tenants[0].Runtime.ConcurrentRunLimit())
+	}
+	snapshot, err := file.Snapshot("tenant-a", "support")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Tenants[0].Runtime.MaxConcurrentRuns = 1
+	if snapshot.Runtime().ConcurrentRunLimit() != 4 {
+		t.Fatalf("snapshot runtime policy was mutated: %d", snapshot.Runtime().ConcurrentRunLimit())
+	}
+}
+
+func TestRuntimeConcurrencyQuotaValidationAndDefault(t *testing.T) {
+	file, err := Load(strings.NewReader(validYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Tenants[0].Runtime.MaxConcurrentRuns = 0
+	if err := file.Validate(); err != nil || file.Tenants[0].Runtime.ConcurrentRunLimit() != 8 {
+		t.Fatalf("legacy default limit=%d err=%v", file.Tenants[0].Runtime.ConcurrentRunLimit(), err)
+	}
+	file.Tenants[0].Runtime.MaxConcurrentRuns = 257
+	if err := file.Validate(); err == nil || !strings.Contains(err.Error(), "max_concurrent_runs") {
+		t.Fatalf("invalid runtime quota error=%v", err)
 	}
 }
 

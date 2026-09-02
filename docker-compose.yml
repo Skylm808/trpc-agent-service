@@ -125,6 +125,7 @@ services:
       - "./cmd/trpc-service"
       - "./trpcservice/idempotency"
       - "./trpcservice/delivery"
+      - "./trpcservice/worker"
       - "./trpcservice/repository"
       - "./trpcservice/storagemigration"
     environment:

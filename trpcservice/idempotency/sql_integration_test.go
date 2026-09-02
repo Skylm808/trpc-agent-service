@@ -128,6 +128,24 @@ func TestSQLClaimReadyRecoveryConcurrencyOrderAndDLQ(t *testing.T) {
 			t.Fatalf("duplicate=%+v won=%v err=%v", duplicate, won, err)
 		}
 	})
+
+	t.Run("capacity defer preserves retry budget", func(t *testing.T) {
+		message := sqlTestMessage(tenantID, appID, bindingID, "capacity", "capacity-session", now)
+		original, won, err := store.Claim(ctx, message, "gateway", time.Minute)
+		if err != nil || !won || original.Attempt != 1 {
+			t.Fatalf("claim=%+v won=%v err=%v", original, won, err)
+		}
+		if err := store.Defer(ctx, original, now); err != nil {
+			t.Fatal(err)
+		}
+		ready, err := store.ClaimReady(ctx, "worker", time.Minute, 10)
+		if err != nil || len(ready) != 1 || ready[0].InboxID != original.InboxID || ready[0].Attempt != 1 {
+			t.Fatalf("deferred ready=%+v err=%v", ready, err)
+		}
+		if err := store.Complete(ctx, ready[0]); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func seedSQLInboxParents(t *testing.T, ctx context.Context, db *sql.DB, tenantID, appID, bindingID string) {

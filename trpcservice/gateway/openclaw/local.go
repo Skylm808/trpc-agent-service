@@ -47,6 +47,7 @@ type ComponentDependencies struct {
 	QueueBackend      cluster.StreamBackend
 	ControlBackend    cluster.PubSubBackend
 	Cancellations     worker.CancellationStore
+	RunLimiter        worker.RunLimiter
 	Policy            *policy.Engine
 	WorkerID          string
 	WorkerConcurrency int
@@ -121,7 +122,7 @@ func NewComponent(parent context.Context, address string, file *config.File, rou
 	if snapshots == nil {
 		snapshots = gateway.FileSnapshotResolver{File: file}
 	}
-	processor := &worker.Processor{WorkerID: dependencies.WorkerID, Inbox: dependencies.Inbox, Coordinator: dependencies.Coordinator, Writes: dependencies.Writes, Runtimes: runtimes, Snapshots: snapshots, Publisher: MultiPublisher{bus, status}, Policy: policyEngine, Audit: dependencies.Audit, Redactor: redactor, Telemetry: telemetry, Cancellations: dependencies.Cancellations}
+	processor := &worker.Processor{WorkerID: dependencies.WorkerID, Inbox: dependencies.Inbox, Coordinator: dependencies.Coordinator, Writes: dependencies.Writes, Runtimes: runtimes, Snapshots: snapshots, Publisher: MultiPublisher{bus, status}, Policy: policyEngine, Audit: dependencies.Audit, Redactor: redactor, Telemetry: telemetry, Cancellations: dependencies.Cancellations, RunLimiter: dependencies.RunLimiter}
 	var cancelBus *cluster.CancelBus
 	var canceler Canceler = processor
 	if dependencies.ControlBackend != nil {

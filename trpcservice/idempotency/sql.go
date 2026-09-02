@@ -255,6 +255,17 @@ func (store *SQLStore) Fail(ctx context.Context, claim Claim, cause error, retry
 	return exactClaimResult(result, err)
 }
 
+// Defer yields an exact active claim because tenant capacity is full. The next
+// claim restores the same attempt number, so healthy backpressure cannot drive
+// a message into DLQ.
+func (store *SQLStore) Defer(ctx context.Context, claim Claim, retryAt time.Time) error {
+	if err := validateSQLClaim(store, claim); err != nil {
+		return err
+	}
+	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='retry',attempts=GREATEST(attempts-1,0),next_attempt_at=$6,last_error=NULL,claim_owner=NULL,claim_token=NULL,lease_until=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing'`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, retryAt.UTC())
+	return exactClaimResult(result, err)
+}
+
 func validateSQLClaim(store *SQLStore, claim Claim) error {
 	if store == nil || store.DB == nil {
 		return errors.New("idempotency: nil SQL database")

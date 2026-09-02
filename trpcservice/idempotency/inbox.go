@@ -59,6 +59,8 @@ type Store interface {
 	Reject(context.Context, Claim) error
 	Complete(context.Context, Claim) error
 	Fail(context.Context, Claim, error, time.Time) error
+	// Defer yields capacity-constrained work without consuming its retry budget.
+	Defer(context.Context, Claim, time.Time) error
 }
 
 // ReadyStore atomically reclaims retryable or lease-expired Inbox work for a
@@ -89,6 +91,26 @@ func (store *MemoryStore) Cancel(_ context.Context, claim Claim) error {
 		return ErrClaimOwner
 	}
 	item.claim.Status = StatusCanceled
+	return nil
+}
+
+// Defer returns an exact active claim to retry without counting capacity
+// backpressure as a processing failure.
+func (store *MemoryStore) Defer(_ context.Context, claim Claim, retryAt time.Time) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	item := store.records[claim.InboxID]
+	if item == nil || item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing {
+		return ErrClaimOwner
+	}
+	item.claim.Status = StatusRetry
+	if item.claim.Attempt > 0 {
+		item.claim.Attempt--
+	}
+	item.claim.Owner, item.claim.ClaimToken = "", ""
+	item.claim.LeaseUntil = time.Time{}
+	item.nextAttempt = retryAt.UTC()
+	item.lastError = ""
 	return nil
 }
 
