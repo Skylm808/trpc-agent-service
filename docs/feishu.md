@@ -17,6 +17,10 @@ Adapter 不直接调用 Runner，也不绕过 Outbox 直接调用飞书 API。�
 `验签/解密 -> app_id 校验 -> Inbox claim -> queue submit`，立即返回 200；
 Worker 和 tRPC-Agent-Go Runner 在回调请求之外异步运行。
 
+URL verification 遵循飞书官方 Dispatcher 的特殊握手顺序：加密 challenge 先用
+Encrypt Key 解密，再用 Verification Token 认证并返回 challenge；该握手不要求普通事件的
+`X-Lark-Signature`。握手完成后的真实事件仍强制校验签名，缺失或伪造签名返回 401。
+
 ```mermaid
 sequenceDiagram
     participant U as 飞书用户

@@ -68,11 +68,6 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	payload := body
 	encrypted := strings.TrimSpace(raw.Encrypt) != ""
 	if encrypted {
-		candidates = signedCandidates(request, candidates, body)
-		if len(candidates) == 0 {
-			writeError(writer, http.StatusUnauthorized, "invalid callback signature")
-			return
-		}
 		payload, candidates, ok = handler.decryptCandidates(candidates, raw.Encrypt)
 		if !ok {
 			writeError(writer, http.StatusUnauthorized, "invalid encrypted callback")
@@ -95,8 +90,19 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	if probe.Type == "url_verification" {
+		// Feishu's official dispatcher decrypts URL verification first and
+		// authenticates it with the Verification Token, but does not require
+		// the normal event signature. Requiring X-Lark-Signature here rejects
+		// the platform's initial encrypted challenge.
 		handler.verifyURL(writer, candidates, payload)
 		return
+	}
+	if encrypted {
+		candidates = signedCandidates(request, candidates, body)
+		if len(candidates) == 0 {
+			writeError(writer, http.StatusUnauthorized, "invalid callback signature")
+			return
+		}
 	}
 	handler.receive(writer, request, candidates, payload)
 }
@@ -123,7 +129,7 @@ func (handler *Handler) bindings(path string) ([]Binding, bool) {
 	return candidates, true
 }
 
-// decryptCandidates tries the signature-matched candidates and returns the
+// decryptCandidates tries the configured candidates and returns the
 // plaintext plus only the candidates that decrypted to that exact payload.
 // Keeping the narrowed set prevents a token belonging to another tenant from
 // being selected after one candidate's Encrypt Key authenticated the body.

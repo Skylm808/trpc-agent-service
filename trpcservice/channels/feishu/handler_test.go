@@ -158,6 +158,22 @@ func TestURLVerificationRejectsBadToken(t *testing.T) {
 	}
 }
 
+func TestEncryptedURLVerificationDoesNotRequireEventSignature(t *testing.T) {
+	binding := testBinding("tenant-a")
+	binding.EncryptKey = testEncrypt
+	adapter, _ := feishu.NewDynamicHandler(&acceptorStub{}, staticProvider(binding))
+	body := encryptBody(t, testEncrypt, []byte(fmt.Sprintf(`{"challenge":"ch-encrypted","token":%q,"type":"url_verification"}`, testToken)))
+	response := post(adapter, "feishu-a", body)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"challenge":"ch-encrypted"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	wrong := encryptBody(t, testEncrypt, []byte(`{"challenge":"ch-encrypted","token":"wrong","type":"url_verification"}`))
+	if response = post(adapter, "feishu-a", wrong); response.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestEncryptedEventDecryptsAndEntersGateway(t *testing.T) {
 	binding := testBinding("tenant-a")
 	binding.EncryptKey = testEncrypt
