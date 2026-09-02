@@ -14,9 +14,10 @@ import (
 
 const callbackPathPrefix = "/channels/wecom/"
 
-// BindingProvider resolves one enabled callback binding at request time, so
-// control-plane publishes and disables take effect without a restart.
-type BindingProvider func(bindingID string) (Binding, bool)
+// BindingProvider resolves every enabled callback candidate at request time.
+// Binding IDs are tenant-scoped, so the callback signature and receive ID
+// must uniquely select one candidate before routing.
+type BindingProvider func(bindingID string) []Binding
 
 // Handler verifies WeCom callbacks and hands normalized messages to the shared
 // durable ingress pipeline. It never waits for Agent execution.
@@ -58,54 +59,63 @@ func NewDynamicHandler(acceptor gateway.InboundAcceptor, provider BindingProvide
 
 // ServeHTTP implements GET callback verification and POST message receipt.
 func (handler *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
-	binding, ok := handler.binding(request.URL.Path)
-	if !ok {
+	bindings := handler.bindingsFor(request.URL.Path)
+	if len(bindings) == 0 {
 		http.NotFound(w, request)
 		return
 	}
 	switch request.Method {
 	case http.MethodGet:
-		handler.verifyURL(w, request, binding)
+		handler.verifyURL(w, request, bindings)
 	case http.MethodPost:
-		handler.receive(w, request, binding)
+		handler.receive(w, request, bindings)
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func (handler *Handler) binding(path string) (Binding, bool) {
+func (handler *Handler) bindingsFor(path string) []Binding {
 	if handler == nil || !strings.HasPrefix(path, callbackPathPrefix) {
-		return Binding{}, false
+		return nil
 	}
 	raw := strings.TrimPrefix(path, callbackPathPrefix)
 	if raw == "" || strings.Contains(raw, "/") {
-		return Binding{}, false
+		return nil
 	}
 	bindingID, err := url.PathUnescape(raw)
 	if err != nil {
-		return Binding{}, false
+		return nil
 	}
 	if handler.provider != nil {
 		return handler.provider(bindingID)
 	}
 	binding, ok := handler.bindings[bindingID]
-	return binding, ok
+	if !ok {
+		return nil
+	}
+	return []Binding{binding}
 }
 
-func (handler *Handler) verifyURL(w http.ResponseWriter, request *http.Request, binding Binding) {
+func (handler *Handler) verifyURL(w http.ResponseWriter, request *http.Request, bindings []Binding) {
 	query := request.URL.Query()
-	plain, err := binding.Crypt.VerifyAndDecrypt(query.Get("msg_signature"), query.Get("timestamp"), query.Get("nonce"), query.Get("echostr"))
-	if err != nil {
+	var matched [][]byte
+	for _, binding := range bindings {
+		plain, err := binding.Crypt.VerifyAndDecrypt(query.Get("msg_signature"), query.Get("timestamp"), query.Get("nonce"), query.Get("echostr"))
+		if err == nil {
+			matched = append(matched, plain)
+		}
+	}
+	if len(matched) != 1 {
 		http.Error(w, "invalid callback verification", http.StatusUnauthorized)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(plain)
+	_, _ = w.Write(matched[0])
 }
 
-func (handler *Handler) receive(w http.ResponseWriter, request *http.Request, binding Binding) {
+func (handler *Handler) receive(w http.ResponseWriter, request *http.Request, bindings []Binding) {
 	body, err := io.ReadAll(io.LimitReader(request.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "read callback", http.StatusBadRequest)
@@ -117,32 +127,41 @@ func (handler *Handler) receive(w http.ResponseWriter, request *http.Request, bi
 		return
 	}
 	query := request.URL.Query()
-	plain, err := binding.Crypt.VerifyAndDecrypt(query.Get("msg_signature"), query.Get("timestamp"), query.Get("nonce"), envelope.Encrypt)
-	if err != nil {
+	var matched []gateway.InboundMessage
+	authenticatedUnsupported := 0
+	for _, binding := range bindings {
+		plain, decryptErr := binding.Crypt.VerifyAndDecrypt(query.Get("msg_signature"), query.Get("timestamp"), query.Get("nonce"), envelope.Encrypt)
+		if decryptErr != nil {
+			continue
+		}
+		message, decodeErr := decodeCallback(plain)
+		if decodeErr != nil {
+			http.Error(w, "invalid callback message", http.StatusBadRequest)
+			return
+		}
+		inbound, normalizeErr := normalize(binding, message, handler.now())
+		if errors.Is(normalizeErr, ErrBindingMismatch) {
+			continue
+		}
+		if errors.Is(normalizeErr, ErrUnsupportedMessage) {
+			authenticatedUnsupported++
+			continue
+		}
+		if normalizeErr != nil {
+			http.Error(w, "invalid callback message", http.StatusBadRequest)
+			return
+		}
+		matched = append(matched, inbound)
+	}
+	if len(matched) == 0 && authenticatedUnsupported == 1 {
+		writeSuccess(w)
+		return
+	}
+	if len(matched) != 1 {
 		http.Error(w, "invalid callback signature", http.StatusUnauthorized)
 		return
 	}
-	message, err := decodeCallback(plain)
-	if err != nil {
-		http.Error(w, "invalid callback message", http.StatusBadRequest)
-		return
-	}
-	inbound, err := normalize(binding, message, handler.now())
-	if err != nil {
-		if errors.Is(err, ErrUnsupportedMessage) {
-			// Unsupported provider events are poison messages for the Agent path.
-			// Ack them so WeCom does not retry them three times.
-			writeSuccess(w)
-			return
-		}
-		if errors.Is(err, ErrBindingMismatch) {
-			http.Error(w, "callback binding mismatch", http.StatusUnauthorized)
-			return
-		}
-		http.Error(w, "invalid callback message", http.StatusBadRequest)
-		return
-	}
-	if _, err := handler.acceptor.AcceptInbound(request.Context(), inbound); err != nil {
+	if _, err := handler.acceptor.AcceptInbound(request.Context(), matched[0]); err != nil {
 		// A non-200 response asks WeCom to retry a temporary Inbox/queue failure.
 		http.Error(w, "temporarily unable to accept callback", http.StatusServiceUnavailable)
 		return

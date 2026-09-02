@@ -169,7 +169,7 @@ curl -H 'Authorization: Bearer local-secret' \
 
 **已经实现并验证**：
 
-- 企业微信真实端到端链路：回调验签/解密 → Inbox 幂等 → tRPC-Agent-Go Runner → DeepSeek → PostgreSQL Session/Memory/Event → Outbox → 企业微信回复。
+- 企业微信与飞书真实端到端链路均已通过人工平台验收：真实 IM 回调 → Inbox 幂等 → tRPC-Agent-Go Runner → DeepSeek → PostgreSQL Session/Memory/Event → Outbox → 对应 IM 回复。仓库只记录结论，不保存截图、用户消息正文或凭据。
 - 多节点消息运行时：Redis Streams consumer group 即时调度、PostgreSQL Inbox/fencing/Outbox、崩溃恢复与 DLQ、共享状态/取消、共享预算/审批、节点心跳以及 Redis 跨节点限流与事件总线。
 - 控制面数据模型与不可变配置版本、治理审计、OpenTelemetry 链路、Compose 最小部署。
 
@@ -178,7 +178,7 @@ curl -H 'Authorization: Bearer local-secret' \
 - 生产 Admin API：`validate` / `publish` / `list` / `current` / `rollback`，全部要求 Bearer 认证与显式租户 scope，客户端无法通过请求体或参数切换租户。
 - `expected_version` 乐观锁（并发发布只有一个成功，其余 409）、不可变版本（回滚创建新版本并记录 `rollback_of`、`created_by`、`content_hash`、`published_at`）。
 - 发布/回滚审计日志（tenant、actor、action、版本、decision、error_type、latency、trace_id、timestamp）。
-- 动态 Runtime Bundle 切换：入站路由、企业微信回调绑定、Runtime 快照和出站 Sender 都按请求钉住控制面版本；新请求使用新版本，旧请求及其 Outbox 回复继续使用旧版本，旧 Bundle 在引用归零后 drain 并 Close；切换失败沿用上一份有效配置并重试初始化。
+- 动态 Runtime Bundle 切换：入站路由、IM 回调绑定、Runtime 快照和出站 Sender 都按请求钉住控制面版本；新请求使用新版本，旧请求及其 Outbox 回复继续使用旧版本，旧 Bundle 在引用归零后 drain 并 Close；目标版本初始化失败时精确版本请求进入重试，绝不静默回退执行旧 Bundle。
 - disabled 租户 / App / Binding 立即拒绝新请求；生产配置缺少共享 PostgreSQL 后端时 fail fast，Admin 发布非持久化存储配置会被直接拒绝。
 - 配置发布后无需 `docker compose down -v`、无需删除数据卷、无需重建环境；启动文件只在首次启动时播种，之后数据库是唯一事实源。
 
@@ -190,7 +190,7 @@ curl -H 'Authorization: Bearer local-secret' \
 - 消息解析：文本（剥离 @机器人提及占位）、图片/文件安全元数据（不含 image_key/file_key、不访问外部 URL，预留 `MediaDownloader` 扩展点），不支持的事件安全 ACK。
 - 飞书 Sender：tenant_access_token 并发安全缓存、提前一分钟刷新、失效强制刷新重试一次；单聊/群聊文本回复、4096 字节 UTF-8 安全分片；可重试/永久/uncertain 错误分类；完整复用 Outbox、Delivery Worker、Redis 限流、重试和 DLQ。
 - 动态配置：飞书 binding 的发布、禁用、回滚即时生效；Outbox 按入口钉住的 config_version 解析旧 Sender；canary secret 不出现在响应、日志、错误或审计中。
-- 真实飞书端到端联调尚未执行：缺少飞书测试账号、公网回调域名与平台事件订阅配置，步骤见 [docs/feishu.md](docs/feishu.md)；本 PR 不声明真实 E2E 已通过。
+- 飞书真实端到端链路已完成人工平台验收；固定协议、幂等、租户消歧、Sender 和 Outbox 仍由自动化测试持续覆盖。复验步骤见 [docs/feishu.md](docs/feishu.md)。
 
 **本 PR（PR11：跨节点共享调度与控制）实现**：
 
@@ -216,7 +216,7 @@ curl -H 'Authorization: Bearer local-secret' \
 - 启用 Knowledge 的 App 必须把 `knowledge_search` 加入工具白名单；该工具随不可变 Runtime Bundle 构建，新配置发布后新请求使用新索引配置，旧请求继续使用旧 Bundle 并有界关闭连接。
 - Artifact 生产路由新增 S3-compatible（含 MinIO）。S3 revision 分配使用共享 PostgreSQL advisory lock 跨节点串行化；PostgreSQL → S3 支持双写、可恢复 backfill、外部写入后 ledger 对账与受控 cutover。
 - 配置 validate/publish 和启动 preflight 会验证 PGVector/Qdrant、S3 凭据与可达性；初始化或切换失败不会替换上一份有效 Bundle，错误不包含解析后的凭据。配置和操作说明见 [Knowledge/RAG 与 S3 Artifact](docs/knowledge.md)。
-- 本 PR 不交付 MCP、业务 Tool、复杂 PDF/OCR 文档流水线、Knowledge 跨向量后端自动迁移或真实飞书联调；这些不能写成已经实现。
+- PR13 本身不交付 MCP、业务 Tool、复杂 PDF/OCR 文档流水线或 Knowledge 跨向量后端自动迁移；后续增量的状态以本节对应 PR 条目为准。
 
 **本 PR（PR14：持久化治理与可观测性）实现**：
 
@@ -262,7 +262,14 @@ curl -H 'Authorization: Bearer local-secret' \
 - 取消控制拆成 Gateway producer 与 Worker subscriber，持久取消意图仍落 PostgreSQL；默认 `all` 保持 Docker Compose 兼容。Kubernetes 使用独立 Gateway/Worker Deployment、PDB 和 HPA，回调与模型负载可分别扩缩容。
 - 本增量仍把 Outbox、Storage migration 和审计 retention 放在 Worker 角色；独立后台角色和基于队列指标的 HPA 属于下一步，不写成已完成。
 
-真实飞书账号联调、Outbox/maintenance 独立进程、队列自定义指标扩缩容、持久 trace 后端、外置不可变审计归档、复杂文档解析和 Knowledge 跨向量后端迁移仍是后续能力。
+**本 PR（PR20：双 IM 与多节点生产验收）实现**：
+
+- Compose 新增 opt-in `multinode` profile：一个 producer-only Gateway、两个 consumer-only Worker，共享原 PostgreSQL/Redis 与命名卷；默认 `service --role all` 保持兼容，不需要 sticky session。
+- 验收脚本默认只读，检查健康/就绪、两个节点心跳、Worker 无回调端口、Redis Stream、共享 Session/Event/Memory 与配置版本；显式启用后使用合成作用域验证双 Worker 消费、重复消息幂等、单 Worker 停止后的接管和重启持久性。
+- 回归覆盖 Runner 前的 session 顺序门禁、runtime Session fence 竞态、旧 token 提交拒绝、精确配置版本不回退，以及企业微信/飞书同外部标识和同名 binding 的 fail-closed 隔离。
+- 自动化测试与人工真实平台验收分开记录；验收输出不打印 SecretRef、凭据、下载地址或消息正文。
+
+Outbox/maintenance 独立进程、队列自定义指标扩缩容、持久 trace 后端、外置不可变审计归档、复杂文档解析和 Knowledge 跨向量后端迁移仍是后续能力。
 
 ## Admin API
 

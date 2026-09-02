@@ -149,10 +149,51 @@ func TestRejectsBadSignatureAndBindingMismatch(t *testing.T) {
 	}
 }
 
+func TestDynamicBindingDisambiguatesTenantAndFailsClosed(t *testing.T) {
+	aesKey := strings.TrimSuffix(base64.StdEncoding.EncodeToString(testAESKey), "=")
+	cryptA, _ := wecom.NewCrypt("tenant-a-token", aesKey, testCorpID)
+	cryptB, _ := wecom.NewCrypt("tenant-b-token", aesKey, testCorpID)
+	bindings := []wecom.Binding{
+		{TenantID: "tenant-a", AppID: "app", BindingID: "shared", CorpID: testCorpID, AgentID: testAgentID, ConfigVersion: 1, Crypt: cryptA},
+		{TenantID: "tenant-b", AppID: "app", BindingID: "shared", CorpID: testCorpID, AgentID: testAgentID, ConfigVersion: 1, Crypt: cryptB},
+	}
+	capture := &capturingAcceptor{}
+	adapter, err := wecom.NewDynamicHandler(capture, func(string) []wecom.Binding { return bindings })
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := `<xml><ToUserName><![CDATA[ww-test-corp]]></ToUserName><FromUserName><![CDATA[same-user]]></FromUserName><CreateTime>1720000000</CreateTime><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[synthetic]]></Content><MsgId>same-message</MsgId><AgentID>1000002</AgentID></xml>`
+	encrypted := encryptTestMessage(t, plain, testCorpID)
+	body := `<xml><Encrypt><![CDATA[` + encrypted + `]]></Encrypt></xml>`
+	request := httptest.NewRequest(http.MethodPost, callbackURL("shared", signature("tenant-b-token", testTimestamp, testNonce, encrypted), encrypted), strings.NewReader(body))
+	response := httptest.NewRecorder()
+	adapter.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || len(capture.messages) != 1 || capture.messages[0].TenantID != "tenant-b" {
+		t.Fatalf("status=%d accepted=%d", response.Code, len(capture.messages))
+	}
+
+	// Identical server-owned credentials cannot prove which tenant owns the
+	// callback, so the adapter must reject instead of using database row order.
+	capture.messages = nil
+	bindings[0].Crypt = cryptB
+	ambiguous := httptest.NewRecorder()
+	adapter.ServeHTTP(ambiguous, httptest.NewRequest(http.MethodPost, callbackURL("shared", signature("tenant-b-token", testTimestamp, testNonce, encrypted), encrypted), strings.NewReader(body)))
+	if ambiguous.Code != http.StatusUnauthorized || len(capture.messages) != 0 {
+		t.Fatalf("ambiguous status=%d accepted=%d", ambiguous.Code, len(capture.messages))
+	}
+}
+
 type acceptorStub struct{}
 
 func (*acceptorStub) AcceptInbound(_ context.Context, message gateway.InboundMessage) (gateway.AcceptedMessage, error) {
 	return gateway.AcceptedMessage{RequestID: message.ExternalMessageID, SessionID: message.SessionID, TraceID: message.TraceID}, nil
+}
+
+type capturingAcceptor struct{ messages []gateway.InboundMessage }
+
+func (acceptor *capturingAcceptor) AcceptInbound(_ context.Context, message gateway.InboundMessage) (gateway.AcceptedMessage, error) {
+	acceptor.messages = append(acceptor.messages, message)
+	return gateway.AcceptedMessage{RequestID: message.ExternalMessageID}, nil
 }
 
 func callbackURL(bindingID, messageSignature, _ string) string {

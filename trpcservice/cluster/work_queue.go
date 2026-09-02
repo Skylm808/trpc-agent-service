@@ -81,15 +81,17 @@ type WorkQueueConfig struct {
 // still the source of truth: the stream is the immediate wakeup/delivery path,
 // while Inbox lease recovery handles a node dying at any instruction.
 type WorkQueue struct {
-	backend StreamBackend
-	handler RunHandler
-	config  WorkQueueConfig
-	stream  string
-	group   string
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	once    sync.Once
+	backend       StreamBackend
+	handler       RunHandler
+	config        WorkQueueConfig
+	stream        string
+	group         string
+	ctx           context.Context
+	cancel        context.CancelFunc
+	handlerCtx    context.Context
+	handlerCancel context.CancelFunc
+	wg            sync.WaitGroup
+	once          sync.Once
 }
 
 // NewWorkQueue creates the consumer group and starts this node's consumers.
@@ -112,6 +114,7 @@ func NewWorkQueue(parent context.Context, backend StreamBackend, handler RunHand
 		return nil, err
 	}
 	queue.ctx, queue.cancel = context.WithCancel(parent)
+	queue.handlerCtx, queue.handlerCancel = context.WithCancel(parent)
 	for index := 0; index < config.Concurrency; index++ {
 		queue.wg.Add(1)
 		go queue.consume(index)
@@ -164,7 +167,7 @@ func (queue *WorkQueue) read(consumer, start string, block time.Duration) int {
 	for _, message := range messages {
 		var request gateway.RunRequest
 		if json.Unmarshal(message.Payload, &request) == nil {
-			_ = queue.handler(queue.ctx, request)
+			_ = queue.handler(queue.handlerCtx, request)
 		}
 		// Processor transitions the exact Inbox claim to completed/retry/DLQ.
 		// ACK prevents a stale stream copy from fighting that durable decision.
@@ -185,8 +188,10 @@ func (queue *WorkQueue) Close(ctx context.Context) error {
 	go func() { queue.wg.Wait(); close(done) }()
 	select {
 	case <-done:
+		queue.handlerCancel()
 		return nil
 	case <-ctx.Done():
+		queue.handlerCancel()
 		return ctx.Err()
 	}
 }

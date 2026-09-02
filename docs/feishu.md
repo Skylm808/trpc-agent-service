@@ -136,9 +136,13 @@ go test ./cmd/trpc-service -run Feishu
 分类、Outbox 集成、secret canary 脱敏和 v1→v2/rollback 的 Sender 切换。PostgreSQL 集成
 测试（`TRPC_AGENT_POSTGRES_TEST_DSN`）覆盖飞书 binding 的发布、禁用、回滚与租户隔离。
 
-## 真实联调步骤（外部条件）
+## 真实联调与复验
 
-代码与协议测试已完成，但真实端到端验收需要以下外部条件：
+飞书真实端到端链路已经通过人工平台验收：飞书事件订阅经公网 HTTPS 进入 Adapter，随后经过
+Inbox、Runner、DeepSeek、PostgreSQL、Outbox 并回到飞书。该结论与仓库内自动化协议/集成测试
+分开记录；仓库不保存平台截图、用户消息正文、回调原文或任何凭据。
+
+在新环境复验需要以下外部条件：
 
 1. 飞书开放平台自建应用（App ID / App Secret），开启机器人能力；
 2. 事件订阅配置：请求地址 `https://<public-host>/channels/feishu/<binding_id>`，
@@ -148,7 +152,8 @@ go test ./cmd/trpc-service -run Feishu
    `FEISHU_ENCRYPT_KEY`（不可提交），通过 Admin API 发布启用该 binding 的新版本；
 5. 在飞书中给机器人发消息，验证 飞书回复 全链路。
 
-在上述条件就绪前，本 PR 不声明“真实飞书 E2E 已通过”。
+复验报告只记录时间、commit/image、匿名 binding/tenant、PASS/FAIL 和受控错误类型，不粘贴
+消息正文、下载 URL、App Secret、Verification Token 或 Encrypt Key。
 
 ## 当前限制
 

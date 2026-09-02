@@ -98,3 +98,23 @@ func TestParseCanonicalAppName(t *testing.T) {
 		}
 	}
 }
+
+func TestChannelsWithSameExternalIdentifiersRemainIsolated(t *testing.T) {
+	wecomUser, err := CanonicalUserID(ChannelTypeWeCom, "shared-binding", "same-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	feishuUser, err := CanonicalUserID(ChannelTypeFeishu, "shared-binding", "same-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wecomUser == feishuUser {
+		t.Fatalf("channel users collided: %q", wecomUser)
+	}
+	sessionID, _ := DirectSessionID("shared-binding", "same-user")
+	wecomScope := wecomUser + "\x00" + sessionID
+	feishuScope := feishuUser + "\x00" + sessionID
+	if wecomScope == feishuScope {
+		t.Fatalf("channel session scopes collided: %q", wecomScope)
+	}
+}

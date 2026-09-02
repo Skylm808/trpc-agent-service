@@ -257,6 +257,19 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 		return err
 	}
 	defer processor.Coordinator.Release(lease)
+	turnOrderStarted := time.Now()
+	err = processor.Writes.ValidateTurn(ctx, request.Key(), request.InboxSeq)
+	processor.observeOperation(ctx, request, "session_turn_order", turnOrderStarted, err)
+	if errors.Is(err, sessioncoord.ErrOutOfOrder) {
+		if deferErr := processor.Inbox.Defer(ctx, claim, time.Now().UTC().Add(processor.retryDelay())); deferErr != nil {
+			return deferErr
+		}
+		processor.publish(request, gateway.RunEvent{Type: "run.queued", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Stage: "session_order"})
+		return nil
+	}
+	if err != nil {
+		return err
+	}
 	auditPolicy := snapshot.Audit()
 	auditEnabled, auditStoreContent = auditPolicy.Enabled, auditPolicy.StoreContent
 	tenantRedactor = servicelog.NewRedactor(auditPolicy.RedactFields, nil)

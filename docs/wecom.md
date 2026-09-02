@@ -65,6 +65,8 @@ trace 或错误信息。开发组合器支持 `env` 和挂载的 `file` SecretRe
 
 ## 身份与会话
 
+- `binding_id` 是租户内标识；不同租户同名时 Adapter 读取全部候选，以各自 Token、
+  EncodingAESKey、CorpID/AgentID 验证并要求唯一匹配。无法消歧时返回 401，不按数据库行序选租户；
 - 单聊：`user_id = wecom/{binding_id}/{FromUserName}`，
   `session_id = dm/{binding_id}/{FromUserName}`；
 - 带 `ChatId` / `RoomId` 的群聊：
@@ -121,7 +123,8 @@ https://<public-host>/channels/wecom/<binding_id>
 CAS、指数退避、DLQ、`uncertain` 和 Redis 跨节点限流。启用 WeCom binding 后，Agent
 生成的 Outbox 会由现有 Sender 主动发送，不再需要修改 Runner 主链路。
 
-企业微信测试账号、Cloudflare Tunnel、真实 DeepSeek 和 PostgreSQL 的收发链路已经联调
-通过。PR17 已完成 `uncertain` / DLQ 的 Admin 运维 API，Web 页面仍未实现。图片和文件目前只把安全元数据
+企业微信测试账号、Cloudflare Tunnel、真实 DeepSeek 和 PostgreSQL 的收发链路已经完成人工
+E2E 验收；自动化协议/隔离测试独立运行，仓库不保存截图、用户正文或凭据。PR17 已完成
+`uncertain` / DLQ 的 Admin 运维 API，Web 页面仍未实现。图片和文件目前只把安全元数据
 交给 Agent，不会自动下载或回传媒体；后续媒体能力需要独立的大小、MIME 和来源校验。
 部署新企业账号时仍需在对应企业启用应用，并准备公网 HTTPS 回调地址。

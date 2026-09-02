@@ -12,6 +12,53 @@ import (
 func sessionKey() gateway.SessionKey {
 	return gateway.SessionKey{TenantID: "tenant", AppID: "app", UserID: "user", SessionID: "session"}
 }
+
+func TestFenceGuardSerializesTakeoverWithRuntimeMutation(t *testing.T) {
+	store := NewMemoryWriteStore()
+	key := sessionKey()
+	if err := store.AdvanceFence(context.Background(), key, 1); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	mutationDone := make(chan error, 1)
+	go func() {
+		mutationDone <- store.WithFence(context.Background(), key, 1, func(context.Context) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	takeoverDone := make(chan error, 1)
+	go func() { takeoverDone <- store.AdvanceFence(context.Background(), key, 2) }()
+	select {
+	case err := <-takeoverDone:
+		t.Fatalf("takeover crossed active fenced mutation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-mutationDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-takeoverDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithFence(context.Background(), key, 1, func(context.Context) error { return nil }); !errors.Is(err, ErrStaleFence) {
+		t.Fatalf("old fence mutation error=%v", err)
+	}
+}
+
+func TestValidateTurnRejectsLaterSequenceBeforeRunner(t *testing.T) {
+	store := NewMemoryWriteStore()
+	key := sessionKey()
+	if err := store.ValidateTurn(context.Background(), key, 2); !errors.Is(err, ErrOutOfOrder) {
+		t.Fatalf("later turn error=%v", err)
+	}
+	if err := store.ValidateTurn(context.Background(), key, 1); err != nil {
+		t.Fatal(err)
+	}
+}
 func turn(key gateway.SessionKey, fence uint64, inbox string) TurnWrite {
 	eventID := "event-" + inbox
 	seq := uint64(1)

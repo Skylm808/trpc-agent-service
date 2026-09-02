@@ -2,7 +2,7 @@
 
 ## 最小可运行环境
 
-根目录的 `docker-compose.yml` 启动 PostgreSQL、Redis、一次性 migration、兼容模式的合并 Gateway/Worker，以及 OpenTelemetry Collector、Prometheus、Grafana。Kubernetes 基线则使用 `--role gateway` 与 `--role worker` 拆成独立 Deployment。服务启动时把 `configs/example.yaml` 当作**种子**：租户在控制面还没有任何已发布版本时才写入 version 1；一旦通过 Admin API 发布过新版本，数据库就是唯一事实源，重启不再校验文件与数据库一致，也不要求重建环境。启动文件中的版本号超过数据库已发布版本时拒绝启动，避免节点使用未发布配置。
+根目录的 `docker-compose.yml` 启动 PostgreSQL、Redis、一次性 migration、兼容模式的合并 Gateway/Worker，以及 OpenTelemetry Collector、Prometheus、Grafana；opt-in `multinode` profile 另提供一个 Gateway 和两个 Worker 的 PR20 验收拓扑。Kubernetes 基线使用 `--role gateway` 与 `--role worker` 拆成独立 Deployment。服务启动时把 `configs/example.yaml` 当作**种子**：租户在控制面还没有任何已发布版本时才写入 version 1；一旦通过 Admin API 发布过新版本，数据库就是唯一事实源，重启不再校验文件与数据库一致，也不要求重建环境。启动文件中的版本号超过数据库已发布版本时拒绝启动，避免节点使用未发布配置。
 
 首次启动前执行 `cp .env.example .env`，然后只在本机 `.env` 中填写
 `DEEPSEEK_API_KEY`。生产 Runtime 使用 tRPC-Agent-Go 的 OpenAI-compatible Model
@@ -46,8 +46,8 @@ Admin API 与 Gateway 共用 HTTP 端口，所有 `/v1/tenants/{tenant_id}/confi
 企业微信回调绑定、Runtime 快照和出站 Delivery Sender 都从控制面数据库解析。新请求
 立即使用新版本 Bundle，处理中的请求和它产生的 Outbox 回复继续使用入口钉住的旧版本，
 旧 Bundle 在引用归零后被 drain 和 Close；disabled 租户、App 或 Binding 从下一个请求起
-被拒绝。新版本 Bundle 初始化失败时，该节点继续使用上一份成功激活的 Bundle，并在后续
-请求中重试初始化。
+被拒绝。新版本 Bundle 初始化失败时，钉住该版本的请求进入 Inbox 重试；旧 Bundle 只继续
+服务原本钉住旧版本的请求，禁止新版本请求静默回退到旧模型、工具或配置。
 
 ## 配置和密钥
 
@@ -78,22 +78,45 @@ Prometheus 位于 `http://127.0.0.1:9090`，Grafana 位于 `http://127.0.0.1:300
 
 Kubernetes 基线已把 Gateway 与 Runner Worker 分开扩容：Gateway 挂载 Channel/Admin HTTP，Worker 只消费 Redis Stream。Outbox Delivery、Storage migration Worker 和审计 retention 当前仍随 Worker 运行，尚未成为独立角色。PostgreSQL 与 Redis 使用托管高可用集群。migration schema 仍作为单独 Job 执行；迁移在事务内获取 PostgreSQL advisory lock，业务 Pod 不负责建表。Session 和 Memory 不保存在 Worker 本地，因此不要求 sticky session。
 
-当前 Compose 仍把 Gateway 与 Worker 合并在一个进程，但生产路径已经使用 Redis Streams
-consumer group，不再依赖进程内 dispatcher。每个节点同时从 PostgreSQL 竞争捞取到期 retry
+默认 Compose 保留 Gateway 与 Worker 合并的 `all` 兼容进程；PR20 `multinode` profile 使用
+独立 `gateway`、`worker-a`、`worker-b`，共享同一 PostgreSQL、Redis 和现有命名卷。Gateway
+不构造 Runner，Worker 不暴露回调端口。生产路径使用 Redis Streams consumer group，
+不依赖进程内 dispatcher 或 sticky session。每个 Worker 从 PostgreSQL 竞争捞取到期 retry
 和 lease 已过期的 Inbox；进程在 ACK 后任意位置崩溃，其他节点都能生成新 claim 并重新投递。
 claim 使用 `SKIP LOCKED`，同 session 按 `inbox_seq` 提交，超过最大尝试次数进入 DLQ；旧 token
 在调用模型前或写入时被拒绝。
 
-企业微信 Outbox 已装配 PostgreSQL 多节点 claim、租约、重试、DLQ、结果不确定隔离和
-Redis 跨节点限流。Compose 仍使用 `all` 合并模式；Kubernetes 中 Delivery 随 Worker 运行。
+企业微信与飞书 Outbox 已装配 PostgreSQL 多节点 claim、租约、重试、DLQ、结果不确定隔离和
+Redis 跨节点限流。默认 Compose 使用 `all`；多节点 profile 和 Kubernetes 中 Delivery 随 Worker 运行。
 独立 Delivery Deployment 需要扩展新的受约束角色和专属探针，当前尚未实现。
 
 跨节点请求状态、取消意图、预算、人工审批和节点心跳均保存在共享后端；取消命令另用 Redis
 Pub/Sub 做低延迟通知。PR17 已提供受认证、租户隔离并带审计的 `uncertain` / DLQ Admin
 运维 API，操作流程见[消息故障恢复](message-recovery.md)；Web 运维页面仍未实现。
-PR18 已实现按租户动态 Runner 并发配额，PR19 已拆分 Gateway/Worker；尚未生产化的部分包括
-Delivery/maintenance 独立角色和基于队列自定义指标的自动扩缩容控制器。真实企业微信账号、
-公网 HTTPS 回调和平台 IP 白名单仍需部署方配置。
+PR18 已实现按租户动态 Runner 并发配额，PR19 已拆分 Gateway/Worker，PR20 已加入 Compose
+多节点验收。企业微信与飞书真实 E2E 均已人工通过；新环境仍需部署方配置真实账号、公网
+HTTPS 回调和平台网络策略。尚未生产化的部分包括 Delivery/maintenance 独立角色和基于队列
+自定义指标的自动扩缩容控制器。
+
+## PR20 多节点 Compose 验收
+
+必须复用既有项目名以复用命名卷；下面的命令只创建或更新明确服务，不执行 `down -v`：
+
+```bash
+export TRPC_AGENT_COMPOSE_PROJECT=trpc-agent-service-pr14-check
+docker compose -p "$TRPC_AGENT_COMPOSE_PROJECT" --profile multinode \
+  up -d --build gateway worker-a worker-b
+./scripts/pr20_multinode_acceptance.sh
+```
+
+脚本默认只读。需要跑独立测试 tenant 的 PostgreSQL/Redis 集成检查时显式设置
+`TRPC_AGENT_ACCEPTANCE_RUN_INTEGRATION=1`；只做定点 Worker 重启与持久性检查可设置
+`TRPC_AGENT_ACCEPTANCE_RESTART_WORKER=1`。需要产生模型成本的合成消息、双 Worker 分布和
+定点重启检查时，再提供测试 tenant/binding/token 并设置
+`TRPC_AGENT_ACCEPTANCE_RUN_MESSAGES=1`。若同一项目仍运行旧 `service --role all`，主动故障验收
+还需设置 `TRPC_AGENT_ACCEPTANCE_ISOLATE_TOPOLOGY=1`；脚本会临时停止该明确服务并在退出时恢复。
+除 `service` 和 `worker-a` 外不会停止其他容器，更不会停止数据库、清空表或删除卷。证据记录
+使用[脱敏报告模板](production-acceptance-report.md)。
 
 共享后端集成测试不需要暴露 PostgreSQL/Redis 到宿主机：
 

@@ -12,10 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/dispatcher"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	servicemetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/policy"
 	serviceruntime "github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
@@ -260,6 +262,43 @@ func TestTwoTenantTwoWorkerEndToEndToolMemoryOutboxAndTrace(t *testing.T) {
 		}
 	}
 	t.Fatalf("no trace covered the full callback-to-outbox chain: %+v", byTrace)
+}
+
+func TestLaterSessionTurnDoesNotBuildOrCallRunner(t *testing.T) {
+	file := testConfig(t)
+	inbox := idempotency.NewMemoryStore()
+	writes := sessioncoord.NewMemoryWriteStore()
+	coordinator, _ := sessioncoord.NewCoordinator(writes)
+	message := func(id string) gateway.InboundMessage {
+		return gateway.InboundMessage{TenantID: "tenant-a", AppID: "assistant", BindingID: "binding-a", ExternalMessageID: id, UserID: "http/binding-a/user", SessionID: "dm/binding-a/user", Text: "synthetic", ConfigVersion: 1, ReceivedAt: time.Now()}
+	}
+	if _, won, err := inbox.Claim(context.Background(), message("first"), "gateway", time.Minute); err != nil || !won {
+		t.Fatalf("first claim won=%v err=%v", won, err)
+	}
+	second, won, err := inbox.Claim(context.Background(), message("second"), "gateway", time.Minute)
+	if err != nil || !won || second.InboxSeq != 2 {
+		t.Fatalf("second claim=%+v won=%v err=%v", second, won, err)
+	}
+	var builds atomic.Int32
+	factory := worker.TestRuntimeFactory(writes)
+	manager, _ := serviceruntime.NewManager(func(snapshot config.RuntimeSnapshot) (serviceruntime.Runtime, error) {
+		builds.Add(1)
+		return factory(snapshot)
+	})
+	defer manager.Close(context.Background())
+	telemetry, _ := servicemetrics.New("session-order-test")
+	processor := &worker.Processor{
+		WorkerID: "worker-b", Inbox: inbox, Coordinator: coordinator, Writes: writes,
+		Runtimes: manager, Snapshots: gateway.FileSnapshotResolver{File: file},
+		Policy: &policy.Engine{Identity: policy.AuthenticatedIdentityAuthorizer{}},
+		Audit:  audit.NewMemoryStore(servicelog.NewRedactor(nil, nil)), Telemetry: telemetry,
+	}
+	if err := processor.Process(context.Background(), second.RunRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if builds.Load() != 0 {
+		t.Fatalf("out-of-order request built Runner bundle %d times", builds.Load())
+	}
 }
 
 func testConfig(t *testing.T) *config.File {

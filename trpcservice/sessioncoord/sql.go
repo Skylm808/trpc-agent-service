@@ -40,6 +40,52 @@ func (store *SQLWriteStore) ValidateFence(ctx context.Context, key gateway.Sessi
 	return err
 }
 
+// WithFence holds a row lock on the session ownership record while an
+// upstream Session service performs one mutation on its own connection.
+// AdvanceFence updates the same row, so a takeover either happens before this
+// validation (and is rejected) or after the mutation has finished.
+func (store *SQLWriteStore) WithFence(ctx context.Context, key gateway.SessionKey, fence uint64, operation func(context.Context) error) error {
+	if err := store.valid(key); err != nil {
+		return err
+	}
+	if operation == nil {
+		return errors.New("sessioncoord: fenced operation is required")
+	}
+	tx, err := store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var current uint64
+	if err := tx.QueryRowContext(ctx, `SELECT last_fence FROM session_heads WHERE tenant_id=$1 AND app_id=$2 AND user_id=$3 AND session_id=$4 FOR UPDATE`, key.TenantID, key.AppID, key.UserID, key.SessionID).Scan(&current); err != nil {
+		return err
+	}
+	if current != fence {
+		return ErrStaleFence
+	}
+	if err := operation(ctx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (store *SQLWriteStore) ValidateTurn(ctx context.Context, key gateway.SessionKey, inboxSeq uint64) error {
+	if err := store.valid(key); err != nil {
+		return err
+	}
+	if inboxSeq == 0 {
+		return errors.New("sessioncoord: inbox sequence is required")
+	}
+	var last uint64
+	if err := store.DB.QueryRowContext(ctx, `SELECT last_event_seq FROM session_heads WHERE tenant_id=$1 AND app_id=$2 AND user_id=$3 AND session_id=$4`, key.TenantID, key.AppID, key.UserID, key.SessionID).Scan(&last); err != nil {
+		return err
+	}
+	if inboxSeq != last+1 {
+		return ErrOutOfOrder
+	}
+	return nil
+}
+
 func (store *SQLWriteStore) CommitTurn(ctx context.Context, write TurnWrite) (uint64, error) {
 	if err := store.valid(write.Key); err != nil {
 		return 0, err

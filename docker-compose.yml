@@ -1,3 +1,30 @@
+x-agent-environment: &agent-environment
+  TRPC_AGENT_POSTGRES_DSN: postgres://trpc_agent:${POSTGRES_PASSWORD:-local-postgres-password}@postgres:5432/trpc_agent?sslmode=disable
+  TRPC_AGENT_REDIS_URL: redis://redis:6379/0
+  TRPC_AGENT_GATEWAY_TOKEN_DEMO_HTTP: ${TRPC_AGENT_GATEWAY_TOKEN_DEMO_HTTP:-local-secret}
+  TRPC_AGENT_ADMIN_TOKENS: ${TRPC_AGENT_ADMIN_TOKENS:-}
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}
+  WECOM_CALLBACK_TOKEN: ${WECOM_CALLBACK_TOKEN:-}
+  WECOM_APP_SECRET: ${WECOM_APP_SECRET:-}
+  WECOM_ENCODING_AES_KEY: ${WECOM_ENCODING_AES_KEY:-}
+  FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
+  FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+  FEISHU_ENCRYPT_KEY: ${FEISHU_ENCRYPT_KEY:-}
+  EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+  QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+  S3_CREDENTIAL_JSON: ${S3_CREDENTIAL_JSON:-}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+  TRPC_AGENT_TRACE_SAMPLE_RATIO: ${TRPC_AGENT_TRACE_SAMPLE_RATIO:-0.1}
+
+x-agent-dependencies: &agent-dependencies
+  migrate:
+    condition: service_completed_successfully
+  redis:
+    condition: service_healthy
+  otel-collector:
+    condition: service_started
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -76,31 +103,8 @@ services:
   service:
     build: .
     command: ["--config", "/etc/trpc-agent/config.yaml", "--listen", "0.0.0.0:8080", "--role", "all"]
-    environment:
-      TRPC_AGENT_POSTGRES_DSN: postgres://trpc_agent:${POSTGRES_PASSWORD:-local-postgres-password}@postgres:5432/trpc_agent?sslmode=disable
-      TRPC_AGENT_REDIS_URL: redis://redis:6379/0
-      TRPC_AGENT_GATEWAY_TOKEN_DEMO_HTTP: ${TRPC_AGENT_GATEWAY_TOKEN_DEMO_HTTP:-local-secret}
-      TRPC_AGENT_ADMIN_TOKENS: ${TRPC_AGENT_ADMIN_TOKENS:-}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}
-      WECOM_CALLBACK_TOKEN: ${WECOM_CALLBACK_TOKEN:-}
-      WECOM_APP_SECRET: ${WECOM_APP_SECRET:-}
-      WECOM_ENCODING_AES_KEY: ${WECOM_ENCODING_AES_KEY:-}
-      FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
-      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
-      FEISHU_ENCRYPT_KEY: ${FEISHU_ENCRYPT_KEY:-}
-      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
-      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
-      S3_CREDENTIAL_JSON: ${S3_CREDENTIAL_JSON:-}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      TRPC_AGENT_TRACE_SAMPLE_RATIO: ${TRPC_AGENT_TRACE_SAMPLE_RATIO:-0.1}
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-      otel-collector:
-        condition: service_started
+    environment: *agent-environment
+    depends_on: *agent-dependencies
     ports:
       - "8080:8080"
     volumes:
@@ -110,6 +114,52 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    restart: unless-stopped
+
+  # PR20 acceptance topology. It is opt-in so the legacy `service` all-mode
+  # remains unchanged. All three processes share the same PostgreSQL/Redis
+  # services and named volumes; no host affinity or sticky session is used.
+  gateway:
+    profiles: ["multinode"]
+    build: .
+    command: ["--config", "/etc/trpc-agent/config.yaml", "--listen", "0.0.0.0:8080", "--role", "gateway"]
+    environment:
+      <<: *agent-environment
+      TRPC_AGENT_NODE_ID: gateway-1
+    depends_on: *agent-dependencies
+    ports:
+      - "127.0.0.1:${TRPC_AGENT_MULTINODE_PORT:-18080}:8080"
+    volumes:
+      - ${TRPC_CONFIG_FILE:-./configs/example.yaml}:/etc/trpc-agent/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  worker-a:
+    profiles: ["multinode"]
+    build: .
+    command: ["--config", "/etc/trpc-agent/config.yaml", "--role", "worker"]
+    environment:
+      <<: *agent-environment
+      TRPC_AGENT_NODE_ID: worker-a
+    depends_on: *agent-dependencies
+    volumes:
+      - ${TRPC_CONFIG_FILE:-./configs/example.yaml}:/etc/trpc-agent/config.yaml:ro
+    restart: unless-stopped
+
+  worker-b:
+    profiles: ["multinode"]
+    build: .
+    command: ["--config", "/etc/trpc-agent/config.yaml", "--role", "worker"]
+    environment:
+      <<: *agent-environment
+      TRPC_AGENT_NODE_ID: worker-b
+    depends_on: *agent-dependencies
+    volumes:
+      - ${TRPC_CONFIG_FILE:-./configs/example.yaml}:/etc/trpc-agent/config.yaml:ro
     restart: unless-stopped
 
   integration-test:
@@ -123,9 +173,15 @@ services:
       - "./trpcservice/cluster"
       - "./trpcservice/audit"
       - "./cmd/trpc-service"
+      - "./trpcservice/channels/wecom"
+      - "./trpcservice/channels/feishu"
+      - "./trpcservice/gateway/openclaw"
       - "./trpcservice/idempotency"
       - "./trpcservice/delivery"
       - "./trpcservice/worker"
+      - "./trpcservice/sessioncoord"
+      - "./trpcservice/runtime"
+      - "./trpcservice/tenant"
       - "./trpcservice/repository"
       - "./trpcservice/storagemigration"
     environment:

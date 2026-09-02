@@ -195,7 +195,7 @@ command bus 只做低延迟通知。预算和工具审批同样使用 PostgreSQL
 | 回调处理 | 快速完成验签、Inbox claim 并返回 `200 success` | URL 验证与挑战应答后快速返回 2xx，执行与回复仍走异步 Worker/Outbox |
 | 主动回复 | 获取 `access_token` 后调用 `message/send` 或 `appchat/send` | 使用 tenant_access_token 调用 `im/v1/messages`，支持文本与交互式卡片 |
 | 平台限制 | 文本按 UTF-8 字节分片，处理成员频率限制和 token 刷新 | 处理消息长度、频控与 token 缓存刷新，群聊需要 @机器人才触发事件 |
-| 当前状态 | Adapter、Sender、协议测试和生产组合器已完成，真实链路已联调通过 | Adapter/Sender/协议测试已完成（PR10），待真实飞书账号联调 |
+| 当前状态 | Adapter、Sender、自动化协议测试和人工真实 E2E 均已通过 | Adapter、Sender、自动化协议测试和人工真实 E2E 均已通过 |
 
 企业微信的图片、文件和未识别语音转成元数据占位文本，不自动下载 `media_id`。撤回等事件只确认接收，不触发 Runner；未来若同步撤回状态，应追加 tombstone event，已发生的 Tool 副作用不能自动撤销。实现细节见[企业微信 Channel Adapter](wecom.md)。飞书 Adapter 与 Sender 已由 PR10 交付，与企业微信共用同一主链路；细节见[飞书 Channel Adapter](feishu.md)。
 
@@ -280,7 +280,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 
 ## 8. 部署方案
 
-最小可运行环境使用根目录的 Docker Compose：一个 Gateway/Worker 合并进程、PostgreSQL、Redis 和一次性 migration。企业微信通过公网反向代理进入 Adapter；模型、IM 和数据库密钥从挂载的 secret 文件读取。这个形态用来做协议联调和故障回放，不承诺单点容灾。启动与验证命令见 [PostgreSQL + Redis 部署](deployment.md)。
+最小可运行环境使用根目录的 Docker Compose：默认保留一个 Gateway/Worker 合并进程；PR20 `multinode` profile 提供一个 Gateway、两个 Worker、共享 PostgreSQL/Redis 和一次性 migration。两个角色均无本地会话状态，不依赖 sticky session。模型、IM 和数据库密钥从外部环境或挂载的 secret 文件读取。启动与验证命令见 [PostgreSQL + Redis 部署](deployment.md)。
 
 生产可用 `--role gateway` 和 `--role worker` 拆分入口与 Runner：Gateway 只写 Redis Stream，不构造 Runtime 或启动消费者；Worker 不监听业务 HTTP 端口，负责消费、Inbox recovery、Runner、Outbox 和当前后台维护任务。Kubernetes 基线为两个角色提供独立 Deployment、PDB 和 HPA。`--role all` 只用于 Compose 兼容和小规模环境。Outbox 与 maintenance 独立角色、自定义队列指标 HPA 仍待后续增量。PostgreSQL、Redis、对象存储和向量库使用托管或高可用集群。Pod 不挂载会话本地盘，也不依赖 sticky session。配置发布先进入少量租户，指标越过阈值即停止灰度并发布回滚版本。数据库迁移由独立 Job 串行执行，不能放在每个应用 Pod 启动流程中并发运行。
 
@@ -317,7 +317,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | --- | --- | --- | --- |
 | T0：方案与最小生产链路 | 2026 年 8 月 27 日 | 本文、两张图、数据模型、幂等/迁移策略、风险清单、Compose、PostgreSQL/Redis、真实模型 Provider | 已完成 |
 | T1：企业微信真实联调 | T0 后 1–2 个工作日 | 测试企业、HTTPS 回调、IP 白名单、真实收发、失败回放 | 已完成并跑通真实链路 |
-| T2a：飞书通道（PR10） | 已完成 | 飞书 Adapter/Sender、事件验签解密、身份映射、动态配置接入 | 代码已完成，待真实飞书账号联调 |
+| T2a：飞书通道（PR10） | 已完成 | 飞书 Adapter/Sender、事件验签解密、身份映射、动态配置接入 | 自动化测试与人工真实 E2E 均已通过 |
 | T2b：跨节点实时调度（PR11） | 已完成 | Redis Streams、共享 command/event bus、跨节点 cancel/status、预算/审批和节点心跳 | 已完成并通过 PostgreSQL/Redis 双节点集成测试 |
 | T2c：存储路由与迁移（PR12） | 已完成 | 多 PostgreSQL 域路由、双写、checkpoint backfill、校验和安全 cutover | 已完成并通过 PostgreSQL 集成测试 |
 | T3a：治理与观测（PR14） | 已完成 | OTLP/Collector、Prometheus/Grafana、审计保留 | 已完成，生产 trace 后端由部署方接入 |
@@ -326,6 +326,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | T3d：消息恢复控制面（PR17） | 已完成 | 租户级 DLQ 查询/重放、uncertain 人工裁决、状态 CAS 与审计 | 已完成并通过 PostgreSQL 并发集成测试 |
 | T3e：租户并发配额（PR18） | 已完成 | Redis 跨节点 Runner semaphore、动态配置、续租与崩溃恢复 | 已完成并通过真实 Redis 双节点测试 |
 | T4a：Gateway/Worker 角色拆分（PR19） | 已完成 | producer-only Gateway、consumer-only Worker、独立 Deployment/PDB/HPA | Outbox/maintenance 暂随 Worker |
-| T4b：运维增强 | 待排期 | Outbox/maintenance 独立角色、自定义指标 HPA | 未完成 |
+| T4b：双 IM 多节点验收（PR20） | 已完成 | Compose Gateway + 双 Worker、故障接管、fencing、持久性与双 IM 隔离 | 自动化与可复现 Compose 验收已通过 |
+| T4c：运维增强 | 待排期 | Outbox/maintenance 独立角色、自定义指标 HPA | 未完成 |
 
 时间从依赖就绪后计算，不含企业微信权限、公网域名、TLS 证书或平台审核等待。

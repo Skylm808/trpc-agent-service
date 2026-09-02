@@ -74,6 +74,7 @@ func parseProcessRole(value string) (processRole, error) {
 }
 
 type durableComponent struct {
+	runCtx        context.Context
 	inner         trpcservice.Component
 	delivery      *delivery.Worker
 	db            *sql.DB
@@ -87,14 +88,18 @@ type durableComponent struct {
 }
 
 func (component *durableComponent) Start(ctx context.Context) error {
-	if err := component.inner.Start(ctx); err != nil {
+	startCtx := component.runCtx
+	if startCtx == nil {
+		startCtx = ctx
+	}
+	if err := component.inner.Start(startCtx); err != nil {
 		if component.nodes != nil {
 			_ = component.nodes.Close(context.Background())
 		}
 		return err
 	}
 	if component.delivery != nil {
-		if err := component.delivery.Start(ctx); err != nil {
+		if err := component.delivery.Start(startCtx); err != nil {
 			var nodeErr error
 			if component.nodes != nil {
 				nodeErr = component.nodes.Close(context.Background())
@@ -103,7 +108,7 @@ func (component *durableComponent) Start(ctx context.Context) error {
 		}
 	}
 	if component.migrations != nil {
-		if err := component.migrations.Start(ctx); err != nil {
+		if err := component.migrations.Start(startCtx); err != nil {
 			if component.delivery != nil {
 				_ = component.delivery.Close(context.Background())
 			}
@@ -115,7 +120,7 @@ func (component *durableComponent) Start(ctx context.Context) error {
 		}
 	}
 	if component.retention != nil {
-		if err := component.retention.Start(ctx); err != nil {
+		if err := component.retention.Start(startCtx); err != nil {
 			if component.migrations != nil {
 				_ = component.migrations.Close(context.Background())
 			}
@@ -177,6 +182,10 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	if err := validatePersistentProfiles(file); err != nil {
 		return nil, err
 	}
+	// The signal context tells App when to begin shutdown. Background consumers
+	// use a component-owned lifetime instead, so Close can first publish drain,
+	// stop new intake, and wait for in-flight work before canceling it.
+	runCtx := context.WithoutCancel(ctx)
 	postgresDSN := os.Getenv(postgresDSNEnv)
 	redisURL := os.Getenv(redisURLEnv)
 	connectCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -245,11 +254,11 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 		return nil, err
 	}
 	factory := worker.RuntimeFactoryWithServicesAndTools(writes, func(snapshot config.RuntimeSnapshot) (*storage.Services, error) {
-		routeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		routeCtx, cancel := context.WithTimeout(runCtx, 20*time.Second)
 		defer cancel()
 		return storageRouter.ServicesForApp(routeCtx, snapshot.TenantID(), snapshot.App())
 	}, func(snapshot config.RuntimeSnapshot) (*servicetool.Catalog, error) {
-		toolCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		toolCtx, cancel := context.WithTimeout(runCtx, 20*time.Second)
 		defer cancel()
 		return toolRegistry.Build(toolCtx, snapshot.App())
 	})
@@ -282,7 +291,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	}()
 	var nodes *cluster.NodeRegistry
 	if role != roleGateway {
-		nodes, err = cluster.NewNodeRegistry(ctx, db, workerID, 5*time.Second)
+		nodes, err = cluster.NewNodeRegistry(runCtx, db, workerID, 5*time.Second)
 		if err != nil {
 			return nil, fmt.Errorf("register worker node: %w", err)
 		}
@@ -326,7 +335,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	default:
 		decorators = productionDecorators(db, store, published, redactor, &storagemigration.SQLStore{DB: db}, storageRouter, toolRegistry)
 	}
-	component, err := openclaw.NewComponentForMode(ctx, address, file, routes, dependencies, mode, decorators...)
+	component, err := openclaw.NewComponentForMode(runCtx, address, file, routes, dependencies, mode, decorators...)
 	if err != nil {
 		_ = nodes.Close(context.Background())
 		return nil, err
@@ -382,7 +391,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	closeStorageRouter = false
 	closeTelemetry = false
 	closeObserver = false
-	return &durableComponent{inner: component, delivery: outboxWorker, db: db, redis: redisBackend, nodes: nodes, migrations: migrationWorker, storageRouter: storageRouter, retention: retentionWorker, telemetry: telemetryProviders, sqlObserver: sqlObserver}, nil
+	return &durableComponent{runCtx: runCtx, inner: component, delivery: outboxWorker, db: db, redis: redisBackend, nodes: nodes, migrations: migrationWorker, storageRouter: storageRouter, retention: retentionWorker, telemetry: telemetryProviders, sqlObserver: sqlObserver}, nil
 }
 
 type deliverySenderKey struct {
@@ -666,40 +675,48 @@ func expectedCredential(published *config.PublishedCache) openclaw.ExpectedCrede
 	}
 }
 
-// wecomBindingProvider resolves enabled WeCom bindings from the control plane
-// at callback time, so publishes, disables, and rollbacks take effect without
-// interrupting in-flight messages.
+// wecomBindingProvider returns every tenant-scoped candidate for one URL
+// binding ID. The adapter verifies the callback against each server-owned key
+// and requires exactly one match, mirroring Feishu's fail-closed isolation.
 func wecomBindingProvider(db *sql.DB, published *config.PublishedCache) wecom.BindingProvider {
-	return func(bindingID string) (wecom.Binding, bool) {
+	return func(bindingID string) []wecom.Binding {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		var tenantID, appID string
-		var version tenant.ConfigVersion
-		err := db.QueryRowContext(ctx, bindingLookupQL+" LIMIT 1", bindingID, tenant.ChannelTypeWeCom).Scan(&tenantID, &appID, &version)
+		rows, err := db.QueryContext(ctx, bindingLookupQL, bindingID, tenant.ChannelTypeWeCom)
 		if err != nil {
-			return wecom.Binding{}, false
+			return nil
 		}
-		binding, err := publishedBinding(published, ctx, tenantID, bindingID, version)
-		if err != nil || binding.Type != tenant.ChannelTypeWeCom {
-			return wecom.Binding{}, false
+		defer rows.Close()
+		var candidates []wecom.Binding
+		for rows.Next() {
+			var tenantID, appID string
+			var version tenant.ConfigVersion
+			if err := rows.Scan(&tenantID, &appID, &version); err != nil {
+				return nil
+			}
+			binding, err := publishedBinding(published, ctx, tenantID, bindingID, version)
+			if err != nil || binding.Type != tenant.ChannelTypeWeCom {
+				continue
+			}
+			token, err := secret.ResolveLocal(binding.Token)
+			if err != nil {
+				continue
+			}
+			aesKey, err := secret.ResolveLocal(binding.EncryptionKey)
+			if err != nil {
+				continue
+			}
+			crypt, err := wecom.NewCrypt(token, aesKey, binding.ProviderAccountID)
+			if err != nil {
+				continue
+			}
+			candidates = append(candidates, wecom.Binding{
+				TenantID: tenantID, AppID: appID, BindingID: bindingID,
+				CorpID: binding.ProviderAccountID, AgentID: binding.ProviderAppID,
+				ConfigVersion: version, Crypt: crypt,
+			})
 		}
-		token, err := secret.ResolveLocal(binding.Token)
-		if err != nil {
-			return wecom.Binding{}, false
-		}
-		aesKey, err := secret.ResolveLocal(binding.EncryptionKey)
-		if err != nil {
-			return wecom.Binding{}, false
-		}
-		crypt, err := wecom.NewCrypt(token, aesKey, binding.ProviderAccountID)
-		if err != nil {
-			return wecom.Binding{}, false
-		}
-		return wecom.Binding{
-			TenantID: tenantID, AppID: appID, BindingID: bindingID,
-			CorpID: binding.ProviderAccountID, AgentID: binding.ProviderAppID,
-			ConfigVersion: version, Crypt: crypt,
-		}, true
+		return candidates
 	}
 }
 

@@ -109,3 +109,42 @@ func TestWorkQueueConsumerGroupRunsEachRequestOnceAcrossNodes(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkQueueCloseDrainsActiveHandlerBeforeCancel(t *testing.T) {
+	backend := newQueueBackend()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	canceled := make(chan struct{}, 1)
+	queue, err := NewWorkQueue(context.Background(), backend, func(ctx context.Context, _ gateway.RunRequest) error {
+		close(started)
+		select {
+		case <-ctx.Done():
+			canceled <- struct{}{}
+			return ctx.Err()
+		case <-release:
+			return nil
+		}
+	}, WorkQueueConfig{NodeID: "drain-node", Concurrency: 1, ReadBlock: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Submit(gateway.RunRequest{InboxID: "in-flight", ClaimToken: "claim"}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	closeDone := make(chan error, 1)
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go func() { closeDone <- queue.Close(closeCtx) }()
+	select {
+	case <-canceled:
+		t.Fatal("graceful close canceled an active handler before the drain deadline")
+	case err := <-closeDone:
+		t.Fatalf("close returned before active handler completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+}

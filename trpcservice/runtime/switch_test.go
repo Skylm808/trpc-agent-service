@@ -9,8 +9,8 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 )
 
-// A failed v2 build must not disturb the serving v1 Bundle: new work keeps
-// using the last valid configuration and nothing is retired.
+// A failed v2 build must not disturb the cached v1 Bundle, but a request pinned
+// to v2 must fail rather than silently execute with v1 behavior.
 func TestManagerFailedSwitchKeepsPreviousBundle(t *testing.T) {
 	var failBuild atomic.Bool
 	manager, err := NewManager(func(snapshot config.RuntimeSnapshot) (Runtime, error) {
@@ -30,14 +30,9 @@ func TestManagerFailedSwitchKeepsPreviousBundle(t *testing.T) {
 	lease.Release()
 
 	failBuild.Store(true)
-	fallback, err := manager.Acquire(runtimeSnapshot(t, "tenant-a", 2))
-	if err != nil {
-		t.Fatalf("a failed v2 build must fall back to v1: %v", err)
+	if fallback, err := manager.Acquire(runtimeSnapshot(t, "tenant-a", 2)); err == nil || fallback != nil {
+		t.Fatalf("failed v2 build must reject the pinned request: lease=%v err=%v", fallback, err)
 	}
-	if fallback.Runtime != lease.Runtime {
-		t.Fatal("failed v2 switch did not return the last valid v1 runtime")
-	}
-	fallback.Release()
 	// v1 is still the head and the failed v2 pin did not poison the manager.
 	again, err := manager.Acquire(v1)
 	if err != nil {

@@ -52,10 +52,27 @@ type TurnWrite struct {
 // WriteStore is the platform persistence contract required for multi-node safety.
 type WriteStore interface {
 	FenceAdvancer
+	FenceValidator
+	ValidateTurn(context.Context, gateway.SessionKey, uint64) error
 	CommitTurn(context.Context, TurnWrite) (uint64, error)
 	PublishSummary(context.Context, gateway.SessionKey, uint64, Summary) error
 	UpsertMemory(context.Context, gateway.SessionKey, uint64, Memory) error
 	PublishOutbox(context.Context, gateway.SessionKey, uint64, gateway.OutboundMessage) error
+}
+
+// WithFence keeps takeover serialized with one external Session mutation.
+// Implementations must hold the same ownership boundary used by AdvanceFence
+// until operation returns, closing the validate-then-write race across nodes.
+func (store *MemoryWriteStore) WithFence(ctx context.Context, key gateway.SessionKey, fence uint64, operation func(context.Context) error) error {
+	if operation == nil {
+		return errors.New("sessioncoord: fenced operation is required")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.data(key).head.LastFence != fence {
+		return ErrStaleFence
+	}
+	return operation(ctx)
 }
 
 // ValidateFence checks exact current ownership without changing state.
@@ -64,6 +81,20 @@ func (store *MemoryWriteStore) ValidateFence(_ context.Context, key gateway.Sess
 	defer store.mu.Unlock()
 	if store.data(key).head.LastFence != fence {
 		return ErrStaleFence
+	}
+	return nil
+}
+
+// ValidateTurn prevents a later Inbox sequence from reaching Runner/Tool
+// side effects before the prior turn has committed.
+func (store *MemoryWriteStore) ValidateTurn(_ context.Context, key gateway.SessionKey, inboxSeq uint64) error {
+	if inboxSeq == 0 {
+		return errors.New("sessioncoord: inbox sequence is required")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if inboxSeq != store.data(key).head.LastEventSeq+1 {
+		return ErrOutOfOrder
 	}
 	return nil
 }
