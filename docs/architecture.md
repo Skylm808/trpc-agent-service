@@ -259,7 +259,7 @@ Session 的事实来源选择 PostgreSQL，Redis 负责 lease、fencing 和热�
 
 Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行时再次应用白名单、危险工具审批和权限校验，最终回复经过脱敏后才能写 Outbox。审计记录 tenant、channel、user、session、agent、tool、decision、latency、error type、cost 和 trace ID。审计后端超时时，当前策略是业务 fail-open、产生告警；涉及强监管的租户可以配置为 fail-closed，但必须单独评估可用性影响。
 
-监控至少覆盖请求量与错误率、模型首 token/总耗时、Tool 调用耗时、IM 回调与投递成功率、token 用量、租户成本、Session/Memory 后端延迟、Inbox/Outbox/DLQ 积压和 stale fence 拒绝数。Metrics 只使用 tenant、app、channel、operation、status 等受控标签；user、session、message 和 request ID 只进入受权限保护的 trace/audit，避免时序库基数失控。指标与审计字段见[治理、审计与可观测性](governance.md)。
+监控至少覆盖请求量与错误率、模型首 token/总耗时、Tool 调用耗时、IM 回调与投递成功率、token 用量、租户成本、Session/Memory 后端延迟、Inbox/Outbox/DLQ 积压和 stale fence 拒绝数。Metrics 只使用 tenant、app、channel、operation、status 等受控标签；user、session 和 message 不进入遥测，request/correlation ID 在 trace 中只记录不可逆短 hash，避免时序库基数失控和调用者借标识注入正文或 Secret。原始关联仅保留在受权限保护、按租户隔离的业务表和 audit 中。指标与审计字段见[治理、审计与可观测性](governance.md)。
 
 节点收到取消或超时时调用 `ManagedRunner.Cancel(request_id)`，然后在有界时间内排空事件 channel。Tool 必须接受 `context.Context`，外部副作用使用业务幂等键，不能靠 goroutine 脱离请求继续执行。模型超时、数据库短暂不可用和 Outbox 投递失败进入分类重试；不可重试错误写入 DLQ，并保留原始 request/trace 关联。
 
@@ -320,13 +320,14 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | T2a：飞书通道（PR10） | 已完成 | 飞书 Adapter/Sender、事件验签解密、身份映射、动态配置接入 | 自动化测试与人工真实 E2E 均已通过 |
 | T2b：跨节点实时调度（PR11） | 已完成 | Redis Streams、共享 command/event bus、跨节点 cancel/status、预算/审批和节点心跳 | 已完成并通过 PostgreSQL/Redis 双节点集成测试 |
 | T2c：存储路由与迁移（PR12） | 已完成 | 多 PostgreSQL 域路由、双写、checkpoint backfill、校验和安全 cutover | 已完成并通过 PostgreSQL 集成测试 |
-| T3a：治理与观测（PR14） | 已完成 | OTLP/Collector、Prometheus/Grafana、审计保留 | 已完成，生产 trace 后端由部署方接入 |
+| T3a：治理与观测（PR14） | 已完成 | OTLP/Collector、Prometheus/Grafana、审计保留 | 已完成 |
 | T3b：生产部署与验收（PR15） | 已完成 | Kubernetes 合并节点 manifest、readiness、容量工具、故障演练和验收门禁 | 代码与离线校验已完成，真实集群演练待部署方执行 |
 | T3c：MCP 与业务工具（PR16） | 已完成 | 租户 MCP Registry、SecretRef、固定 HTTPS JSON 工具、发布预检和 Bundle 生命周期 | 已完成并通过真实 Streamable HTTP MCP 协议测试 |
 | T3d：消息恢复控制面（PR17） | 已完成 | 租户级 DLQ 查询/重放、uncertain 人工裁决、状态 CAS 与审计 | 已完成并通过 PostgreSQL 并发集成测试 |
 | T3e：租户并发配额（PR18） | 已完成 | Redis 跨节点 Runner semaphore、动态配置、续租与崩溃恢复 | 已完成并通过真实 Redis 双节点测试 |
 | T4a：Gateway/Worker 角色拆分（PR19） | 已完成 | producer-only Gateway、consumer-only Worker、独立 Deployment/PDB/HPA | Outbox/maintenance 暂随 Worker |
 | T4b：双 IM 多节点验收（PR20） | 已完成 | Compose Gateway + 双 Worker、故障接管、fencing、持久性与双 IM 隔离 | 自动化与可复现 Compose 验收已通过 |
-| T4c：运维增强 | 待排期 | Outbox/maintenance 独立角色、自定义指标 HPA | 未完成 |
+| T4c：持久化 Trace 与生产告警（PR21） | 已完成 | Tempo、Grafana Trace 数据源、跨 Outbox trace、错误率/DLQ/积压/Worker/数据库告警 | 自动化与可复现 Compose 验收已通过 |
+| T4d：运维增强 | 待排期 | Outbox/maintenance 独立角色、自定义指标 HPA | 未完成 |
 
 时间从依赖就绪后计算，不含企业微信权限、公网域名、TLS 证书或平台审核等待。

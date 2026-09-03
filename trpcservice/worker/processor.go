@@ -392,8 +392,8 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	}
 	derivedSpan.End()
 	processor.observeOperation(derivedCtx, request, "memory_summary", derivedStarted, nil)
-	outbound := gateway.OutboundMessage{TenantID: request.TenantID, AppID: request.AppID, BindingID: request.BindingID, ConfigVersion: request.ConfigVersion, OutboxID: "outbox:" + request.InboxID, DedupeKey: "reply:" + request.InboxID, UserID: request.UserID, SessionID: request.SessionID, ExternalUserID: request.ExternalUserID, ConversationID: request.ConversationID, Text: reply, TraceID: request.TraceID, SourceInboxID: request.InboxID, SourceEventID: eventID}
 	outboxCtx, outboxSpan := processor.Telemetry.Start(ctx, "outbox.write", processor.spanFields(request))
+	outbound := gateway.OutboundMessage{TenantID: request.TenantID, AppID: request.AppID, BindingID: request.BindingID, ConfigVersion: request.ConfigVersion, OutboxID: "outbox:" + request.InboxID, DedupeKey: "reply:" + request.InboxID, UserID: request.UserID, SessionID: request.SessionID, ExternalUserID: request.ExternalUserID, ConversationID: request.ConversationID, Text: reply, TraceID: request.TraceID, TraceContext: processor.Telemetry.Inject(outboxCtx), SourceInboxID: request.InboxID, SourceEventID: eventID}
 	outboxStarted := time.Now()
 	if err := processor.Writes.PublishOutbox(outboxCtx, request.Key(), lease.Token, outbound); err != nil {
 		outboxSpan.End()

@@ -125,6 +125,7 @@ func (worker *Worker) poll(ctx context.Context) {
 func (worker *Worker) deliver(parent context.Context, claim Claim) {
 	message := claim.Message
 	fields := servicemetrics.SpanFields{TenantID: message.TenantID, AppID: message.AppID, Channel: message.BindingID, RequestID: message.OutboxID, TraceID: message.TraceID}
+	parent = worker.telemetry.Extract(parent, message.TraceContext)
 	ctx, span := worker.telemetry.Start(parent, "outbox.deliver", fields)
 	defer span.End()
 	started := time.Now()

@@ -218,13 +218,16 @@ curl -H 'Authorization: Bearer local-secret' \
 - 配置 validate/publish 和启动 preflight 会验证 PGVector/Qdrant、S3 凭据与可达性；初始化或切换失败不会替换上一份有效 Bundle，错误不包含解析后的凭据。配置和操作说明见 [Knowledge/RAG 与 S3 Artifact](docs/knowledge.md)。
 - PR13 本身不交付 MCP、业务 Tool、复杂 PDF/OCR 文档流水线或 Knowledge 跨向量后端自动迁移；后续增量的状态以本节对应 PR 条目为准。
 
-**本 PR（PR14：持久化治理与可观测性）实现**：
+**PR14 + PR21（持久化治理、Trace 与生产告警）实现**：
 
 - 生产进程安装 OpenTelemetry SDK Provider，经 OTLP/gRPC 向 Collector 导出 trace 与 metrics；所有 HTTP/企业微信/飞书入口统一提取 `traceparent`，关闭时有界 flush。
 - Collector 使用内存保护和 batch pipeline，Prometheus 持久化 15 天指标，Grafana 自动 provision 数据源和租户请求、p95、Inbox/Outbox/DLQ、token/cost dashboard。
 - 新增模型首事件耗时、低基数队列深度、活跃 Worker、PostgreSQL 健康与延迟指标；request/user/session/message ID 不进入 metrics label。
 - 审计保留策略由后台 Worker 自动执行，多节点通过 PostgreSQL advisory lock 保证每轮只有一个节点清理；策略始终来自当前已发布配置。
-- Compose 的 trace 默认由 Collector `debug` exporter 接收，便于验证但不作为长期存储；生产需要把该 exporter 替换为 Tempo、Jaeger 或托管 OTLP 后端。完整说明见 [生产可观测性](docs/observability.md)。
+- Compose 的 trace 由 Collector 写入带独立命名卷和 7 天保留期的 Tempo；Grafana 自动配置
+  Tempo 数据源，Prometheus 加载错误率、DLQ、持续积压、无 Worker 和 PostgreSQL 异常告警。
+  `traceparent` 串起 Callback、Inbox、Worker、Model、Tool、Storage、Outbox 与实际 Sender，
+  且拒绝传播 caller-controlled baggage/tracestate。完整说明见 [生产可观测性](docs/observability.md)。
 
 **本 PR（PR15：Kubernetes、容量测试、故障演练与生产验收）实现**：
 
@@ -269,7 +272,17 @@ curl -H 'Authorization: Bearer local-secret' \
 - 回归覆盖 Runner 前的 session 顺序门禁、runtime Session fence 竞态、旧 token 提交拒绝、精确配置版本不回退，以及企业微信/飞书同外部标识和同名 binding 的 fail-closed 隔离。
 - 自动化测试与人工真实平台验收分开记录；验收输出不打印 SecretRef、凭据、下载地址或消息正文。
 
-Outbox/maintenance 独立进程、队列自定义指标扩缩容、持久 trace 后端、外置不可变审计归档、复杂文档解析和 Knowledge 跨向量后端迁移仍是后续能力。
+**本 PR（PR21：持久化 Trace 与生产告警）实现**：
+
+- Compose 增加固定版本 Tempo、独立持久卷和 Collector OTLP exporter；Grafana provision Tempo
+  数据源，并提供 trace-to-metrics 跳转。
+- Outbox payload 只持久化安全的 W3C `traceparent`，Sender 在其他 Worker/重启后仍继续原 trace；
+  调用者可控 ID 只记录 hash，baggage/tracestate、Secret 和消息正文不进入遥测。
+- Prometheus 加载错误率、DLQ、持续积压、无活跃 Worker、PostgreSQL 异常五类规则；数据库
+  健康只有 Ping、队列和节点查询全部成功才为 1。
+- 提供默认非破坏、无敏感输出的结构/live 验收脚本和[报告模板](docs/observability-acceptance-report.md)。
+
+Outbox/maintenance 独立进程、队列自定义指标扩缩容、外置不可变审计归档、复杂文档解析和 Knowledge 跨向量后端迁移仍是后续能力。
 
 ## Admin API
 

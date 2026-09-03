@@ -91,7 +91,7 @@ func traceSampleRatio() (float64, error) {
 }
 
 func defaultPropagator() propagation.TextMapPropagator {
-	return propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+	return propagation.TraceContext{}
 }
 
 // Shutdown flushes metrics and traces before their owning process exits.

@@ -3,7 +3,10 @@ package metrics
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -36,7 +39,15 @@ func FromContext(ctx context.Context) (ContextTelemetry, bool) {
 }
 
 func (fields SpanFields) attributes() []attribute.KeyValue {
-	return []attribute.KeyValue{attribute.String("tenant.id", fields.TenantID), attribute.String("app.id", fields.AppID), attribute.String("channel", fields.Channel), attribute.String("request.id", fields.RequestID), attribute.String("correlation.trace_id", fields.TraceID)}
+	return []attribute.KeyValue{attribute.String("tenant.id", fields.TenantID), attribute.String("app.id", fields.AppID), attribute.String("channel", fields.Channel), attribute.String("request.hash", identifierHash(fields.RequestID)), attribute.String("correlation.hash", identifierHash(fields.TraceID))}
+}
+
+func identifierHash(value string) string {
+	if value == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:8])
 }
 
 type Telemetry struct {
@@ -84,7 +95,10 @@ func New(name string) (*Telemetry, error) {
 	if err != nil {
 		return nil, err
 	}
-	propagator := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+	// Only W3C trace context crosses durable queue boundaries. Baggage is
+	// intentionally excluded because callers control it and it may contain
+	// credentials or message content that must never reach a trace backend.
+	propagator := propagation.TraceContext{}
 	return &Telemetry{tracer: otel.Tracer(name), propagator: propagator, requests: requests, duration: duration, firstToken: firstToken, tokens: tokens, cost: cost, delivery: delivery, backlog: backlog}, nil
 }
 
@@ -107,19 +121,30 @@ func (telemetry *Telemetry) Inject(ctx context.Context) map[string]string {
 	if telemetry != nil {
 		telemetry.propagator.Inject(ctx, carrier)
 	}
-	return map[string]string(carrier)
+	return safeTraceCarrier(map[string]string(carrier))
 }
 func (telemetry *Telemetry) Extract(ctx context.Context, carrier map[string]string) context.Context {
 	if telemetry == nil {
 		return ctx
 	}
-	return telemetry.propagator.Extract(ctx, propagation.MapCarrier(carrier))
+	return telemetry.propagator.Extract(ctx, propagation.MapCarrier(safeTraceCarrier(carrier)))
 }
 func (telemetry *Telemetry) ExtractHTTP(ctx context.Context, header http.Header) context.Context {
 	if telemetry == nil {
 		return ctx
 	}
-	return telemetry.propagator.Extract(ctx, propagation.HeaderCarrier(header))
+	return telemetry.Extract(ctx, map[string]string{"traceparent": header.Get("traceparent")})
+}
+
+func safeTraceCarrier(carrier map[string]string) map[string]string {
+	safe := make(map[string]string, 1)
+	for key, value := range carrier {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "traceparent":
+			safe["traceparent"] = value
+		}
+	}
+	return safe
 }
 func (telemetry *Telemetry) Request(ctx context.Context, labels Labels, duration time.Duration, tokens, costMicros int64) {
 	if telemetry == nil {

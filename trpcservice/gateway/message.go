@@ -48,6 +48,7 @@ type OutboundMessage struct {
 	ExternalUserID               string
 	ConversationID               string
 	Text, TraceID                string
+	TraceContext                 map[string]string
 	SourceInboxID, SourceEventID string
 	CreatedAt                    time.Time
 }

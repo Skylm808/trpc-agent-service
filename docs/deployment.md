@@ -2,7 +2,7 @@
 
 ## 最小可运行环境
 
-根目录的 `docker-compose.yml` 启动 PostgreSQL、Redis、一次性 migration、兼容模式的合并 Gateway/Worker，以及 OpenTelemetry Collector、Prometheus、Grafana；opt-in `multinode` profile 另提供一个 Gateway 和两个 Worker 的 PR20 验收拓扑。Kubernetes 基线使用 `--role gateway` 与 `--role worker` 拆成独立 Deployment。服务启动时把 `configs/example.yaml` 当作**种子**：租户在控制面还没有任何已发布版本时才写入 version 1；一旦通过 Admin API 发布过新版本，数据库就是唯一事实源，重启不再校验文件与数据库一致，也不要求重建环境。启动文件中的版本号超过数据库已发布版本时拒绝启动，避免节点使用未发布配置。
+根目录的 `docker-compose.yml` 启动 PostgreSQL、Redis、一次性 migration、兼容模式的合并 Gateway/Worker，以及 OpenTelemetry Collector、Tempo、Prometheus、Grafana；opt-in `multinode` profile 另提供一个 Gateway 和两个 Worker 的 PR20 验收拓扑。Kubernetes 基线使用 `--role gateway` 与 `--role worker` 拆成独立 Deployment。服务启动时把 `configs/example.yaml` 当作**种子**：租户在控制面还没有任何已发布版本时才写入 version 1；一旦通过 Admin API 发布过新版本，数据库就是唯一事实源，重启不再校验文件与数据库一致，也不要求重建环境。启动文件中的版本号超过数据库已发布版本时拒绝启动，避免节点使用未发布配置。
 
 首次启动前执行 `cp .env.example .env`，然后只在本机 `.env` 中填写
 `DEEPSEEK_API_KEY`。生产 Runtime 使用 tRPC-Agent-Go 的 OpenAI-compatible Model
@@ -72,7 +72,7 @@ Admin API 与 Gateway 共用 HTTP 端口，所有 `/v1/tenants/{tenant_id}/confi
 
 Compose 中的默认数据库密码和 HTTP token 只供本地使用。共享环境应通过 `.env`、Docker Secret 或外部密钥系统覆盖，不能提交真实值。
 
-Prometheus 位于 `http://127.0.0.1:9090`，Grafana 位于 `http://127.0.0.1:3000`。Compose 的 Grafana 仅开放匿名 Viewer，仍只适合本机；共享或公网部署必须在反向代理层增加身份认证。指标、trace 和保留策略见[生产可观测性](observability.md)。
+Prometheus 位于 `http://127.0.0.1:9090`，Tempo 位于 `http://127.0.0.1:3200`，Grafana 位于 `http://127.0.0.1:3000`。Compose 的 Grafana 仅开放匿名 Viewer，仍只适合本机；共享或公网部署必须在反向代理层增加身份认证。指标、trace 和保留策略见[生产可观测性](observability.md)。
 
 ## 生产推荐拓扑
 

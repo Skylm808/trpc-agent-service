@@ -43,7 +43,7 @@ var _ gateway.InboundAcceptor = (*Handler)(nil)
 // AcceptInbound persists and schedules an already provider-authenticated
 // message. Channel adapters own signature verification and tenant binding;
 // this method owns the shared Inbox/queue durability boundary.
-func (handler *Handler) AcceptInbound(ctx context.Context, inbound gateway.InboundMessage) (gateway.AcceptedMessage, error) {
+func (handler *Handler) AcceptInbound(ctx context.Context, inbound gateway.InboundMessage) (accepted gateway.AcceptedMessage, resultErr error) {
 	if handler == nil || handler.Inbox == nil || handler.Submitter == nil || handler.ClaimOwner == "" {
 		return gateway.AcceptedMessage{}, errors.New("gateway is not configured")
 	}
@@ -56,17 +56,26 @@ func (handler *Handler) AcceptInbound(ctx context.Context, inbound gateway.Inbou
 	if inbound.ReceivedAt.IsZero() {
 		inbound.ReceivedAt = time.Now().UTC()
 	}
-	if inbound.TraceContext == nil {
-		inbound.TraceContext = handler.Telemetry.Inject(ctx)
-	}
+	callbackCtx, callbackSpan := handler.Telemetry.Start(ctx, "channel.callback", servicemetrics.SpanFields{TenantID: inbound.TenantID, AppID: inbound.AppID, Channel: inbound.BindingID, RequestID: inbound.ExternalMessageID, TraceID: inbound.TraceID})
+	defer callbackSpan.End()
 	started := time.Now()
-	claimCtx, claimSpan := handler.Telemetry.Start(ctx, "inbox.claim", servicemetrics.SpanFields{TenantID: inbound.TenantID, AppID: inbound.AppID, Channel: inbound.BindingID, RequestID: inbound.ExternalMessageID, TraceID: inbound.TraceID})
+	defer func() {
+		status := "accepted"
+		if resultErr != nil {
+			status = "failed"
+		}
+		handler.Telemetry.Request(callbackCtx, servicemetrics.Labels{TenantID: inbound.TenantID, AppID: inbound.AppID, Channel: inbound.BindingID, Operation: "callback", Status: status}, time.Since(started), 0, 0)
+	}()
+	if inbound.TraceContext == nil {
+		inbound.TraceContext = handler.Telemetry.Inject(callbackCtx)
+	}
+	claimCtx, claimSpan := handler.Telemetry.Start(callbackCtx, "inbox.claim", servicemetrics.SpanFields{TenantID: inbound.TenantID, AppID: inbound.AppID, Channel: inbound.BindingID, RequestID: inbound.ExternalMessageID, TraceID: inbound.TraceID})
 	claim, won, err := handler.Inbox.Claim(claimCtx, inbound, handler.ClaimOwner, handler.claimTTL())
 	claimSpan.End()
 	if err != nil {
 		return gateway.AcceptedMessage{}, err
 	}
-	accepted := gateway.AcceptedMessage{RequestID: claim.InboxID, SessionID: inbound.SessionID, TraceID: inbound.TraceID, Duplicate: !won}
+	accepted = gateway.AcceptedMessage{RequestID: claim.InboxID, SessionID: inbound.SessionID, TraceID: inbound.TraceID, Duplicate: !won}
 	if !won {
 		accepted.TraceID = claim.Message.TraceID
 		return accepted, nil
@@ -79,7 +88,6 @@ func (handler *Handler) AcceptInbound(ctx context.Context, inbound gateway.Inbou
 		_ = handler.Inbox.Fail(context.Background(), claim, err, time.Now().UTC().Add(time.Second))
 		return gateway.AcceptedMessage{}, err
 	}
-	handler.Telemetry.Request(ctx, servicemetrics.Labels{TenantID: inbound.TenantID, AppID: inbound.AppID, Channel: inbound.BindingID, Operation: "callback", Status: "accepted"}, time.Since(started), 0, 0)
 	return accepted, nil
 }
 

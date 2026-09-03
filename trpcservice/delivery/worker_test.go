@@ -4,17 +4,67 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	servicemetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type eventLog struct {
 	mu     sync.Mutex
 	events []string
+}
+
+func TestOutboxDeliveryContinuesDurableTraceWithoutPayloadLeak(t *testing.T) {
+	oldProvider := otel.GetTracerProvider()
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	otel.SetTracerProvider(provider)
+	defer func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(oldProvider)
+	}()
+	telemetry, err := servicemetrics.New("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := &eventLog{}
+	store := &workerStore{log: log}
+	router, err := NewRouter(Route{Binding: BindingKey{TenantID: "tenant", BindingID: "wecom"}, Sender: senderFunc(func(context.Context, gateway.OutboundMessage) error { return nil })})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := NewWorker(store, router, limiterFunc(func(context.Context, gateway.OutboundMessage) error { return nil }), telemetry, WorkerConfig{Owner: "worker", ClaimTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const traceID = "0102030405060708090a0b0c0d0e0f10"
+	canary := "secret-and-message-canary"
+	message := gateway.OutboundMessage{TenantID: "tenant", AppID: "app", BindingID: "wecom", OutboxID: "outbox", Text: canary, TraceID: canary, TraceContext: map[string]string{
+		"traceparent": "00-" + traceID + "-0102030405060708-01",
+		"tracestate":  "vendor=" + canary,
+		"baggage":     "authorization=" + canary,
+	}}
+	worker.deliver(context.Background(), Claim{Message: message, Owner: "worker", ClaimToken: "token", Attempt: 1, Status: StatusClaimed, LeaseUntil: time.Now().Add(time.Hour)})
+	spans := exporter.GetSpans()
+	if len(spans) != 1 || spans[0].Name != "outbox.deliver" || spans[0].SpanContext.TraceID().String() != traceID {
+		t.Fatalf("delivery spans=%+v", spans)
+	}
+	if spans[0].SpanContext.TraceState().Len() != 0 {
+		t.Fatal("untrusted tracestate reached exported span")
+	}
+	for _, attr := range spans[0].Attributes {
+		if strings.Contains(attr.Value.Emit(), canary) {
+			t.Fatalf("span attribute %q leaked canary", attr.Key)
+		}
+	}
 }
 
 func (log *eventLog) add(event string) {

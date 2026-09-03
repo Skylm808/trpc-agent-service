@@ -57,25 +57,26 @@ func (observer *SQLObserver) observe(parent context.Context, output metric.Obser
 	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 	started := time.Now()
-	if err := observer.db.PingContext(ctx); err != nil {
-		options := metric.WithAttributes(storageAttributes("failed")...)
-		output.ObserveInt64(observer.storageOK, 0, options)
-		output.ObserveFloat64(observer.storageMS, float64(time.Since(started).Microseconds())/1000, options)
-		return nil
+	err := observer.db.PingContext(ctx)
+	if err == nil {
+		err = observer.observeQueue(ctx, output, "inbox")
 	}
-	options := metric.WithAttributes(storageAttributes("success")...)
-	output.ObserveInt64(observer.storageOK, 1, options)
-	output.ObserveFloat64(observer.storageMS, float64(time.Since(started).Microseconds())/1000, options)
-	if err := observer.observeQueue(ctx, output, "inbox"); err != nil {
-		return nil
-	}
-	if err := observer.observeQueue(ctx, output, "outbox"); err != nil {
-		return nil
+	if err == nil {
+		err = observer.observeQueue(ctx, output, "outbox")
 	}
 	var live int64
-	if err := observer.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM worker_nodes WHERE NOT draining AND last_heartbeat>=NOW()-INTERVAL '20 seconds'`).Scan(&live); err == nil {
+	if err == nil {
+		err = observer.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM worker_nodes WHERE NOT draining AND last_heartbeat>=NOW()-INTERVAL '20 seconds'`).Scan(&live)
+	}
+	status, healthy := "success", int64(1)
+	if err != nil {
+		status, healthy = "failed", 0
+	} else {
 		output.ObserveInt64(observer.workers, live)
 	}
+	options := metric.WithAttributes(storageAttributes(status)...)
+	output.ObserveInt64(observer.storageOK, healthy, options)
+	output.ObserveFloat64(observer.storageMS, float64(time.Since(started).Microseconds())/1000, options)
 	return nil
 }
 

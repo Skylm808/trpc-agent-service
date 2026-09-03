@@ -214,7 +214,7 @@ func TestTwoTenantTwoWorkerEndToEndToolMemoryOutboxAndTrace(t *testing.T) {
 		inboxID := expected.tenantID + "/" + expected.binding + "/same-message"
 		waitFor(t, func() bool {
 			out, ok := writes.Outbox(expected.tenantID, "reply:"+inboxID)
-			return ok && strings.Contains(out.Text, "42") && out.TraceID == expected.trace && out.ExternalUserID == "same-user"
+			return ok && strings.Contains(out.Text, "42") && out.TraceID == expected.trace && out.ExternalUserID == "same-user" && len(out.TraceContext) == 1 && out.TraceContext["traceparent"] != ""
 		})
 		key := gateway.SessionKey{TenantID: expected.tenantID, AppID: "assistant", UserID: "http/" + expected.binding + "/same-user", SessionID: "dm/" + expected.binding + "/same-user"}
 		head, events, summary, memories := writes.Snapshot(key)
@@ -246,6 +246,16 @@ func TestTwoTenantTwoWorkerEndToEndToolMemoryOutboxAndTrace(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	byTrace := make(map[string]map[string]bool)
 	for _, span := range exporter.GetSpans() {
+		for _, attr := range span.Attributes {
+			for _, private := range []string{"same-message", "calculate 6*7", "secret-a", "secret-b", "trace-a", "trace-b"} {
+				if strings.Contains(attr.Value.Emit(), private) {
+					t.Fatalf("span %q attribute %q leaked caller-controlled data", span.Name, attr.Key)
+				}
+			}
+		}
+		if span.SpanContext.TraceState().Len() != 0 {
+			t.Fatalf("span %q retained untrusted tracestate", span.Name)
+		}
 		traceID := span.SpanContext.TraceID().String()
 		if byTrace[traceID] == nil {
 			byTrace[traceID] = make(map[string]bool)
