@@ -6,24 +6,42 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project="${TRPC_AGENT_COMPOSE_PROJECT:-trpc-agent-service-pr14-check}"
 compose=(docker compose -p "$project")
 
-for command in docker curl jq rg; do
+for command in docker; do
   command -v "$command" >/dev/null 2>&1 || { echo "ERROR required command is unavailable: $command" >&2; exit 1; }
 done
 [[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "ERROR invalid Compose project name" >&2; exit 1; }
 
+contains_fixed() {
+  local needle="$1" file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg --fixed-strings --quiet -- "$needle" "$file"
+  else
+    grep -Fq -- "$needle" "$file"
+  fi
+}
+
+contains_line() {
+  local needle="$1" file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg --fixed-strings --line-regexp --quiet -- "$needle" "$file"
+  else
+    grep -Fxq -- "$needle" "$file"
+  fi
+}
+
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/trpc-agent-pr21.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 
-"${compose[@]}" config --quiet
+DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-pr21-structural-placeholder}" "${compose[@]}" config --quiet
 
 for alert in AgentHighErrorRate AgentDLQNotEmpty AgentQueueBacklogGrowing AgentNoLiveWorker AgentPostgreSQLUnavailable; do
-  rg --fixed-strings --quiet "alert: $alert" "$repo_root/deploy/prometheus-alerts.yml" || {
+  contains_fixed "alert: $alert" "$repo_root/deploy/prometheus-alerts.yml" || {
     echo "ERROR missing required alert: $alert" >&2
     exit 1
   }
 done
-rg --fixed-strings --quiet 'exporters: [otlp/tempo]' "$repo_root/deploy/otel-collector.yaml"
-rg --fixed-strings --quiet 'uid: tempo' "$repo_root/deploy/grafana/provisioning/datasources/tempo.yml"
+contains_fixed 'exporters: [otlp/tempo]' "$repo_root/deploy/otel-collector.yaml"
+contains_fixed 'uid: tempo' "$repo_root/deploy/grafana/provisioning/datasources/tempo.yml"
 echo "PASS Compose, Tempo exporter, Grafana datasource, and five production alerts are structurally present"
 
 if [[ "${TRPC_AGENT_OBSERVABILITY_ACCEPTANCE_LIVE:-0}" != "1" ]]; then
@@ -31,9 +49,13 @@ if [[ "${TRPC_AGENT_OBSERVABILITY_ACCEPTANCE_LIVE:-0}" != "1" ]]; then
   exit 0
 fi
 
+for command in curl jq; do
+  command -v "$command" >/dev/null 2>&1 || { echo "ERROR required command is unavailable for live checks: $command" >&2; exit 1; }
+done
+
 running_services="$("${compose[@]}" ps --status running --services)"
 for service in tempo otel-collector prometheus grafana; do
-  rg --fixed-strings --line-regexp --quiet "$service" <<<"$running_services" || { echo "ERROR required service is not running: $service" >&2; exit 1; }
+  contains_line "$service" <(printf '%s\n' "$running_services") || { echo "ERROR required service is not running: $service" >&2; exit 1; }
 done
 
 "${compose[@]}" exec -T prometheus promtool check config /etc/prometheus/prometheus.yml >"$work_dir/promtool.txt"
@@ -56,18 +78,18 @@ if [[ -n "$trace_id" ]]; then
   curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:3200/api/traces/$trace_id" >"$work_dir/trace.json"
   jq -r '.. | objects | .name? // empty' "$work_dir/trace.json" | sort -u >"$work_dir/span-names.txt"
   for span in channel.callback inbox.claim worker.run runner.execute model.stream session.write memory.summary.write outbox.write outbox.deliver; do
-    rg --fixed-strings --line-regexp --quiet "$span" "$work_dir/span-names.txt" || { echo "ERROR persisted trace is missing stage: $span" >&2; exit 1; }
+    contains_line "$span" "$work_dir/span-names.txt" || { echo "ERROR persisted trace is missing stage: $span" >&2; exit 1; }
   done
   echo "PASS persisted trace connects Callback, Inbox, Worker, Model, Storage, and Outbox delivery"
 
   canary="${TRPC_AGENT_ACCEPTANCE_PRIVATE_CANARY:-}"
   if [[ -n "$canary" ]]; then
-    if rg --fixed-strings --quiet -- "$canary" "$work_dir/trace.json"; then
+    if contains_fixed "$canary" "$work_dir/trace.json"; then
       echo "ERROR private canary appeared in persisted trace" >&2
       exit 1
     fi
     curl --fail --silent --show-error --max-time 10 http://127.0.0.1:9090/api/v1/label/__name__/values >"$work_dir/metric-names.json"
-    if rg --fixed-strings --quiet -- "$canary" "$work_dir/metric-names.json"; then
+    if contains_fixed "$canary" "$work_dir/metric-names.json"; then
       echo "ERROR private canary appeared in metric metadata" >&2
       exit 1
     fi
