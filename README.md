@@ -167,6 +167,27 @@ curl -H 'Authorization: Bearer local-secret' \
 
 设计中的组件按以下状态区分，避免把规划能力误读为已交付能力。
 
+### 临时开发进度（全部完成后删除）
+
+当前按任务基础要求估算完成约 **85%**。多租户、多节点、企业微信/飞书真实链路、
+共享 Session/Memory、治理、审计、Trace、告警和 Compose 验收已经完成；剩余工作按
+“先跑通最小链路，再补生产增强”的原则推进，不在首轮引入不必要的复杂部署。
+
+- **已完成：PR20、PR21。** 双 IM 多节点 Compose 验收、Worker 接管、fencing、租户隔离、
+  Tempo 持久化 Trace、Grafana 数据源和 Prometheus 生产告警均已有自动化验证。
+- **下一步：PR22 最小媒体闭环。** 先实现企业微信/飞书受控媒体下载、大小/类型/超时限制、
+  临时文件清理、图片多模态输入、基础文档文本提取和一种飞书交互卡片回复；继续复用现有
+  Outbox 重试、限流和 DLQ，并确保 media key、下载 URL、文件正文不进入日志和审计。
+- **随后：PR23 最小迁移闭环。** 分别跑通 PGVector → Qdrant Knowledge、Qdrant → PGVector
+  Knowledge 和 S3 → PostgreSQL Artifact，复用现有 checkpoint、双写、checksum 和 cutover
+  控制面；外部 Memory 与 Audit/WORM 先提供最小可运行 Adapter，不扩展复杂供应商特性。
+- **最后：PR24 简单 Kubernetes Demo。** 使用本地 `kind` 或 Docker Desktop Kubernetes，
+  部署 Gateway 与 Worker 多副本并发送合成消息走完整链路；只做单 Pod 重启、滚动升级、
+  回滚及基础 PDB/HPA 检查，形成可复现报告。首轮不搭建复杂多集群或全套灾难演练，且任何
+  脚本都不得删除 PostgreSQL、Redis 或其他持久数据卷。
+
+上述剩余链路全部实现并完成验收后，应删除本临时进度小节，以正式交付状态和验收报告为准。
+
 **已经实现并验证**：
 
 - 企业微信与飞书真实端到端链路均已通过人工平台验收：真实 IM 回调 → Inbox 幂等 → tRPC-Agent-Go Runner → DeepSeek → PostgreSQL Session/Memory/Event → Outbox → 对应 IM 回复。仓库只记录结论，不保存截图、用户消息正文或凭据。
