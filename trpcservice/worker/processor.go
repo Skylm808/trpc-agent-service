@@ -320,7 +320,7 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	renewFailure := make(chan error, 1)
 	go processor.renew(runCtx, cancelRun, request, lease, claim, permit, renewDone, renewFailure)
 	runnerCtx, runnerSpan := processor.Telemetry.Start(sessioncoord.WithLease(runCtx, lease), "runner.execute", processor.spanFields(request))
-	runInput := serviceruntime.RunInput{RequestID: request.InboxID, UserID: request.UserID, SessionID: request.SessionID, Text: request.Text, Observer: projection.Observe, ToolFilter: controls.Visibility, ToolExecutionFilter: controls.Execution, ToolPermissionPolicy: controls.Permission}
+	runInput := serviceruntime.RunInput{RequestID: request.InboxID, UserID: request.UserID, SessionID: request.SessionID, Text: request.Text, Attachments: request.Attachments, Observer: projection.Observe, ToolFilter: controls.Visibility, ToolExecutionFilter: controls.Execution, ToolPermissionPolicy: controls.Permission}
 	_, err = runtimeLease.Runtime.Run(runnerCtx, runInput)
 	if err == nil && projection.pendingTool != "" {
 		processor.publish(request, gateway.RunEvent{Type: "run.approval_required", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Stage: "approval_required", ToolName: projection.pendingTool, ToolCallID: projection.pendingCall})
@@ -393,7 +393,7 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	derivedSpan.End()
 	processor.observeOperation(derivedCtx, request, "memory_summary", derivedStarted, nil)
 	outboxCtx, outboxSpan := processor.Telemetry.Start(ctx, "outbox.write", processor.spanFields(request))
-	outbound := gateway.OutboundMessage{TenantID: request.TenantID, AppID: request.AppID, BindingID: request.BindingID, ConfigVersion: request.ConfigVersion, OutboxID: "outbox:" + request.InboxID, DedupeKey: "reply:" + request.InboxID, UserID: request.UserID, SessionID: request.SessionID, ExternalUserID: request.ExternalUserID, ConversationID: request.ConversationID, Text: reply, TraceID: request.TraceID, TraceContext: processor.Telemetry.Inject(outboxCtx), SourceInboxID: request.InboxID, SourceEventID: eventID}
+	outbound := gateway.OutboundMessage{TenantID: request.TenantID, AppID: request.AppID, BindingID: request.BindingID, ConfigVersion: request.ConfigVersion, OutboxID: "outbox:" + request.InboxID, DedupeKey: "reply:" + request.InboxID, UserID: request.UserID, SessionID: request.SessionID, ExternalUserID: request.ExternalUserID, ConversationID: request.ConversationID, Text: reply, ReplyFormat: replyFormat(snapshot, request.BindingID), TraceID: request.TraceID, TraceContext: processor.Telemetry.Inject(outboxCtx), SourceInboxID: request.InboxID, SourceEventID: eventID}
 	outboxStarted := time.Now()
 	if err := processor.Writes.PublishOutbox(outboxCtx, request.Key(), lease.Token, outbound); err != nil {
 		outboxSpan.End()
@@ -412,6 +412,15 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 
 func isGovernanceDenial(err error) bool {
 	return errors.Is(err, policy.ErrIdentityDenied) || errors.Is(err, policy.ErrBudgetExceeded) || errors.Is(err, policy.ErrToolDenied)
+}
+
+func replyFormat(snapshot config.RuntimeSnapshot, bindingID string) string {
+	for _, binding := range snapshot.App().Channels {
+		if binding.ID == bindingID {
+			return binding.ReplyFormat
+		}
+	}
+	return ""
 }
 
 // Cancel cancels an active Runner request. Queued cancellation belongs to the durable queue.

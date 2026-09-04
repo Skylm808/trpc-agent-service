@@ -6,9 +6,7 @@
 package feishu
 
 import (
-	"context"
 	"errors"
-	"io"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
@@ -33,19 +31,6 @@ type Binding struct {
 	FeishuAppID                string
 	VerificationToken          string
 	EncryptKey                 string
+	AppSecret                  string
 	ConfigVersion              tenant.ConfigVersion
-}
-
-// MediaRef identifies provider-held media without embedding it in Agent
-// input or logs.
-type MediaRef struct {
-	Kind, Key, Name string
-}
-
-// MediaDownloader is the reserved extension point for controlled media
-// downloads. Implementations must validate the provider host, size, and MIME
-// before any network access; raw keys must stay out of logs and free-form
-// Agent text.
-type MediaDownloader interface {
-	Download(ctx context.Context, ref MediaRef) (io.ReadCloser, error)
 }

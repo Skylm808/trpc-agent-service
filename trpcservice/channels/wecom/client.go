@@ -105,10 +105,15 @@ func (source *CredentialTokenSource) Invalidate(token string) {
 }
 
 func (source *CredentialTokenSource) client() *http.Client {
+	var configured *http.Client
 	if source.Client != nil {
-		return source.Client
+		configured = source.Client
+	} else {
+		configured = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &http.Client{Timeout: 10 * time.Second}
+	copy := *configured
+	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &copy
 }
 
 func (source *CredentialTokenSource) baseURL() string {
@@ -253,10 +258,15 @@ func (sender *Sender) post(ctx context.Context, token string, outbound gateway.O
 }
 
 func (sender *Sender) client() *http.Client {
+	var configured *http.Client
 	if sender.Client != nil {
-		return sender.Client
+		configured = sender.Client
+	} else {
+		configured = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &http.Client{Timeout: 10 * time.Second}
+	copy := *configured
+	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &copy
 }
 
 func (sender *Sender) baseURL() string {

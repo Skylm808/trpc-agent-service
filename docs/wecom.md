@@ -78,8 +78,8 @@ trace 或错误信息。开发组合器支持 `env` 和挂载的 `file` SecretRe
 
 ## 消息与失败语义
 
-- 文本直接进入 Agent；图片、文件和无识别结果的语音先以安全的元数据占位文本进入，
-  不自动下载外部 URL，避免 SSRF。后续媒体下载器必须校验企业微信域名、大小和 MIME。
+- 文本直接进入 Agent；图片和文件在验签与租户匹配后仅通过固定企业微信 API 受控下载，
+  并校验大小、MIME 和超时。无识别结果的语音仍使用安全占位文本。
 - 不属于 Agent 输入的企业微信事件返回 `200 success`，避免 poison event 重试；签名、
   CorpID 或 AgentID 不匹配返回 `401`。
 - Inbox / queue 暂时不可用返回 `503`，让企业微信按平台策略重试；重复 `MsgId` 返回
@@ -125,6 +125,6 @@ CAS、指数退避、DLQ、`uncertain` 和 Redis 跨节点限流。启用 WeCom 
 
 企业微信测试账号、Cloudflare Tunnel、真实 DeepSeek 和 PostgreSQL 的收发链路已经完成人工
 E2E 验收；自动化协议/隔离测试独立运行，仓库不保存截图、用户正文或凭据。PR17 已完成
-`uncertain` / DLQ 的 Admin 运维 API，Web 页面仍未实现。图片和文件目前只把安全元数据
-交给 Agent，不会自动下载或回传媒体；后续媒体能力需要独立的大小、MIME 和来源校验。
+`uncertain` / DLQ 的 Admin 运维 API，Web 页面仍未实现。图片和基础文本文件已经接入
+受控下载和模型输入；PDF/Office/OCR、媒体回传与复杂预览仍是后续增强。
 部署新企业账号时仍需在对应企业启用应用，并准备公网 HTTPS 回调地址。

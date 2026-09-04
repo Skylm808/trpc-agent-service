@@ -112,6 +112,7 @@ type ModelProfile struct {
 	APIKey      SecretRef `json:"api_key,omitempty" yaml:"api_key,omitempty"`
 	Temperature *float64  `json:"temperature,omitempty" yaml:"temperature,omitempty"`
 	MaxTokens   int       `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+	Multimodal  bool      `json:"multimodal,omitempty" yaml:"multimodal,omitempty"`
 }
 
 // ToolPolicy controls tenant-visible and tenant-executable tools.
@@ -170,6 +171,7 @@ type ChannelBinding struct {
 	Token             SecretRef   `json:"token,omitempty" yaml:"token,omitempty"`
 	Secret            SecretRef   `json:"secret,omitempty" yaml:"secret,omitempty"`
 	EncryptionKey     SecretRef   `json:"encryption_key,omitempty" yaml:"encryption_key,omitempty"`
+	ReplyFormat       string      `json:"reply_format,omitempty" yaml:"reply_format,omitempty"`
 	Enabled           bool        `json:"enabled" yaml:"enabled"`
 }
 

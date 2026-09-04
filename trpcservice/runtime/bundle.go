@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	serviceagent "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	servicemetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/modelprovider"
@@ -34,6 +36,7 @@ var ErrDrainTimeout = errors.New("runtime: event stream drain timeout")
 type RunInput struct {
 	RequestID, UserID, SessionID string
 	Text                         string
+	Attachments                  []gateway.Attachment
 	Observer                     func(*event.Event)
 	ToolFilter                   tool.FilterFunc
 	ToolExecutionFilter          tool.FilterFunc
@@ -67,6 +70,7 @@ type Bundle struct {
 	drainTimeout             time.Duration
 	closeOnce                sync.Once
 	closeErr                 error
+	multimodal               bool
 }
 
 // NewTestBundle assembles the deterministic fixture used by unit tests and the
@@ -157,7 +161,7 @@ func NewBundleWithServicesAndTools(snapshot config.RuntimeSnapshot, services *st
 	}
 	agent := llmagent.New(app.Name, llmagent.WithModel(runtimeModel), llmagent.WithInstruction(app.Config.Instruction), llmagent.WithTools(tools), llmagent.WithGenerationConfig(generation))
 	run := runner.NewRunner(appName, agent, runner.WithSessionService(services.Session), runner.WithMemoryService(services.Memory), runner.WithArtifactService(services.Artifact), runner.WithPlugins(plugins...))
-	return &Bundle{tenantID: snapshot.TenantID(), appID: snapshot.AppID(), appName: appName, version: snapshot.Version(), toolNames: append([]string(nil), toolNames...), toolPolicy: app.Tools, tools: callableTools, runner: run, services: services, externalToolsClose: closeTools, drainTimeout: time.Second}, nil
+	return &Bundle{tenantID: snapshot.TenantID(), appID: snapshot.AppID(), appName: appName, version: snapshot.Version(), toolNames: append([]string(nil), toolNames...), toolPolicy: app.Tools, tools: callableTools, runner: run, services: services, externalToolsClose: closeTools, drainTimeout: time.Second, multimodal: app.Model.Multimodal}, nil
 }
 
 // Scope returns the immutable bundle identity.
@@ -182,7 +186,52 @@ func (bundle *Bundle) Run(ctx context.Context, input RunInput) (RunResult, error
 	if input.RequestID == "" || input.UserID == "" || input.SessionID == "" || input.Text == "" {
 		return RunResult{}, errors.New("runtime: request, user, session IDs, and text are required")
 	}
-	return bundle.runMessage(ctx, input, model.NewUserMessage(input.Text))
+	message, err := userMessage(input, bundle.multimodal)
+	if err != nil {
+		return RunResult{}, err
+	}
+	return bundle.runMessage(ctx, input, message)
+}
+
+func userMessage(input RunInput, multimodal bool) (model.Message, error) {
+	message := model.NewUserMessage(input.Text)
+	for _, attachment := range input.Attachments {
+		switch attachment.Kind {
+		case "image":
+			if !multimodal {
+				return model.Message{}, errors.New("runtime: configured model does not support image input")
+			}
+			if len(attachment.Data) == 0 || attachment.MIME == "" {
+				return model.Message{}, errors.New("runtime: invalid image attachment")
+			}
+			format := attachment.MIME
+			if index := strings.IndexByte(format, '/'); index >= 0 {
+				format = format[index+1:]
+			}
+			message.AddImageData(append([]byte(nil), attachment.Data...), "auto", format)
+		case "file":
+			if strings.TrimSpace(attachment.ExtractedText) == "" {
+				return model.Message{}, errors.New("runtime: document has no extracted text")
+			}
+			message.Content += "\n\n[Document " + safeDocumentName(attachment.Name) + "]\n" + attachment.ExtractedText
+		default:
+			return model.Message{}, errors.New("runtime: unsupported attachment kind")
+		}
+	}
+	return message, nil
+}
+
+func safeDocumentName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == ']' || r == '[' {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(name))
+	if name == "" {
+		return "attachment"
+	}
+	return name
 }
 
 // ResumeTool executes an approved external tool through its guarded handler and resumes the model with a Tool result.

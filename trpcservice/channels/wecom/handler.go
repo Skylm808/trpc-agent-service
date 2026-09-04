@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 )
 
@@ -26,6 +27,8 @@ type Handler struct {
 	provider BindingProvider
 	acceptor gateway.InboundAcceptor
 	now      func() time.Time
+	media    func(Binding) channels.MediaDownloader
+	policy   channels.MediaPolicy
 }
 
 // NewHandler creates an immutable tenant binding registry.
@@ -55,6 +58,20 @@ func NewDynamicHandler(acceptor gateway.InboundAcceptor, provider BindingProvide
 		return nil, errors.New("wecom: inbound acceptor and binding provider are required")
 	}
 	return &Handler{provider: provider, acceptor: acceptor, now: time.Now}, nil
+}
+
+// NewDynamicHandlerWithMedia enables controlled media downloads after
+// callback authentication and before the durable Inbox write.
+func NewDynamicHandlerWithMedia(acceptor gateway.InboundAcceptor, provider BindingProvider, media func(Binding) channels.MediaDownloader, policy channels.MediaPolicy) (*Handler, error) {
+	handler, err := NewDynamicHandler(acceptor, provider)
+	if err != nil {
+		return nil, err
+	}
+	if media == nil {
+		return nil, errors.New("wecom: media downloader provider is required")
+	}
+	handler.media, handler.policy = media, policy
+	return handler, nil
 }
 
 // ServeHTTP implements GET callback verification and POST message receipt.
@@ -127,7 +144,11 @@ func (handler *Handler) receive(w http.ResponseWriter, request *http.Request, bi
 		return
 	}
 	query := request.URL.Query()
-	var matched []gateway.InboundMessage
+	type match struct {
+		binding Binding
+		inbound gateway.InboundMessage
+	}
+	var matched []match
 	authenticatedUnsupported := 0
 	for _, binding := range bindings {
 		plain, decryptErr := binding.Crypt.VerifyAndDecrypt(query.Get("msg_signature"), query.Get("timestamp"), query.Get("nonce"), envelope.Encrypt)
@@ -151,7 +172,7 @@ func (handler *Handler) receive(w http.ResponseWriter, request *http.Request, bi
 			http.Error(w, "invalid callback message", http.StatusBadRequest)
 			return
 		}
-		matched = append(matched, inbound)
+		matched = append(matched, match{binding: binding, inbound: inbound})
 	}
 	if len(matched) == 0 && authenticatedUnsupported == 1 {
 		writeSuccess(w)
@@ -161,7 +182,20 @@ func (handler *Handler) receive(w http.ResponseWriter, request *http.Request, bi
 		http.Error(w, "invalid callback signature", http.StatusUnauthorized)
 		return
 	}
-	if _, err := handler.acceptor.AcceptInbound(request.Context(), matched[0]); err != nil {
+	inbound := matched[0].inbound
+	if inbound.Media != nil {
+		ref := *inbound.Media
+		inbound.Media = nil
+		if handler.media != nil {
+			attachment, err := channels.LoadMedia(request.Context(), handler.media(matched[0].binding), ref, handler.policy)
+			if err != nil {
+				http.Error(w, "temporarily unable to process media", http.StatusServiceUnavailable)
+				return
+			}
+			inbound.Attachments = []gateway.Attachment{attachment}
+		}
+	}
+	if _, err := handler.acceptor.AcceptInbound(request.Context(), inbound); err != nil {
 		// A non-200 response asks WeCom to retry a temporary Inbox/queue failure.
 		http.Error(w, "temporarily unable to accept callback", http.StatusServiceUnavailable)
 		return

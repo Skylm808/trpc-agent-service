@@ -442,6 +442,12 @@ func validateChannel(path string, binding tenant.ChannelBinding) error {
 	if strings.TrimSpace(binding.ProviderAccountID) == "" {
 		return fmt.Errorf("config: %s.provider_account_id is required", path)
 	}
+	if binding.ReplyFormat != "" && binding.ReplyFormat != "text" && binding.ReplyFormat != "card" {
+		return fmt.Errorf("config: %s.reply_format must be text or card", path)
+	}
+	if binding.ReplyFormat == "card" && binding.Type != tenant.ChannelTypeFeishu {
+		return fmt.Errorf("config: %s.reply_format card is only supported by Feishu", path)
+	}
 	switch binding.Type {
 	case tenant.ChannelTypeHTTP:
 		if err := validateSecretRef(path+".token", binding.Token, false); err != nil {

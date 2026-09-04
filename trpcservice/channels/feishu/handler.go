@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 )
 
@@ -30,6 +31,22 @@ type Handler struct {
 	provider BindingProvider
 	acceptor gateway.InboundAcceptor
 	now      func() time.Time
+	media    func(Binding) channels.MediaDownloader
+	policy   channels.MediaPolicy
+}
+
+// NewDynamicHandlerWithMedia enables controlled media downloads after event
+// authentication and before the durable Inbox write.
+func NewDynamicHandlerWithMedia(acceptor gateway.InboundAcceptor, provider BindingProvider, media func(Binding) channels.MediaDownloader, policy channels.MediaPolicy) (*Handler, error) {
+	handler, err := NewDynamicHandler(acceptor, provider)
+	if err != nil {
+		return nil, err
+	}
+	if media == nil {
+		return nil, errors.New("feishu: media downloader provider is required")
+	}
+	handler.media, handler.policy = media, policy
+	return handler, nil
 }
 
 // NewDynamicHandler resolves bindings per callback from the control plane.
@@ -231,6 +248,18 @@ func (handler *Handler) receive(writer http.ResponseWriter, request *http.Reques
 			writeError(writer, http.StatusBadRequest, "invalid callback message")
 		}
 		return
+	}
+	if inbound.Media != nil {
+		ref := *inbound.Media
+		inbound.Media = nil
+		if handler.media != nil {
+			attachment, mediaErr := channels.LoadMedia(request.Context(), handler.media(*binding), ref, handler.policy)
+			if mediaErr != nil {
+				writeError(writer, http.StatusServiceUnavailable, "temporarily unable to process media")
+				return
+			}
+			inbound.Attachments = []gateway.Attachment{attachment}
+		}
 	}
 	if _, err := handler.acceptor.AcceptInbound(request.Context(), inbound); err != nil {
 		// A 5xx response asks Feishu to retry a temporary Inbox/queue failure.

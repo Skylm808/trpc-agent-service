@@ -67,6 +67,9 @@ func (store *SQLStore) Claim(ctx context.Context, message gateway.InboundMessage
 	if message.TenantID == "" || message.AppID == "" || message.BindingID == "" || message.ExternalMessageID == "" || message.UserID == "" || message.SessionID == "" || message.ConfigVersion == 0 || owner == "" || ttl <= 0 {
 		return Claim{}, false, errors.New("idempotency: complete tenant message, owner, and positive ttl are required")
 	}
+	if message.Media != nil {
+		return Claim{}, false, errors.New("idempotency: unresolved media reference is not durable")
+	}
 	tx, err := store.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return Claim{}, false, err

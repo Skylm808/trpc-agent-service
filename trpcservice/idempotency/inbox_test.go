@@ -3,6 +3,7 @@ package idempotency
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -40,6 +41,15 @@ func TestConcurrentDuplicatesHaveOneWinner(t *testing.T) {
 	}
 	if _, won, err := store.Claim(context.Background(), testMessage("tenant-b"), "worker", time.Minute); err != nil || !won {
 		t.Fatalf("cross tenant won=%v err=%v", won, err)
+	}
+}
+
+func TestInboxRejectsUnresolvedProviderMediaReference(t *testing.T) {
+	message := testMessage("tenant-a")
+	message.Media = &gateway.MediaReference{Kind: "image", Key: "private-media-key"}
+	_, _, err := NewMemoryStore().Claim(context.Background(), message, "worker", time.Minute)
+	if err == nil || strings.Contains(err.Error(), "private-media-key") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

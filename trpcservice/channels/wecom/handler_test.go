@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway/openclaw"
@@ -37,6 +40,44 @@ var testAESKey = []byte("0123456789abcdef0123456789abcdef")
 type captureSubmitter struct {
 	mu       sync.Mutex
 	requests []gateway.RunRequest
+}
+
+type mediaDownloaderFunc func(context.Context, gateway.MediaReference) (channels.MediaDownload, error)
+
+func (download mediaDownloaderFunc) Download(ctx context.Context, ref gateway.MediaReference) (channels.MediaDownload, error) {
+	return download(ctx, ref)
+}
+
+func TestControlledImageDownloadEntersRunnerWithoutProviderKey(t *testing.T) {
+	crypt, _ := wecom.NewCrypt(testToken, strings.TrimSuffix(base64.StdEncoding.EncodeToString(testAESKey), "="), testCorpID)
+	binding := wecom.Binding{TenantID: "tenant-a", AppID: "assistant", BindingID: "corp-a", CorpID: testCorpID, AgentID: testAgentID, ConfigVersion: 7, Crypt: crypt}
+	submitter := &captureSubmitter{}
+	core := &openclaw.Handler{Inbox: idempotency.NewMemoryStore(), Submitter: submitter, ClaimOwner: "gateway", ClaimTTL: time.Minute}
+	adapter, err := wecom.NewDynamicHandlerWithMedia(core, func(string) []wecom.Binding { return []wecom.Binding{binding} }, func(wecom.Binding) channels.MediaDownloader {
+		return mediaDownloaderFunc(func(_ context.Context, ref gateway.MediaReference) (channels.MediaDownload, error) {
+			if ref.Key != "private-media-key" {
+				t.Fatalf("unexpected media reference")
+			}
+			png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0}
+			return channels.MediaDownload{Body: io.NopCloser(bytes.NewReader(png)), ContentType: "image/png", Size: int64(len(png))}, nil
+		})
+	}, channels.MediaPolicy{TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := `<xml><ToUserName>` + testCorpID + `</ToUserName><FromUserName>alice</FromUserName><CreateTime>1720000000</CreateTime><MsgType>image</MsgType><MsgId>media-message</MsgId><AgentID>` + testAgentID + `</AgentID><MediaId>private-media-key</MediaId></xml>`
+	encrypted := encryptTestMessage(t, plain, testCorpID)
+	body := `<xml><Encrypt><![CDATA[` + encrypted + `]]></Encrypt></xml>`
+	response := httptest.NewRecorder()
+	adapter.ServeHTTP(response, httptest.NewRequest(http.MethodPost, callbackURL("corp-a", signature(testToken, testTimestamp, testNonce, encrypted), encrypted), strings.NewReader(body)))
+	if response.Code != http.StatusOK || len(submitter.requests) != 1 {
+		t.Fatalf("status=%d requests=%d", response.Code, len(submitter.requests))
+	}
+	request := submitter.requests[0]
+	serialized, _ := json.Marshal(request)
+	if len(request.Attachments) != 1 || request.Attachments[0].Kind != "image" || strings.Contains(string(serialized), "private-media-key") {
+		t.Fatalf("unsafe durable request: %s", serialized)
+	}
 }
 
 func (submitter *captureSubmitter) Submit(request gateway.RunRequest) error {

@@ -160,150 +160,27 @@ curl -H 'Authorization: Bearer local-secret' \
 ```
 
 直接运行二进制时需要设置 `TRPC_AGENT_POSTGRES_DSN`、`TRPC_AGENT_REDIS_URL`、
-`DEEPSEEK_API_KEY` 和通道凭据，再执行 `./start.sh`。PR3 的确定性 Runner 示例仍可用
+`DEEPSEEK_API_KEY` 和通道凭据，再执行 `./start.sh`。确定性 Runner 示例仍可用
 `go run ./examples/quickstart` 单独运行，它不代表服务部署方式。
 
 ## 交付状态
 
 设计中的组件按以下状态区分，避免把规划能力误读为已交付能力。
 
-### 临时开发进度（全部完成后删除）
+### 当前进度
 
-当前按任务基础要求估算完成约 **85%**。多租户、多节点、企业微信/飞书真实链路、
-共享 Session/Memory、治理、审计、Trace、告警和 Compose 验收已经完成；剩余工作按
-“先跑通最小链路，再补生产增强”的原则推进，不在首轮引入不必要的复杂部署。
+项目基础功能约完成 **90%**。
 
-- **已完成：PR20、PR21。** 双 IM 多节点 Compose 验收、Worker 接管、fencing、租户隔离、
-  Tempo 持久化 Trace、Grafana 数据源和 Prometheus 生产告警均已有自动化验证。
-- **下一步：PR22 最小媒体闭环。** 先实现企业微信/飞书受控媒体下载、大小/类型/超时限制、
-  临时文件清理、图片多模态输入、基础文档文本提取和一种飞书交互卡片回复；继续复用现有
-  Outbox 重试、限流和 DLQ，并确保 media key、下载 URL、文件正文不进入日志和审计。
-- **随后：PR23 最小迁移闭环。** 分别跑通 PGVector → Qdrant Knowledge、Qdrant → PGVector
-  Knowledge 和 S3 → PostgreSQL Artifact，复用现有 checkpoint、双写、checksum 和 cutover
-  控制面；外部 Memory 与 Audit/WORM 先提供最小可运行 Adapter，不扩展复杂供应商特性。
-- **最后：PR24 简单 Kubernetes Demo。** 使用本地 `kind` 或 Docker Desktop Kubernetes，
-  部署 Gateway 与 Worker 多副本并发送合成消息走完整链路；只做单 Pod 重启、滚动升级、
-  回滚及基础 PDB/HPA 检查，形成可复现报告。首轮不搭建复杂多集群或全套灾难演练，且任何
-  脚本都不得删除 PostgreSQL、Redis 或其他持久数据卷。
+- **已完成：** 多租户配置与隔离、Gateway/Worker 多节点运行、共享 Session/Memory、
+  企业微信和飞书真实消息链路、幂等与故障接管、治理审计、OpenTelemetry Trace、
+  Prometheus 告警及 Compose 验收；企业微信/飞书受控媒体下载、基础文档提取、多模态输入、
+  飞书卡片回复及其安全限制也已实现。
+- **进行中：** Knowledge/Artifact 双向迁移、外部 Memory 与 Audit Adapter。
+- **待完成：** 一个简单可复现的 Kubernetes 多副本 Demo、重启和滚动升级验收。
+- **实施原则：** 优先跑通最小完整链路，再补容量优化和复杂故障演练；所有操作保留
+  PostgreSQL、Redis 等现有数据卷，不在仓库和验收输出中保存凭据或用户消息正文。
 
-上述剩余链路全部实现并完成验收后，应删除本临时进度小节，以正式交付状态和验收报告为准。
-
-**已经实现并验证**：
-
-- 企业微信与飞书真实端到端链路均已通过人工平台验收：真实 IM 回调 → Inbox 幂等 → tRPC-Agent-Go Runner → DeepSeek → PostgreSQL Session/Memory/Event → Outbox → 对应 IM 回复。仓库只记录结论，不保存截图、用户消息正文或凭据。
-- 多节点消息运行时：Redis Streams consumer group 即时调度、PostgreSQL Inbox/fencing/Outbox、崩溃恢复与 DLQ、共享状态/取消、共享预算/审批、节点心跳以及 Redis 跨节点限流与事件总线。
-- 控制面数据模型与不可变配置版本、治理审计、OpenTelemetry 链路、Compose 最小部署。
-
-**本 PR（PR9：生产控制面与动态配置发布）实现**：
-
-- 生产 Admin API：`validate` / `publish` / `list` / `current` / `rollback`，全部要求 Bearer 认证与显式租户 scope，客户端无法通过请求体或参数切换租户。
-- `expected_version` 乐观锁（并发发布只有一个成功，其余 409）、不可变版本（回滚创建新版本并记录 `rollback_of`、`created_by`、`content_hash`、`published_at`）。
-- 发布/回滚审计日志（tenant、actor、action、版本、decision、error_type、latency、trace_id、timestamp）。
-- 动态 Runtime Bundle 切换：入站路由、IM 回调绑定、Runtime 快照和出站 Sender 都按请求钉住控制面版本；新请求使用新版本，旧请求及其 Outbox 回复继续使用旧版本，旧 Bundle 在引用归零后 drain 并 Close；目标版本初始化失败时精确版本请求进入重试，绝不静默回退执行旧 Bundle。
-- disabled 租户 / App / Binding 立即拒绝新请求；生产配置缺少共享 PostgreSQL 后端时 fail fast，Admin 发布非持久化存储配置会被直接拒绝。
-- 配置发布后无需 `docker compose down -v`、无需删除数据卷、无需重建环境；启动文件只在首次启动时播种，之后数据库是唯一事实源。
-
-**本 PR（PR10：飞书 Channel Adapter 与 Sender）实现**：
-
-- 飞书事件订阅回调：URL verification 挑战应答、`X-Lark-Signature` 原始请求体签名校验、Verification Token 常量时间校验、Encrypt Key（AES-256-CBC）解密，事件订阅 v2 `im.message.receive_v1` 转换为统一 `gateway.InboundMessage`。
-- 多租户消歧：多个租户可共享飞书 app_id 或 binding_id；加密回调以服务端 Encrypt Key 验签和解密后，再通过 Verification Token 与 app_id 唯一匹配，无法唯一匹配时返回 401；disabled 租户/App/Binding 返回 404。
-- 身份与 session：open_id 优先（union_id 兜底，不用昵称），`user_id` 带 channel + binding 范围，单聊/群聊 session 稳定，与企业微信相同外部 ID 永不冲突。
-- 消息解析：文本（剥离 @机器人提及占位）、图片/文件安全元数据（不含 image_key/file_key、不访问外部 URL，预留 `MediaDownloader` 扩展点），不支持的事件安全 ACK。
-- 飞书 Sender：tenant_access_token 并发安全缓存、提前一分钟刷新、失效强制刷新重试一次；单聊/群聊文本回复、4096 字节 UTF-8 安全分片；可重试/永久/uncertain 错误分类；完整复用 Outbox、Delivery Worker、Redis 限流、重试和 DLQ。
-- 动态配置：飞书 binding 的发布、禁用、回滚即时生效；Outbox 按入口钉住的 config_version 解析旧 Sender；canary secret 不出现在响应、日志、错误或审计中。
-- 飞书真实端到端链路已完成人工平台验收；固定协议、幂等、租户消歧、Sender 和 Outbox 仍由自动化测试持续覆盖。复验步骤见 [docs/feishu.md](docs/feishu.md)。
-
-**本 PR（PR11：跨节点共享调度与控制）实现**：
-
-- Gateway 和 Inbox recovery poller 都把已 claim 的 `RunRequest` 投递到 Redis Streams consumer group；多个 Worker 节点竞争消费，PostgreSQL Inbox 仍是事实源并在流消息丢失或节点崩溃后恢复。
-- PostgreSQL `run_statuses` 保存跨节点请求状态和取消意图；Redis cancel bus 把取消命令即时广播给持有 Runner 的节点，Worker 同时轮询持久化意图作为 Pub/Sub 丢失兜底。
-- PostgreSQL 原子预算预留/核销和共享工具审批替代生产进程内 Store；不同 Gateway/Worker 节点可查询状态、批准工具并执行取消，不要求 sticky session。
-- `worker_nodes` 保存唯一节点 ID、心跳、draining 和停止时间；重复的活跃 `TRPC_AGENT_NODE_ID` 启动失败。关闭时先标记 draining、停止接收；未完成请求释放/失去 lease 后由其他节点有界接管。
-- PostgreSQL/Redis Compose 集成测试可用 `docker compose --profile test run --rm --build integration-test` 重复执行，不要求删除数据卷。
-
-**本 PR（PR12：多后端 Storage Router 与数据迁移 Worker）实现**：
-
-- Runtime Bundle 按不可变配置版本分别路由 Session/Summary、Memory 和 Artifact；各数据域可以使用平台 PostgreSQL或由 SecretRef 指向的独立 PostgreSQL 集群。外部连接池按 SecretRef 身份缓存并在服务关闭时释放。
-- `migration_target` 启用读主库、同步双写目标库；Session 与 Summary 必须使用完全相同的主路由和迁移目标。目标写失败显式返回错误，不允许静默形成不可见的数据缺口。
-- PostgreSQL `migration_jobs` 保存租户、App、配置版本、domain、claim lease、checkpoint、行数、重试和 error type；多个节点使用 `SKIP LOCKED` 竞争批量 backfill，目标端 ledger 与数据写入同事务，checkpoint 丢失后重放也不会重复插入。
-- Admin API 支持计划、列表、查询和取消迁移。source/target 只取自已发布配置，客户端不能上传 DSN 或切换租户；响应、错误和审计均不返回 SecretRef 或解析后的数据库凭据。
-- cutover 必须满足：旧版本已声明目标、对应迁移任务 completed、copied rows 不少于 source snapshot，并通过 expected version。任意改路由或直接回滚到可能陈旧的源库都会被拒绝，需先执行反向迁移。
-- 服务启动、配置 validate/publish 会连接并检查所有路由所需表；SecretRef 缺失、目标不可达或未执行 schema migration 时 fail fast。完整操作步骤见 [Storage Router 与迁移](docs/storage-migrations.md)。
-
-**本 PR（PR13：Knowledge/RAG 与对象存储）实现**：
-
-- 可选的租户/App 级 Knowledge 配置使用 OpenAI-compatible Embedding，向量后端支持 PGVector 与 Qdrant；API Key 和 Qdrant Key 只允许通过 SecretRef 解析。
-- 受 Admin 认证与 tenant scope 保护的文本 ingest/search API 完成 chunk、embedding、upsert 与检索；服务端强制覆盖 `tenant_id`/`app_id` metadata，并为每个租户/App 派生独立物理 table/collection，客户端不能扩大作用域。
-- 启用 Knowledge 的 App 必须把 `knowledge_search` 加入工具白名单；该工具随不可变 Runtime Bundle 构建，新配置发布后新请求使用新索引配置，旧请求继续使用旧 Bundle 并有界关闭连接。
-- Artifact 生产路由新增 S3-compatible（含 MinIO）。S3 revision 分配使用共享 PostgreSQL advisory lock 跨节点串行化；PostgreSQL → S3 支持双写、可恢复 backfill、外部写入后 ledger 对账与受控 cutover。
-- 配置 validate/publish 和启动 preflight 会验证 PGVector/Qdrant、S3 凭据与可达性；初始化或切换失败不会替换上一份有效 Bundle，错误不包含解析后的凭据。配置和操作说明见 [Knowledge/RAG 与 S3 Artifact](docs/knowledge.md)。
-- PR13 本身不交付 MCP、业务 Tool、复杂 PDF/OCR 文档流水线或 Knowledge 跨向量后端自动迁移；后续增量的状态以本节对应 PR 条目为准。
-
-**PR14 + PR21（持久化治理、Trace 与生产告警）实现**：
-
-- 生产进程安装 OpenTelemetry SDK Provider，经 OTLP/gRPC 向 Collector 导出 trace 与 metrics；所有 HTTP/企业微信/飞书入口统一提取 `traceparent`，关闭时有界 flush。
-- Collector 使用内存保护和 batch pipeline，Prometheus 持久化 15 天指标，Grafana 自动 provision 数据源和租户请求、p95、Inbox/Outbox/DLQ、token/cost dashboard。
-- 新增模型首事件耗时、低基数队列深度、活跃 Worker、PostgreSQL 健康与延迟指标；request/user/session/message ID 不进入 metrics label。
-- 审计保留策略由后台 Worker 自动执行，多节点通过 PostgreSQL advisory lock 保证每轮只有一个节点清理；策略始终来自当前已发布配置。
-- Compose 的 trace 由 Collector 写入带独立命名卷和 7 天保留期的 Tempo；Grafana 自动配置
-  Tempo 数据源，Prometheus 加载错误率、DLQ、持续积压、无 Worker 和 PostgreSQL 异常告警。
-  `traceparent` 串起 Callback、Inbox、Worker、Model、Tool、Storage、Outbox 与实际 Sender，
-  且拒绝传播 caller-controlled baggage/tracestate。完整说明见 [生产可观测性](docs/observability.md)。
-
-**本 PR（PR15：Kubernetes、容量测试、故障演练与生产验收）实现**：
-
-- 提供三副本 Kubernetes Kustomize 基线：独立 migration Job、滚动更新、PDB、HPA、拓扑分散、NetworkPolicy、非 root/只读文件系统和外部 Secret 引用；仓库不渲染或提交 Secret。
-- `/healthz` 只表示进程存活，`/readyz` 在两秒上限内检查 PostgreSQL/Redis；依赖不可用时 Pod 退出 Service endpoints，但不会因 liveness 重启风暴丢失排障现场。
-- Worker 并发由 `TRPC_AGENT_WORKER_CONCURRENCY` 显式配置，合法范围 1–256；非法值启动失败。容量工具提供有界 health/readiness/gateway 压测和聚合 p50/p95/p99 报告。
-- Kubernetes 静态安全校验、默认只预览且双重确认的单 Pod 演练、默认只读且可选择真实 Runner 消息的生产验收脚本均已纳入 CI/运维文档。
-- PR15 首次交付时使用合并进程基线；PR19 已在不改变其可靠性约束的前提下升级为 Gateway/Worker 独立 Deployment。Delivery 和 maintenance 仍随 Worker 运行。
-
-**本 PR（PR16：生产 MCP Registry 与业务工具）实现**：
-
-- Agent App 可发布多个命名的 MCP Streamable HTTP 服务和 HTTPS JSON 业务工具；远端 MCP 工具以 `mcp__<server_id>__<tool_name>` 暴露，多个租户/App 或同名远端工具互不覆盖。
-- MCP/业务工具的 endpoint、允许工具集合、超时和认证 SecretRef 只能由 Admin 配置发布，模型不能提交临时 URL、认证头或启动 stdio 进程。生产只接受 HTTPS，禁止 URL userinfo、query、fragment 和重定向。
-- Admin validate/publish 和服务启动会初始化 MCP、执行 ListTools 并核对发布白名单；SecretRef 缺失、服务不可达或工具不存在时 fail fast，发布失败继续使用旧配置版本。
-- 每份 Runtime Bundle 固定自己的 MCP 会话和业务工具；新请求使用新版本，旧请求完成后才关闭旧会话。工具继续经过租户 allow/deny、危险工具审批、预算、trace 和审计链路。
-- 提供固定 POST JSON 业务工具：Bearer SecretRef、请求体/响应体上限、有界超时、禁止 redirect、`X-Idempotency-Key` 和结构化递归脱敏。详细配置与边界见 [生产 MCP 与业务工具](docs/mcp-tools.md)。
-
-**本 PR（PR17：生产消息故障恢复控制面）实现**：
-
-- Admin API 可按租户查询 Inbox DLQ、Outbox DLQ 和 Outbox `uncertain`，响应只包含受控运维元数据，不返回消息正文、外部身份、session、收件人、平台错误或 SecretRef。
-- DLQ 重放使用 `(tenant_id, message_id, expected_status)` 状态 CAS；并发操作只有一个成功，其余返回 409，同名 ID 不会跨租户读取或修改。
-- `uncertain` 禁止走普通重放。管理员必须显式确认“已送达”，或在声明承担重复投递风险后重新排队；旧 claim 会被清理，新 Worker 从共享 PostgreSQL 安全接管。
-- 每次重放和人工裁决都写追加式脱敏审计，包含 actor、action、message id、旧/新状态、decision、error type、latency、trace id、reason hash 和 timestamp。接口与值班流程见 [Inbox / Outbox 故障恢复](docs/message-recovery.md)。
-
-**本 PR（PR18：跨节点租户 Runner 并发配额）实现**：
-
-- 租户配置新增 `runtime.max_concurrent_runs`（1–256，历史版本缺省为 8）；配置发布后新请求立即按新配额准入，旧请求不被中断。
-- 所有 Worker 通过 Redis 过期信号量共享活跃 Runner 计数；tenant/request/claim 只以哈希进入 Redis，租户之间不共享 key，同名请求不会互相占用。
-- 缩小配额时先排空旧请求再接纳新请求；Worker 崩溃后 permit 自动过期，正常/延迟释放使用精确成员，旧 claim 不能释放新 claim。
-- 配额等待采用有界窗口并轮询共享取消；超时通过不消耗 attempt 的 Inbox `Defer` 无损让出 Worker，避免超额租户饿死其他租户。Redis 异常或 permit 续租失败时 fail closed，不允许绕过配额调用模型。真实 Redis 两节点测试纳入 CI，详见[租户级 Runner 并发配额](docs/tenant-concurrency.md)。
-
-**本 PR（PR19：Gateway / Worker 角色拆分）实现**：
-
-- 可执行文件新增 `--role all|gateway|worker`。Gateway 只负责 HTTP/Admin/Channel 入口和 Redis Stream 生产，不构造 Runtime Bundle、不启动队列消费者或 Inbox recovery；Worker 不绑定 HTTP 端口，只消费共享队列并执行 Runner。
-- 取消控制拆成 Gateway producer 与 Worker subscriber，持久取消意图仍落 PostgreSQL；默认 `all` 保持 Docker Compose 兼容。Kubernetes 使用独立 Gateway/Worker Deployment、PDB 和 HPA，回调与模型负载可分别扩缩容。
-- 本增量仍把 Outbox、Storage migration 和审计 retention 放在 Worker 角色；独立后台角色和基于队列指标的 HPA 属于下一步，不写成已完成。
-
-**本 PR（PR20：双 IM 与多节点生产验收）实现**：
-
-- Compose 新增 opt-in `multinode` profile：一个 producer-only Gateway、两个 consumer-only Worker，共享原 PostgreSQL/Redis 与命名卷；默认 `service --role all` 保持兼容，不需要 sticky session。
-- 验收脚本默认只读，检查健康/就绪、两个节点心跳、Worker 无回调端口、Redis Stream、共享 Session/Event/Memory 与配置版本；显式启用后使用合成作用域验证双 Worker 消费、重复消息幂等、单 Worker 停止后的接管和重启持久性。
-- 回归覆盖 Runner 前的 session 顺序门禁、runtime Session fence 竞态、旧 token 提交拒绝、精确配置版本不回退，以及企业微信/飞书同外部标识和同名 binding 的 fail-closed 隔离。
-- 自动化测试与人工真实平台验收分开记录；验收输出不打印 SecretRef、凭据、下载地址或消息正文。
-
-**本 PR（PR21：持久化 Trace 与生产告警）实现**：
-
-- Compose 增加固定版本 Tempo、独立持久卷和 Collector OTLP exporter；Grafana provision Tempo
-  数据源，并提供 trace-to-metrics 跳转。
-- Outbox payload 只持久化安全的 W3C `traceparent`，Sender 在其他 Worker/重启后仍继续原 trace；
-  调用者可控 ID 只记录 hash，baggage/tracestate、Secret 和消息正文不进入遥测。
-- Prometheus 加载错误率、DLQ、持续积压、无活跃 Worker、PostgreSQL 异常五类规则；数据库
-  健康只有 Ping、队列和节点查询全部成功才为 1。
-- 提供默认非破坏、无敏感输出的结构/live 验收脚本和[报告模板](docs/observability-acceptance-report.md)。
-
-Outbox/maintenance 独立进程、队列自定义指标扩缩容、外置不可变审计归档、复杂文档解析和 Knowledge 跨向量后端迁移仍是后续能力。
+全部功能验收完成后删除本进度小节，以正式验收报告为准。
 
 ## Admin API
 
@@ -353,7 +230,7 @@ PostgreSQL + Redis 的 Compose 启动、验证和生产拓扑边界见
 [`docs/capacity.md`](docs/capacity.md)、[`docs/fault-drills.md`](docs/fault-drills.md) 和
 [`docs/production-acceptance.md`](docs/production-acceptance.md)。
 
-PR7 的企业微信协议测试和 PR10 的飞书协议测试都不需要真实账号：
+企业微信和飞书协议测试都不需要真实账号：
 
 ```bash
 go test ./trpcservice/channels/wecom ./trpcservice/channels/feishu

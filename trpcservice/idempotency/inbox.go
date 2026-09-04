@@ -45,7 +45,7 @@ func (claim Claim) RunRequest() gateway.RunRequest {
 		TenantID: message.TenantID, AppID: message.AppID, BindingID: message.BindingID,
 		ExternalMessageID: message.ExternalMessageID, ExternalUserID: message.ExternalUserID,
 		ConversationID: message.ConversationID, UserID: message.UserID, SessionID: message.SessionID,
-		Text: message.Text, TraceID: message.TraceID, TraceContext: message.TraceContext,
+		Text: message.Text, Attachments: message.Attachments, TraceID: message.TraceID, TraceContext: message.TraceContext,
 		ConfigVersion: message.ConfigVersion, ClaimOwner: claim.Owner, ClaimToken: claim.ClaimToken,
 		ClaimAttempt: claim.Attempt, ClaimLeaseUntil: claim.LeaseUntil,
 	}
@@ -159,6 +159,9 @@ func InboxID(message gateway.InboundMessage) string {
 func (store *MemoryStore) Claim(_ context.Context, message gateway.InboundMessage, owner string, ttl time.Duration) (Claim, bool, error) {
 	if message.TenantID == "" || message.BindingID == "" || message.ExternalMessageID == "" || owner == "" || ttl <= 0 {
 		return Claim{}, false, errors.New("idempotency: tenant, binding, external message, owner, and positive ttl are required")
+	}
+	if message.Media != nil {
+		return Claim{}, false, errors.New("idempotency: unresolved media reference is not durable")
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()

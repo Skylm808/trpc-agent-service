@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway/openclaw"
@@ -408,6 +410,38 @@ func TestImageAndFileBecomeSafeMetadata(t *testing.T) {
 	}
 	if !strings.Contains(acceptor.messages[1].Text, "report.pdf") {
 		t.Fatalf("file name missing: %q", acceptor.messages[1].Text)
+	}
+}
+
+type controlledDownloader func(context.Context, gateway.MediaReference) (channels.MediaDownload, error)
+
+func (download controlledDownloader) Download(ctx context.Context, ref gateway.MediaReference) (channels.MediaDownload, error) {
+	return download(ctx, ref)
+}
+
+func TestControlledFileDownloadExtractsTextAndDropsProviderKey(t *testing.T) {
+	submitter := &captureSubmitter{}
+	core := &openclaw.Handler{Inbox: idempotency.NewMemoryStore(), Submitter: submitter, ClaimOwner: "gateway", ClaimTTL: time.Minute}
+	adapter, err := feishu.NewDynamicHandlerWithMedia(core, staticProvider(testBinding("tenant-a")), func(feishu.Binding) channels.MediaDownloader {
+		return controlledDownloader(func(_ context.Context, ref gateway.MediaReference) (channels.MediaDownload, error) {
+			if ref.Key != "private-file-key" || ref.MessageID != "om_2" {
+				t.Fatalf("reference=%+v", ref)
+			}
+			return channels.MediaDownload{Body: io.NopCloser(strings.NewReader("document text")), ContentType: "text/plain", Name: "notes.txt", Size: 13}, nil
+		})
+	}, channels.MediaPolicy{TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := mediaEvent(testAppID, "evt-file-controlled", "ou_a", "file", `{"file_key":"private-file-key","file_name":"notes.txt"}`)
+	response := post(adapter, "feishu-a", []byte(event))
+	if response.Code != http.StatusOK || len(submitter.requests) != 1 {
+		t.Fatalf("status=%d requests=%d body=%s", response.Code, len(submitter.requests), response.Body.String())
+	}
+	request := submitter.requests[0]
+	serialized, _ := json.Marshal(request)
+	if len(request.Attachments) != 1 || request.Attachments[0].ExtractedText != "document text" || strings.Contains(string(serialized), "private-file-key") {
+		t.Fatalf("unsafe durable request: %s", serialized)
 	}
 }
 

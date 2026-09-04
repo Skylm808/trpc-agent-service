@@ -110,10 +110,15 @@ func (source *AppTokenSource) Invalidate(token string) {
 }
 
 func (source *AppTokenSource) client() *http.Client {
+	var configured *http.Client
 	if source.Client != nil {
-		return source.Client
+		configured = source.Client
+	} else {
+		configured = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &http.Client{Timeout: 10 * time.Second}
+	copy := *configured
+	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &copy
 }
 
 func (source *AppTokenSource) baseURL() string {
@@ -214,13 +219,27 @@ func (sender *Sender) post(ctx context.Context, token string, outbound gateway.O
 	if outbound.ConversationID != "" {
 		receiveIDType, receiveID = "chat_id", outbound.ConversationID
 	}
-	content, err := json.Marshal(map[string]string{"text": text})
+	messageType := "text"
+	var content []byte
+	var err error
+	if outbound.ReplyFormat == "card" {
+		messageType = "interactive"
+		content, err = json.Marshal(map[string]any{
+			"config": map[string]bool{"wide_screen_mode": true},
+			"elements": []any{map[string]any{
+				"tag":  "div",
+				"text": map[string]string{"tag": "lark_md", "content": text},
+			}},
+		})
+	} else {
+		content, err = json.Marshal(map[string]string{"text": text})
+	}
 	if err != nil {
 		return 0, err
 	}
 	body, err := json.Marshal(map[string]any{
 		"receive_id": receiveID,
-		"msg_type":   "text",
+		"msg_type":   messageType,
 		"content":    string(content),
 	})
 	if err != nil {
@@ -252,10 +271,15 @@ func (sender *Sender) post(ctx context.Context, token string, outbound gateway.O
 }
 
 func (sender *Sender) client() *http.Client {
+	var configured *http.Client
 	if sender.Client != nil {
-		return sender.Client
+		configured = sender.Client
+	} else {
+		configured = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &http.Client{Timeout: 10 * time.Second}
+	copy := *configured
+	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &copy
 }
 
 func (sender *Sender) baseURL() string {

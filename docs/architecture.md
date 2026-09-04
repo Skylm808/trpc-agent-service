@@ -172,7 +172,7 @@ sequenceDiagram
 
 `trace_id` 在回调时生成或从可信上游提取，随后写入 Inbox、RunRequest、Runner context、Tool span、Session/Memory 写入、Outbox 和审计日志。`request_id` 使用租户作用域的 Inbox ID。这样一次 IM 回调即使跨过 Gateway、队列、Worker 和发送节点，仍能在 trace 中还原。
 
-Adapter 把验签后的企业微信 XML 或飞书事件 JSON 转成 `InboundMessage`。Runtime Bundle 用 `model.NewUserMessage(text)` 构造输入，再调用 `Runner.Run(ctx, user_id, session_id, message, WithRequestID, WithAppName)`。Agent Event 被投影成 `RunEvent`：delta 进入 SSE，最终文本写入 Outbox。企业微信当前只异步发送分片文本；卡片和飞书交互式卡片回复尚未实现。
+Adapter 把验签后的企业微信 XML 或飞书事件 JSON 转成 `InboundMessage`。文本直接构造 `model.NewUserMessage`；受控下载的图片在模型显式支持多模态时构造成 image ContentPart，基础文档提取为有界文本。随后调用 `Runner.Run(ctx, user_id, session_id, message, WithRequestID, WithAppName)`。Agent Event 被投影成 `RunEvent`：delta 进入 SSE，最终回复写入 Outbox；飞书 binding 可选择文本或基础交互卡片。
 
 同一 session 的并发写由 Redis fencing token 和 PostgreSQL session head 共同约束。Worker 取得 lease 后先推进 `last_fence`；提交时必须在同一事务中检查 token，并要求 `inbox_seq = last_event_seq + 1`。暂停后恢复的旧 Worker 即使继续运行，也会因 fence 过期而无法写入。
 
@@ -197,7 +197,7 @@ command bus 只做低延迟通知。预算和工具审批同样使用 PostgreSQL
 | 平台限制 | 文本按 UTF-8 字节分片，处理成员频率限制和 token 刷新 | 处理消息长度、频控与 token 缓存刷新，群聊需要 @机器人才触发事件 |
 | 当前状态 | Adapter、Sender、自动化协议测试和人工真实 E2E 均已通过 | Adapter、Sender、自动化协议测试和人工真实 E2E 均已通过 |
 
-企业微信的图片、文件和未识别语音转成元数据占位文本，不自动下载 `media_id`。撤回等事件只确认接收，不触发 Runner；未来若同步撤回状态，应追加 tombstone event，已发生的 Tool 副作用不能自动撤销。实现细节见[企业微信 Channel Adapter](wecom.md)。飞书 Adapter 与 Sender 已由 PR10 交付，与企业微信共用同一主链路；细节见[飞书 Channel Adapter](feishu.md)。
+企业微信和飞书的图片/文件在认证后通过固定平台 API 受控下载，媒体标识不会进入 Inbox、日志或审计；类型、大小、超时、临时文件与模型能力边界见 [IM 媒体与飞书卡片](media.md)。未识别语音仍转为安全占位，撤回等事件只确认接收，不触发 Runner；未来若同步撤回状态，应追加 tombstone event，已发生的 Tool 副作用不能自动撤销。
 
 ## 5. 最小数据模型
 

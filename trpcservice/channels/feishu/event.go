@@ -123,7 +123,7 @@ func normalize(binding Binding, env envelope, now time.Time) (gateway.InboundMes
 		return gateway.InboundMessage{}, err
 	}
 	traceHash := sha256.Sum256([]byte(binding.TenantID + "\x00" + binding.BindingID + "\x00" + externalMessageID))
-	return gateway.InboundMessage{
+	inbound := gateway.InboundMessage{
 		TenantID:          binding.TenantID,
 		AppID:             binding.AppID,
 		BindingID:         binding.BindingID,
@@ -136,7 +136,33 @@ func normalize(binding Binding, env envelope, now time.Time) (gateway.InboundMes
 		TraceID:           "feishu-" + hex.EncodeToString(traceHash[:8]),
 		ConfigVersion:     binding.ConfigVersion,
 		ReceivedAt:        now.UTC(),
-	}, nil
+	}
+	if media := event.mediaReference(); media != nil {
+		media.MessageID = strings.TrimSpace(event.Message.MessageID)
+		inbound.Media = media
+	}
+	return inbound, nil
+}
+
+func (event messageEvent) mediaReference() *gateway.MediaReference {
+	switch strings.ToLower(strings.TrimSpace(event.Message.MessageType)) {
+	case "image":
+		var content struct {
+			ImageKey string `json:"image_key"`
+		}
+		if json.Unmarshal([]byte(event.Message.Content), &content) == nil && strings.TrimSpace(content.ImageKey) != "" {
+			return &gateway.MediaReference{Kind: "image", Key: strings.TrimSpace(content.ImageKey)}
+		}
+	case "file":
+		var content struct {
+			FileKey  string `json:"file_key"`
+			FileName string `json:"file_name"`
+		}
+		if json.Unmarshal([]byte(event.Message.Content), &content) == nil && strings.TrimSpace(content.FileKey) != "" {
+			return &gateway.MediaReference{Kind: "file", Key: strings.TrimSpace(content.FileKey), Name: strings.TrimSpace(content.FileName)}
+		}
+	}
+	return nil
 }
 
 // messageText converts the supported message types into Agent input. Images

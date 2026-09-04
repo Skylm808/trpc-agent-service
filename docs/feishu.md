@@ -92,8 +92,8 @@ channels:
 ## 消息与失败语义
 
 - 文本消息直接成为 Agent 输入；`@_user_N` 提及占位符（含 @机器人）被剥离并折叠空白。
-- 图片和文件转为安全元数据占位文本：不携带 `image_key`/`file_key`，不访问任意外部
-  URL。后续受控下载接入 `MediaDownloader` 扩展点，必须校验来源、大小和 MIME。
+- 图片和文件在验签与租户匹配后通过固定飞书 API 受控下载；限制大小、MIME、超时并安全
+  清理临时文件，`image_key`/`file_key` 和下载 URL 不进入 Inbox、日志或审计。
 - 不支持的事件和消息类型返回 200 ACK，避免飞书无限重试。
 - JSON 格式错误返回 400；请求签名、Verification Token、解密、app_id 校验失败返回 401；
   Inbox/PostgreSQL 临时失败返回 503 让飞书按平台策略重试；重复 `event_id` 返回 200
@@ -157,6 +157,6 @@ Inbox、Runner、DeepSeek、PostgreSQL、Outbox 并回到飞书。该结论与�
 
 ## 当前限制
 
-- 出站只投递文本；交互卡片回复、图片/文件受控下载是后续扩展（`MediaDownloader`）。
+- 出站支持文本和 `reply_format: card` 的基础交互卡片；复杂按钮回调、PDF/Office/OCR 属于后续增强。
 - 群聊 thread/topic 回复暂归入群会话，不单独建 thread session。
 - PR17 已提供 `uncertain` / DLQ 的 Admin 运维 API；可视化 Web 运维页面仍未实现。

@@ -26,6 +26,7 @@ var (
 type Binding struct {
 	TenantID, AppID, BindingID string
 	CorpID, AgentID            string
+	AppSecret                  string
 	ConfigVersion              tenant.ConfigVersion
 	Crypt                      *Crypt
 }
@@ -136,7 +137,7 @@ func normalize(binding Binding, message CallbackMessage, now time.Time) (gateway
 		return gateway.InboundMessage{}, err
 	}
 	traceHash := sha256.Sum256([]byte(binding.TenantID + "\x00" + binding.BindingID + "\x00" + externalMessageID))
-	return gateway.InboundMessage{
+	inbound := gateway.InboundMessage{
 		TenantID:          binding.TenantID,
 		AppID:             binding.AppID,
 		BindingID:         binding.BindingID,
@@ -149,7 +150,11 @@ func normalize(binding Binding, message CallbackMessage, now time.Time) (gateway
 		TraceID:           "wecom-" + hex.EncodeToString(traceHash[:8]),
 		ConfigVersion:     binding.ConfigVersion,
 		ReceivedAt:        now.UTC(),
-	}, nil
+	}
+	if kind := mediaKind(message.MsgType); kind != "" {
+		inbound.Media = &gateway.MediaReference{Kind: kind, Key: strings.TrimSpace(message.MediaID), Name: strings.TrimSpace(message.FileName)}
+	}
+	return inbound, nil
 }
 
 func callbackText(message CallbackMessage) (string, error) {
@@ -159,18 +164,18 @@ func callbackText(message CallbackMessage) (string, error) {
 			return text, nil
 		}
 	case "image":
-		return attachmentText("image", "", message.MediaID), nil
+		return attachmentText("image", ""), nil
 	case "file":
 		name := strings.TrimSpace(message.FileName)
 		if message.FileSize > 0 {
 			name = strings.TrimSpace(name + " " + strconv.FormatInt(message.FileSize, 10) + " bytes")
 		}
-		return attachmentText("file", name, message.MediaID), nil
+		return attachmentText("file", name), nil
 	case "voice":
 		if text := strings.TrimSpace(message.Recognition); text != "" {
 			return text, nil
 		}
-		return attachmentText("voice", "", message.MediaID), nil
+		return attachmentText("voice", ""), nil
 	case "location":
 		return fmt.Sprintf("[WeCom location: %s (%s,%s), scale=%s]", strings.TrimSpace(message.Label), message.LocationX, message.LocationY, message.Scale), nil
 	case "link":
@@ -181,18 +186,23 @@ func callbackText(message CallbackMessage) (string, error) {
 	return "", fmt.Errorf("%w: type %q", ErrUnsupportedMessage, message.MsgType)
 }
 
-func attachmentText(kind, name, mediaID string) string {
+func attachmentText(kind, name string) string {
 	detail := strings.TrimSpace(name)
-	if id := strings.TrimSpace(mediaID); id != "" {
-		if detail != "" {
-			detail += ", "
-		}
-		detail += "media_id=" + id
-	}
 	if detail == "" {
 		return "[WeCom " + kind + "]"
 	}
 	return "[WeCom " + kind + ": " + detail + "]"
+}
+
+func mediaKind(messageType string) string {
+	switch strings.ToLower(strings.TrimSpace(messageType)) {
+	case "image":
+		return "image"
+	case "file":
+		return "file"
+	default:
+		return ""
+	}
 }
 
 func eventMessageID(message CallbackMessage) string {

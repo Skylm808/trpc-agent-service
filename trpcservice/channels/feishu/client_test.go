@@ -88,6 +88,25 @@ func TestSenderCachesTenantAccessToken(t *testing.T) {
 	}
 }
 
+func TestSenderBuildsInteractiveCard(t *testing.T) {
+	api := &fakeFeishuAPI{}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	source := &feishu.AppTokenSource{AppID: "cli_a", AppSecret: "secret", BaseURL: server.URL}
+	sender := &feishu.Sender{Tokens: source, BaseURL: server.URL}
+	message := outbound("card reply")
+	message.ReplyFormat = "card"
+	if err := sender.SendText(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	api.mu.Lock()
+	payload := api.lastPayload
+	api.mu.Unlock()
+	if payload["msg_type"] != "interactive" || !strings.Contains(payload["content"].(string), "card reply") {
+		t.Fatalf("payload=%v", payload)
+	}
+}
+
 func TestConcurrentSendsShareSingleTokenRefresh(t *testing.T) {
 	api := &fakeFeishuAPI{}
 	server := httptest.NewServer(api)

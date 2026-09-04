@@ -27,8 +27,11 @@ func TestNormalizeMediaAndGroupScope(t *testing.T) {
 	if inbound.UserID != "wecom/wecom-a/alice" || inbound.SessionID != "group/wecom-a/room-1" || inbound.ConversationID != "room-1" {
 		t.Fatalf("identity=%+v", inbound)
 	}
-	if inbound.Text != "[WeCom file: report.pdf 42 bytes, media_id=media-1]" {
+	if inbound.Text != "[WeCom file: report.pdf 42 bytes]" {
 		t.Fatalf("text=%q", inbound.Text)
+	}
+	if inbound.Media == nil || inbound.Media.Kind != "file" || inbound.Media.Key != "media-1" || strings.Contains(inbound.Text, "media-1") {
+		t.Fatalf("media reference was not isolated from text: %+v", inbound)
 	}
 	if inbound.TraceID == "" || !inbound.ReceivedAt.Equal(time.Unix(200, 0).UTC()) {
 		t.Fatalf("trace/time=%+v", inbound)

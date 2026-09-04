@@ -16,6 +16,8 @@ type InboundMessage struct {
 	ConversationID             string
 	UserID, SessionID          string
 	Text                       string
+	Media                      *MediaReference
+	Attachments                []Attachment
 	TraceID                    string
 	ConfigVersion              tenant.ConfigVersion
 	ReceivedAt                 time.Time
@@ -30,6 +32,7 @@ type RunRequest struct {
 	ExternalUserID             string
 	ConversationID             string
 	UserID, SessionID, Text    string
+	Attachments                []Attachment
 	TraceID                    string
 	ConfigVersion              tenant.ConfigVersion
 	ClaimOwner, ClaimToken     string
@@ -48,9 +51,24 @@ type OutboundMessage struct {
 	ExternalUserID               string
 	ConversationID               string
 	Text, TraceID                string
+	ReplyFormat                  string
 	TraceContext                 map[string]string
 	SourceInboxID, SourceEventID string
 	CreatedAt                    time.Time
+}
+
+// MediaReference is an opaque provider reference that exists only while an
+// authenticated callback downloads media. It must never be logged, audited,
+// or copied into a durable RunRequest.
+type MediaReference struct {
+	Kind, Key, MessageID, Name string
+}
+
+// Attachment is validated media safe to hand to the pinned Runtime. Images
+// carry bytes for a multimodal model; documents carry bounded extracted text.
+type Attachment struct {
+	Kind, Name, MIME, ExtractedText string
+	Data                            []byte
 }
 
 // AcceptedMessage is the transport-neutral durable ingress acknowledgement.

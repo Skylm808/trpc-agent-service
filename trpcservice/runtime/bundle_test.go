@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/policy"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -26,6 +27,29 @@ import (
 
 func runtimeSnapshot(t *testing.T, tenantID string, version int) config.RuntimeSnapshot {
 	return runtimeSnapshotWithTools(t, tenantID, version, "[echo, calculator]")
+}
+
+func TestUserMessageBuildsMultimodalImageAndExtractedDocument(t *testing.T) {
+	message, err := userMessage(RunInput{Text: "inspect attachments", Attachments: []gateway.Attachment{
+		{Kind: "image", Name: "image.png", MIME: "image/png", Data: []byte{1, 2, 3}},
+		{Kind: "file", Name: "notes.txt", MIME: "text/plain", ExtractedText: "document content"},
+	}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message.ContentParts) != 1 || message.ContentParts[0].Image == nil || message.ContentParts[0].Image.Format != "png" {
+		t.Fatalf("content parts=%+v", message.ContentParts)
+	}
+	if !strings.Contains(message.Content, "[Document notes.txt]") || !strings.Contains(message.Content, "document content") {
+		t.Fatalf("content=%q", message.Content)
+	}
+}
+
+func TestUserMessageRejectsImageForTextOnlyModel(t *testing.T) {
+	_, err := userMessage(RunInput{Text: "inspect", Attachments: []gateway.Attachment{{Kind: "image", MIME: "image/png", Data: []byte{1}}}}, false)
+	if err == nil {
+		t.Fatal("text-only model accepted image input")
+	}
 }
 
 func runtimeSnapshotWithTools(t *testing.T, tenantID string, version int, allowed string) config.RuntimeSnapshot {

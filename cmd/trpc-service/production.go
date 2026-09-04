@@ -507,7 +507,9 @@ var _ delivery.RouteResolver = (*publishedDeliveryRoutes)(nil)
 // and the authenticated administration API around the gateway.
 func productionDecorators(db *sql.DB, store repository.Store, published *config.PublishedCache, redactor *servicelog.Redactor, migrationStore storagemigration.Store, storageRouter *storage.Router, toolRegistry *servicetool.CatalogRegistry) []openclaw.HandlerDecorator {
 	wecomDecorator := func(core *openclaw.Handler, next http.Handler) (http.Handler, error) {
-		adapter, err := wecom.NewDynamicHandler(core, wecomBindingProvider(db, published))
+		adapter, err := wecom.NewDynamicHandlerWithMedia(core, wecomBindingProvider(db, published), func(binding wecom.Binding) channels.MediaDownloader {
+			return &wecom.MediaClient{Tokens: &wecom.CredentialTokenSource{CorpID: binding.CorpID, CorpSecret: binding.AppSecret}}
+		}, channels.MediaPolicy{})
 		if err != nil {
 			return nil, err
 		}
@@ -517,7 +519,9 @@ func productionDecorators(db *sql.DB, store repository.Store, published *config.
 		return mux, nil
 	}
 	feishuDecorator := func(core *openclaw.Handler, next http.Handler) (http.Handler, error) {
-		adapter, err := feishu.NewDynamicHandler(core, feishuBindingProvider(db, published))
+		adapter, err := feishu.NewDynamicHandlerWithMedia(core, feishuBindingProvider(db, published), func(binding feishu.Binding) channels.MediaDownloader {
+			return &feishu.MediaClient{Tokens: &feishu.AppTokenSource{AppID: binding.FeishuAppID, AppSecret: binding.AppSecret}}
+		}, channels.MediaPolicy{})
 		if err != nil {
 			return nil, err
 		}
@@ -710,9 +714,13 @@ func wecomBindingProvider(db *sql.DB, published *config.PublishedCache) wecom.Bi
 			if err != nil {
 				continue
 			}
+			appSecret, err := secret.ResolveLocal(binding.Secret)
+			if err != nil {
+				continue
+			}
 			candidates = append(candidates, wecom.Binding{
 				TenantID: tenantID, AppID: appID, BindingID: bindingID,
-				CorpID: binding.ProviderAccountID, AgentID: binding.ProviderAppID,
+				CorpID: binding.ProviderAccountID, AgentID: binding.ProviderAppID, AppSecret: appSecret,
 				ConfigVersion: version, Crypt: crypt,
 			})
 		}
@@ -754,6 +762,11 @@ func feishuBindingProvider(db *sql.DB, published *config.PublishedCache) feishu.
 				FeishuAppID: binding.ProviderAccountID, VerificationToken: token,
 				ConfigVersion: version,
 			}
+			appSecret, err := secret.ResolveLocal(binding.Secret)
+			if err != nil {
+				continue
+			}
+			candidate.AppSecret = appSecret
 			if !binding.EncryptionKey.IsZero() {
 				encryptKey, err := secret.ResolveLocal(binding.EncryptionKey)
 				if err != nil {

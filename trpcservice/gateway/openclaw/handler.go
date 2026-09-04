@@ -47,6 +47,9 @@ func (handler *Handler) AcceptInbound(ctx context.Context, inbound gateway.Inbou
 	if handler == nil || handler.Inbox == nil || handler.Submitter == nil || handler.ClaimOwner == "" {
 		return gateway.AcceptedMessage{}, errors.New("gateway is not configured")
 	}
+	if inbound.Media != nil {
+		return gateway.AcceptedMessage{}, errors.New("opaque media reference must be resolved before Inbox persistence")
+	}
 	if inbound.TenantID == "" || inbound.AppID == "" || inbound.BindingID == "" || inbound.ExternalMessageID == "" || inbound.ExternalUserID == "" || inbound.UserID == "" || inbound.SessionID == "" || strings.TrimSpace(inbound.Text) == "" || inbound.ConfigVersion == 0 {
 		return gateway.AcceptedMessage{}, errors.New("complete verified inbound message is required")
 	}
