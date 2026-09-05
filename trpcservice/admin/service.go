@@ -158,6 +158,8 @@ func migrationRoute(profile tenant.StorageProfile, domain storagemigration.Domai
 		return profile.Memory.Clone(), nil
 	case storagemigration.DomainArtifact:
 		return profile.Artifact.Clone(), nil
+	case storagemigration.DomainKnowledge:
+		return profile.Knowledge.Clone(), nil
 	default:
 		return tenant.BackendConfig{}, errors.New("unsupported migration domain")
 	}
@@ -317,7 +319,7 @@ func (service *Service) validateStorageTransition(ctx context.Context, tenantID 
 		checks := []struct {
 			domain   storagemigration.Domain
 			old, new tenant.BackendConfig
-		}{{storagemigration.DomainSession, old.Storage.Session, next.Storage.Session}, {storagemigration.DomainMemory, old.Storage.Memory, next.Storage.Memory}, {storagemigration.DomainArtifact, old.Storage.Artifact, next.Storage.Artifact}}
+		}{{storagemigration.DomainSession, old.Storage.Session, next.Storage.Session}, {storagemigration.DomainMemory, old.Storage.Memory, next.Storage.Memory}, {storagemigration.DomainArtifact, old.Storage.Artifact, next.Storage.Artifact}, {storagemigration.DomainKnowledge, old.Storage.Knowledge, next.Storage.Knowledge}}
 		for _, check := range checks {
 			if samePrimaryRoute(check.old, check.new) {
 				continue

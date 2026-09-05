@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledgebase"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
+	"trpc.group/trpc-go/trpc-agent-go/memory"
 )
 
 // Copier advances one bounded backfill batch.
@@ -22,7 +24,12 @@ type Copier interface {
 }
 
 // PostgresCopier copies whitelisted runtime tables between routed clusters.
-type PostgresCopier struct{ Router *storage.Router }
+type KnowledgeResolver func(context.Context, Job, tenant.BackendConfig) (*knowledgebase.Service, error)
+
+type PostgresCopier struct {
+	Router           *storage.Router
+	ResolveKnowledge KnowledgeResolver
+}
 
 type checkpoint struct {
 	Table  int    `json:"table"`
@@ -44,6 +51,15 @@ func (copier *PostgresCopier) Step(ctx context.Context, job Job, batchSize int) 
 	}
 	if job.Domain == DomainArtifact && job.Source.Type == tenant.BackendPostgres && job.Target.Type == tenant.BackendS3 {
 		return copier.stepArtifactToS3(ctx, job, appName, batchSize)
+	}
+	if job.Domain == DomainArtifact && job.Source.Type == tenant.BackendS3 && job.Target.Type == tenant.BackendPostgres {
+		return copier.stepArtifactFromS3(ctx, job, appName, batchSize)
+	}
+	if job.Domain == DomainKnowledge {
+		return copier.stepKnowledge(ctx, job, batchSize)
+	}
+	if job.Domain == DomainMemory && job.Source.Type == tenant.BackendPostgres && job.Target.Type == tenant.BackendExternal {
+		return copier.stepMemoryToExternal(ctx, job, appName, batchSize)
 	}
 	source, err := copier.Router.Resolve(ctx, job.Source)
 	if err != nil {
@@ -108,6 +124,174 @@ func (copier *PostgresCopier) Step(ctx context.Context, job Job, batchSize int) 
 	return progress, nil
 }
 
+func (copier *PostgresCopier) stepMemoryToExternal(ctx context.Context, job Job, appName string, batchSize int) (Progress, error) {
+	source, err := copier.Router.Resolve(ctx, job.Source)
+	if err != nil {
+		return Progress{}, errors.New("storage migration: source memory backend unavailable")
+	}
+	target, err := copier.Router.MemoryForRoute(ctx, job.TenantID, job.AppID, job.Target)
+	if err != nil {
+		return Progress{}, errors.New("storage migration: target memory backend unavailable")
+	}
+	defer target.Close()
+	ledger := copier.Router.MigrationLedgerDB()
+	var mark knowledgeCheckpoint
+	if len(job.Checkpoint) > 0 && json.Unmarshal(job.Checkpoint, &mark) != nil {
+		return Progress{}, errors.New("storage migration: invalid memory checkpoint")
+	}
+	progress := Progress{SourceRows: job.SourceRows, CopiedRows: job.CopiedRows}
+	if progress.SourceRows == 0 {
+		if err := source.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_memories WHERE app_name=$1 AND deleted_at IS NULL`, appName).Scan(&progress.SourceRows); err != nil {
+			return Progress{}, err
+		}
+	}
+	rows, err := source.DB.QueryContext(ctx, `SELECT memory_id,memory_data FROM runtime_memories WHERE app_name=$1 AND deleted_at IS NULL AND memory_id>$2 ORDER BY memory_id LIMIT $3`, appName, mark.Cursor, batchSize)
+	if err != nil {
+		return Progress{}, err
+	}
+	var batch []struct {
+		id   string
+		data []byte
+	}
+	for rows.Next() {
+		var row struct {
+			id   string
+			data []byte
+		}
+		if err := rows.Scan(&row.id, &row.data); err != nil {
+			rows.Close()
+			return Progress{}, err
+		}
+		batch = append(batch, row)
+	}
+	if err := rows.Close(); err != nil {
+		return Progress{}, err
+	}
+	if len(batch) == 0 {
+		progress.Done = true
+		progress.Checkpoint, _ = json.Marshal(mark)
+		return progress, nil
+	}
+	for _, row := range batch {
+		digest := sha256.Sum256(row.data)
+		checksum := hex.EncodeToString(digest[:])
+		var stored string
+		err := ledger.QueryRowContext(ctx, `SELECT checksum FROM storage_migration_items WHERE source_route_hash=$1 AND table_name='runtime_memories' AND source_key=$2`, job.SourceRouteHash, row.id).Scan(&stored)
+		if err == nil {
+			if stored != checksum {
+				return Progress{}, errors.New("storage migration: source memory changed after checkpoint")
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return Progress{}, err
+		} else {
+			var entry memory.Entry
+			if json.Unmarshal(row.data, &entry) != nil || entry.Memory == nil || entry.UserID == "" || entry.AppName != appName {
+				return Progress{}, errors.New("storage migration: source memory row is invalid")
+			}
+			metadata := &memory.Metadata{Kind: entry.Memory.Kind, EventTime: entry.Memory.EventTime, Participants: entry.Memory.Participants, Location: entry.Memory.Location}
+			if err := target.AddMemory(ctx, memory.UserKey{AppName: appName, UserID: entry.UserID}, entry.Memory.Memory, entry.Memory.Topics, memory.WithMetadata(metadata)); err != nil {
+				return Progress{}, err
+			}
+			if _, err := ledger.ExecContext(ctx, `INSERT INTO storage_migration_items (source_route_hash,table_name,source_key,checksum) VALUES ($1,'runtime_memories',$2,$3) ON CONFLICT DO NOTHING`, job.SourceRouteHash, row.id, checksum); err != nil {
+				return Progress{}, err
+			}
+		}
+		progress.CopiedRows++
+		mark.Cursor = row.id
+	}
+	progress.Checkpoint, _ = json.Marshal(mark)
+	return progress, nil
+}
+
+type knowledgeCheckpoint struct {
+	Cursor string `json:"cursor,omitempty"`
+}
+
+type knowledgeRow struct {
+	documentID, name, content string
+	metadata                  []byte
+	version                   int64
+}
+
+func (copier *PostgresCopier) stepKnowledge(ctx context.Context, job Job, batchSize int) (Progress, error) {
+	if copier.ResolveKnowledge == nil {
+		return Progress{}, errors.New("storage migration: knowledge resolver unavailable")
+	}
+	db := copier.Router.MigrationLedgerDB()
+	if db == nil {
+		return Progress{}, errors.New("storage migration: knowledge catalog unavailable")
+	}
+	var mark knowledgeCheckpoint
+	if len(job.Checkpoint) > 0 && json.Unmarshal(job.Checkpoint, &mark) != nil {
+		return Progress{}, errors.New("storage migration: invalid knowledge checkpoint")
+	}
+	progress := Progress{SourceRows: job.SourceRows, CopiedRows: job.CopiedRows}
+	if progress.SourceRows == 0 {
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_knowledge_documents WHERE tenant_id=$1 AND app_id=$2 AND status='active'`, job.TenantID, job.AppID).Scan(&progress.SourceRows); err != nil {
+			return Progress{}, err
+		}
+	}
+	rows, err := db.QueryContext(ctx, `SELECT document_id,name,content,metadata_json,version FROM runtime_knowledge_documents WHERE tenant_id=$1 AND app_id=$2 AND status='active' AND document_id>$3 ORDER BY document_id LIMIT $4`, job.TenantID, job.AppID, mark.Cursor, batchSize)
+	if err != nil {
+		return Progress{}, err
+	}
+	var batch []knowledgeRow
+	for rows.Next() {
+		var row knowledgeRow
+		if err := rows.Scan(&row.documentID, &row.name, &row.content, &row.metadata, &row.version); err != nil {
+			rows.Close()
+			return Progress{}, err
+		}
+		batch = append(batch, row)
+	}
+	if err := rows.Close(); err != nil {
+		return Progress{}, err
+	}
+	if len(batch) == 0 {
+		progress.Done = true
+		progress.Checkpoint, _ = json.Marshal(mark)
+		if progress.CopiedRows < progress.SourceRows {
+			return Progress{}, errors.New("storage migration: copied knowledge count is below source catalog")
+		}
+		return progress, nil
+	}
+	target, err := copier.ResolveKnowledge(ctx, job, job.Target)
+	if err != nil || target == nil {
+		return Progress{}, errors.New("storage migration: target knowledge backend unavailable")
+	}
+	defer target.Close()
+	for _, row := range batch {
+		payload := append(append(append([]byte(row.name), 0), []byte(row.content)...), row.metadata...)
+		payload = append(payload, []byte(fmt.Sprint(row.version))...)
+		digest := sha256.Sum256(payload)
+		checksum := hex.EncodeToString(digest[:])
+		var stored string
+		err := db.QueryRowContext(ctx, `SELECT checksum FROM storage_migration_items WHERE source_route_hash=$1 AND table_name='runtime_knowledge_documents' AND source_key=$2`, job.SourceRouteHash, row.documentID).Scan(&stored)
+		if err == nil {
+			if stored != checksum {
+				return Progress{}, errors.New("storage migration: source knowledge document changed after checkpoint")
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return Progress{}, err
+		} else {
+			var metadata map[string]any
+			if json.Unmarshal(row.metadata, &metadata) != nil {
+				return Progress{}, errors.New("storage migration: knowledge metadata is invalid")
+			}
+			if _, err := target.Ingest(ctx, knowledgebase.IngestRequest{DocumentID: row.documentID, Name: row.name, Content: row.content, Metadata: metadata}); err != nil {
+				return Progress{}, err
+			}
+			if _, err := db.ExecContext(ctx, `INSERT INTO storage_migration_items (source_route_hash,table_name,source_key,checksum) VALUES ($1,'runtime_knowledge_documents',$2,$3) ON CONFLICT DO NOTHING`, job.SourceRouteHash, row.documentID, checksum); err != nil {
+				return Progress{}, err
+			}
+		}
+		progress.CopiedRows++
+		mark.Cursor = row.documentID
+	}
+	progress.Checkpoint, _ = json.Marshal(mark)
+	return progress, nil
+}
+
 type artifactCheckpoint struct {
 	Cursor string `json:"cursor,omitempty"`
 }
@@ -115,7 +299,7 @@ type artifactCheckpoint struct {
 type artifactRow struct {
 	key, userID, sessionID, filename string
 	revision                         int
-	mimeType, url, name              string
+	mimeType, url, name, checksum    string
 	data                             []byte
 }
 
@@ -189,9 +373,14 @@ func selectArtifactBatch(ctx context.Context, db *sql.DB, tenantID, appID, curso
 }
 
 func copyArtifactRow(ctx context.Context, ledger *sql.DB, target artifact.Service, sourceHash, appName string, row artifactRow) (bool, error) {
-	var exists int
-	err := ledger.QueryRowContext(ctx, `SELECT 1 FROM storage_migration_items WHERE source_route_hash=$1 AND table_name='runtime_artifacts' AND source_key=$2`, sourceHash, row.key).Scan(&exists)
+	value := &artifact.Artifact{Data: row.data, MimeType: row.mimeType, URL: row.url, Name: row.name}
+	checksum := storage.ArtifactChecksum(value)
+	var storedChecksum string
+	err := ledger.QueryRowContext(ctx, `SELECT checksum FROM storage_migration_items WHERE source_route_hash=$1 AND table_name='runtime_artifacts' AND source_key=$2`, sourceHash, row.key).Scan(&storedChecksum)
 	if err == nil {
+		if storedChecksum != checksum {
+			return false, errors.New("storage migration: source artifact changed after checkpoint")
+		}
 		// The external write may have committed before a Worker lost its job
 		// lease. Count the durable ledger row again so the control-plane
 		// checkpoint catches up without writing another S3 revision.
@@ -205,7 +394,6 @@ func copyArtifactRow(ctx context.Context, ledger *sql.DB, target artifact.Servic
 	if loadErr != nil {
 		return false, loadErr
 	}
-	value := &artifact.Artifact{Data: row.data, MimeType: row.mimeType, URL: row.url, Name: row.name}
 	if current != nil {
 		if !bytes.Equal(current.Data, value.Data) || current.MimeType != value.MimeType || current.URL != value.URL || current.Name != value.Name {
 			return false, errors.New("storage migration: destination artifact revision conflicts with source")
@@ -219,13 +407,90 @@ func copyArtifactRow(ctx context.Context, ledger *sql.DB, target artifact.Servic
 			return false, errors.New("storage migration: destination artifact revision order mismatch")
 		}
 	}
-	payload, _ := json.Marshal(value)
-	digest := sha256.Sum256(payload)
-	_, err = ledger.ExecContext(ctx, `INSERT INTO storage_migration_items (source_route_hash,table_name,source_key,checksum) VALUES ($1,'runtime_artifacts',$2,$3) ON CONFLICT DO NOTHING`, sourceHash, row.key, hex.EncodeToString(digest[:]))
+	_, err = ledger.ExecContext(ctx, `INSERT INTO storage_migration_items (source_route_hash,table_name,source_key,checksum) VALUES ($1,'runtime_artifacts',$2,$3) ON CONFLICT DO NOTHING`, sourceHash, row.key, checksum)
 	if err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func (copier *PostgresCopier) stepArtifactFromS3(ctx context.Context, job Job, appName string, batchSize int) (Progress, error) {
+	source, err := copier.Router.ArtifactForRoute(ctx, job.Source)
+	if err != nil {
+		return Progress{}, errors.New("storage migration: source artifact backend unavailable")
+	}
+	if closer, ok := source.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+	targetRoute, err := copier.Router.Resolve(ctx, job.Target)
+	if err != nil {
+		return Progress{}, errors.New("storage migration: target backend unavailable")
+	}
+	target := &storage.PostgresArtifactService{DB: targetRoute.DB}
+	catalog := copier.Router.MigrationLedgerDB()
+	if catalog == nil {
+		return Progress{}, errors.New("storage migration: artifact catalog unavailable")
+	}
+	var mark artifactCheckpoint
+	if len(job.Checkpoint) > 0 && json.Unmarshal(job.Checkpoint, &mark) != nil {
+		return Progress{}, errors.New("storage migration: invalid artifact checkpoint")
+	}
+	progress := Progress{SourceRows: job.SourceRows, CopiedRows: job.CopiedRows}
+	if progress.SourceRows == 0 {
+		if err := catalog.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_artifact_catalog WHERE tenant_id=$1 AND app_id=$2`, job.TenantID, job.AppID).Scan(&progress.SourceRows); err != nil {
+			return Progress{}, err
+		}
+	}
+	rows, err := selectArtifactCatalogBatch(ctx, catalog, job.TenantID, job.AppID, mark.Cursor, batchSize)
+	if err != nil {
+		return Progress{}, err
+	}
+	if len(rows) == 0 {
+		progress.Done = true
+		progress.Checkpoint, _ = json.Marshal(mark)
+		if progress.CopiedRows < progress.SourceRows {
+			return Progress{}, errors.New("storage migration: copied artifact count is below source catalog")
+		}
+		return progress, nil
+	}
+	for _, row := range rows {
+		info := artifact.SessionInfo{AppName: appName, UserID: row.userID, SessionID: row.sessionID}
+		value, loadErr := source.LoadArtifact(ctx, info, row.filename, &row.revision)
+		if loadErr != nil || value == nil {
+			return Progress{}, errors.New("storage migration: cataloged source artifact is unavailable")
+		}
+		if storage.ArtifactChecksum(value) != row.checksum {
+			return Progress{}, errors.New("storage migration: source artifact checksum mismatch")
+		}
+		row.data, row.mimeType, row.url, row.name = value.Data, value.MimeType, value.URL, value.Name
+		copied, copyErr := copyArtifactRow(ctx, targetRoute.DB, target, job.SourceRouteHash, appName, row)
+		if copyErr != nil {
+			return Progress{}, copyErr
+		}
+		if copied {
+			progress.CopiedRows++
+		}
+		mark.Cursor = row.key
+	}
+	progress.Checkpoint, _ = json.Marshal(mark)
+	return progress, nil
+}
+
+func selectArtifactCatalogBatch(ctx context.Context, db *sql.DB, tenantID, appID, cursor string, limit int) ([]artifactRow, error) {
+	rows, err := db.QueryContext(ctx, `SELECT jsonb_build_array(user_id,session_id,filename,revision)::text,user_id,session_id,filename,revision,checksum FROM runtime_artifact_catalog WHERE tenant_id=$1 AND app_id=$2 AND jsonb_build_array(user_id,session_id,filename,revision)::text>$3 ORDER BY jsonb_build_array(user_id,session_id,filename,revision)::text LIMIT $4`, tenantID, appID, cursor, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []artifactRow
+	for rows.Next() {
+		var row artifactRow
+		if err := rows.Scan(&row.key, &row.userID, &row.sessionID, &row.filename, &row.revision, &row.checksum); err != nil {
+			return nil, err
+		}
+		result = append(result, row)
+	}
+	return result, rows.Err()
 }
 
 type sourceRow struct {
@@ -269,9 +534,17 @@ func insertRow(ctx context.Context, db *sql.DB, sourceHash string, spec tableSpe
 		return false, err
 	}
 	defer tx.Rollback()
+	checksum := hex.EncodeToString(digest[:])
 	var inserted int
-	err = tx.QueryRowContext(ctx, `INSERT INTO storage_migration_items (source_route_hash,table_name,source_key,checksum) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING 1`, sourceHash, spec.name, row.key, hex.EncodeToString(digest[:])).Scan(&inserted)
+	err = tx.QueryRowContext(ctx, `INSERT INTO storage_migration_items (source_route_hash,table_name,source_key,checksum) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING 1`, sourceHash, spec.name, row.key, checksum).Scan(&inserted)
 	if errors.Is(err, sql.ErrNoRows) {
+		var stored string
+		if err := tx.QueryRowContext(ctx, `SELECT checksum FROM storage_migration_items WHERE source_route_hash=$1 AND table_name=$2 AND source_key=$3`, sourceHash, spec.name, row.key).Scan(&stored); err != nil {
+			return false, err
+		}
+		if stored != checksum {
+			return false, errors.New("storage migration: source row changed after checkpoint")
+		}
 		return true, tx.Commit()
 	}
 	if err != nil {

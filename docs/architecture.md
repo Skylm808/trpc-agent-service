@@ -253,7 +253,7 @@ Adapter 可以替换实现，但不能削弱这些语义。某个后端无法提
 
 Session 的事实来源选择 PostgreSQL，Redis 负责 lease、fencing 和热点加速。这样 Redis 故障不会让历史事件消失，代价是一次 turn 至少包含 Inbox 和 Session 事务。Knowledge 与 Artifact 不进入主事务：event 提交后创建派生任务，异步更新向量索引或对象元数据。Agent 可以在短时间内读到旧知识版本，但不能读到其他租户的数据。
 
-后端迁移采用 `dual write -> snapshot/backfill -> verify -> cutover -> rollback window`。先发布带 `migration_target` 的配置版本，新 Bundle 从主库读取并同步双写目标；再通过 Admin API 创建租户/App/domain 任务。多个 Migration Worker 使用 PostgreSQL claim lease 和 `SKIP LOCKED` 分批处理，checkpoint 可恢复。任务完成后，下一次配置发布才能把目标提升为主路由。当前 copier 覆盖 PostgreSQL Session/Summary/Memory/Artifact 之间迁移，以及 PostgreSQL Artifact → S3；Knowledge 跨向量后端迁移和 S3 反向迁移尚未交付，不允许通过配置伪装成可用能力。
+后端迁移采用 `dual write -> snapshot/backfill -> verify -> cutover -> rollback window`。先发布带 `migration_target` 的配置版本，新 Bundle 从主库读取并同步双写目标；再通过 Admin API 创建租户/App/domain 任务。多个 Migration Worker 使用 PostgreSQL claim lease 和 `SKIP LOCKED` 分批处理，checkpoint 可恢复。任务完成后，下一次配置发布才能把目标提升为主路由。copier 覆盖 PostgreSQL Session/Summary/Memory/Artifact、PostgreSQL ↔ S3 Artifact 和 PGVector ↔ Qdrant Knowledge；Artifact/Knowledge 通过安全目录和 checksum 校验，任何冲突都阻止 cutover。
 
 ## 7. 治理、可观测性与故障处理
 

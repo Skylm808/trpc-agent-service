@@ -21,7 +21,30 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore"
 	vectorpg "trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/pgvector"
 	vectorqdrant "trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/qdrant"
+	"trpc.group/trpc-go/trpc-agent-go/memory"
 )
+
+func (router *Router) memoryService(ctx context.Context, tenantID, appID string, route tenant.BackendConfig) (memory.Service, error) {
+	switch route.Type {
+	case tenant.BackendPostgres:
+		target, err := router.Resolve(ctx, route)
+		if err != nil {
+			return nil, err
+		}
+		return newPostgresMemory(target.DSN)
+	case tenant.BackendExternal:
+		if tenantID == "" || appID == "" || route.Endpoint == "" || route.Credential.IsZero() {
+			return nil, errors.New("storage: external memory endpoint, scope, and credential are required")
+		}
+		token, err := router.resolve(route.Credential)
+		if err != nil || token == "" {
+			return nil, errors.New("storage: resolve external memory credential failed")
+		}
+		return &ExternalMemory{TenantID: tenantID, AppID: appID, Endpoint: route.Endpoint, Token: token}, nil
+	default:
+		return nil, fmt.Errorf("storage: memory backend %q is unavailable", route.Type)
+	}
+}
 
 type s3Credential struct {
 	AccessKeyID     string `json:"access_key_id"`
@@ -149,4 +172,9 @@ func qdrantEndpoint(value string) (string, int, bool, error) {
 		return "", 0, false, errors.New("storage: Qdrant endpoint must not contain a path")
 	}
 	return parsed.Hostname(), port, tls, nil
+}
+
+func validExternalEndpoint(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
 }

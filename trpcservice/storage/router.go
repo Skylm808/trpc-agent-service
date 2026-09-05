@@ -12,6 +12,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledgebase"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
+	"trpc.group/trpc-go/trpc-agent-go/memory"
 )
 
 // SecretResolver resolves a SecretRef without exposing its value to callers.
@@ -26,6 +27,11 @@ type PostgresTarget struct {
 // ArtifactForRoute constructs a migration-owned artifact service.
 func (router *Router) ArtifactForRoute(ctx context.Context, route tenant.BackendConfig) (artifact.Service, error) {
 	return router.artifactService(ctx, route)
+}
+
+// MemoryForRoute constructs a migration-owned tenant/app memory service.
+func (router *Router) MemoryForRoute(ctx context.Context, tenantID, appID string, route tenant.BackendConfig) (memory.Service, error) {
+	return router.memoryService(ctx, tenantID, appID, route)
 }
 
 // MigrationLedgerDB returns the platform database used for idempotency records.
@@ -74,7 +80,31 @@ func (router *Router) KnowledgeForApp(ctx context.Context, tenantID string, app 
 	if tenantID == "" || app.ID == "" || !app.Knowledge.Enabled {
 		return nil, errors.New("storage: enabled tenant/app knowledge configuration is required")
 	}
-	return router.knowledgeService(ctx, tenantID, app.ID, app.Storage.Knowledge, app.Knowledge)
+	return router.knowledgeForRoutes(ctx, tenantID, app.ID, app.Storage.Knowledge, app.Knowledge)
+}
+
+// KnowledgeForRoute constructs a migration-owned target index from an
+// immutable config version.
+func (router *Router) KnowledgeForRoute(ctx context.Context, tenantID, appID string, route tenant.BackendConfig, policy tenant.KnowledgePolicy) (*knowledgebase.Service, error) {
+	return router.knowledgeService(ctx, tenantID, appID, route, policy)
+}
+
+func (router *Router) knowledgeForRoutes(ctx context.Context, tenantID, appID string, route tenant.BackendConfig, policy tenant.KnowledgePolicy) (*knowledgebase.Service, error) {
+	primaryRoute := route.Clone()
+	primaryRoute.MigrationTarget = nil
+	primary, err := router.knowledgeService(ctx, tenantID, appID, primaryRoute, policy)
+	if err != nil || primary == nil {
+		return primary, err
+	}
+	var mirror *knowledgebase.Service
+	if route.MigrationTarget != nil {
+		mirror, err = router.knowledgeService(ctx, tenantID, appID, *route.MigrationTarget, policy)
+		if err != nil {
+			_ = primary.Close()
+			return nil, err
+		}
+	}
+	return primary.WithMigration(router.defaultTarget.DB, mirror), nil
 }
 
 func (router *Router) services(ctx context.Context, tenantID, appID string, profile tenant.StorageProfile, knowledgePolicy tenant.KnowledgePolicy) (*Services, error) {
@@ -91,15 +121,11 @@ func (router *Router) services(ctx context.Context, tenantID, appID string, prof
 	if err != nil {
 		return nil, fmt.Errorf("storage: resolve session backend: %w", err)
 	}
-	memoryTarget, err := router.Resolve(ctx, profile.Memory)
-	if err != nil {
-		return nil, fmt.Errorf("storage: resolve memory backend: %w", err)
-	}
 	artifactService, err := router.artifactService(ctx, profile.Artifact)
 	if err != nil {
 		return nil, fmt.Errorf("storage: resolve artifact backend: %w", err)
 	}
-	services, err := newPostgresServices(sessionTarget.DSN, memoryTarget.DSN, router.defaultTarget.DB)
+	services, err := newPostgresServices(sessionTarget.DSN, sessionTarget.DSN, router.defaultTarget.DB)
 	if err != nil {
 		if closer, ok := artifactService.(interface{ Close() error }); ok {
 			_ = closer.Close()
@@ -107,7 +133,16 @@ func (router *Router) services(ctx context.Context, tenantID, appID string, prof
 		return nil, err
 	}
 	services.Artifact = artifactService
-	services.Knowledge, err = router.knowledgeService(ctx, tenantID, appID, profile.Knowledge, knowledgePolicy)
+	if err := services.Memory.Close(); err != nil {
+		_ = services.Close()
+		return nil, err
+	}
+	services.Memory, err = router.memoryService(ctx, tenantID, appID, profile.Memory)
+	if err != nil {
+		_ = services.Close()
+		return nil, fmt.Errorf("storage: resolve memory backend: %w", err)
+	}
+	services.Knowledge, err = router.knowledgeForRoutes(ctx, tenantID, appID, profile.Knowledge, knowledgePolicy)
 	if err != nil {
 		_ = services.Close()
 		return nil, err
@@ -126,15 +161,10 @@ func (router *Router) services(ctx context.Context, tenantID, appID string, prof
 		services.Session = &MirroredSession{Primary: services.Session, Target: shadow}
 	}
 	if profile.Memory.MigrationTarget != nil {
-		target, resolveErr := router.Resolve(ctx, *profile.Memory.MigrationTarget)
+		shadow, resolveErr := router.memoryService(ctx, tenantID, appID, *profile.Memory.MigrationTarget)
 		if resolveErr != nil {
 			_ = services.Close()
 			return nil, fmt.Errorf("storage: resolve memory migration target: %w", resolveErr)
-		}
-		shadow, createErr := newPostgresMemory(target.DSN)
-		if createErr != nil {
-			_ = services.Close()
-			return nil, createErr
 		}
 		services.Memory = &MirroredMemory{Primary: services.Memory, Target: shadow}
 	}
@@ -219,7 +249,7 @@ func (router *Router) Close() error {
 
 // ValidateRoutedProfile is the production route gate used by Admin publish.
 func ValidateRoutedProfile(profile tenant.StorageProfile) error {
-	for name, route := range map[string]tenant.BackendConfig{"session": profile.Session, "memory": profile.Memory, "summary": profile.Summary, "audit": profile.Audit} {
+	for name, route := range map[string]tenant.BackendConfig{"session": profile.Session, "summary": profile.Summary} {
 		if route.Type != tenant.BackendPostgres {
 			return fmt.Errorf("storage: %s backend must be postgres, got %q", name, route.Type)
 		}
@@ -230,31 +260,51 @@ func ValidateRoutedProfile(profile tenant.StorageProfile) error {
 			return fmt.Errorf("storage: %s migration target requires a credential SecretRef", name)
 		}
 	}
+	if profile.Audit.Type != tenant.BackendPostgres {
+		return fmt.Errorf("storage: audit primary backend must be postgres, got %q", profile.Audit.Type)
+	}
+	if profile.Audit.MigrationTarget != nil {
+		target := *profile.Audit.MigrationTarget
+		if target.Type != tenant.BackendExternal || !validExternalEndpoint(target.Endpoint) || target.Credential.IsZero() {
+			return errors.New("storage: audit archive target must be external with HTTPS endpoint and credential")
+		}
+	}
+	if profile.Memory.Type != tenant.BackendPostgres && profile.Memory.Type != tenant.BackendExternal {
+		return fmt.Errorf("storage: memory backend must be postgres or external, got %q", profile.Memory.Type)
+	}
+	if profile.Memory.MigrationTarget != nil && profile.Memory.MigrationTarget.Type != tenant.BackendPostgres && profile.Memory.MigrationTarget.Type != tenant.BackendExternal {
+		return errors.New("storage: memory migration target must be postgres or external")
+	}
+	if profile.Memory.MigrationTarget != nil && profile.Memory.Type != tenant.BackendPostgres {
+		return errors.New("storage: external memory reverse backfill is not supported")
+	}
+	for _, route := range []tenant.BackendConfig{profile.Memory, func() tenant.BackendConfig {
+		if profile.Memory.MigrationTarget != nil {
+			return *profile.Memory.MigrationTarget
+		}
+		return tenant.BackendConfig{}
+	}()} {
+		if route.Type == tenant.BackendExternal && (!validExternalEndpoint(route.Endpoint) || route.Credential.IsZero()) {
+			return errors.New("storage: external memory HTTPS endpoint and credential are required")
+		}
+	}
 	if profile.Artifact.Type != tenant.BackendPostgres && profile.Artifact.Type != tenant.BackendS3 {
 		return fmt.Errorf("storage: artifact backend must be postgres or s3, got %q", profile.Artifact.Type)
 	}
 	if profile.Artifact.MigrationTarget != nil && profile.Artifact.MigrationTarget.Type != tenant.BackendPostgres && profile.Artifact.MigrationTarget.Type != tenant.BackendS3 {
 		return fmt.Errorf("storage: artifact migration target must be postgres or s3, got %q", profile.Artifact.MigrationTarget.Type)
 	}
-	if profile.Artifact.MigrationTarget != nil && profile.Artifact.Type != tenant.BackendPostgres {
-		return errors.New("storage: artifact backfill currently requires a postgres source")
-	}
-	if profile.Artifact.MigrationTarget != nil && profile.Artifact.MigrationTarget.Type == tenant.BackendPostgres && profile.Artifact.MigrationTarget.Credential.IsZero() {
-		return errors.New("storage: external PostgreSQL artifact migration target requires a credential SecretRef")
-	}
 	if profile.Knowledge.Type != tenant.BackendPostgres && profile.Knowledge.Type != tenant.BackendQdrant {
 		return fmt.Errorf("storage: knowledge backend must be postgres or qdrant, got %q", profile.Knowledge.Type)
 	}
-	if profile.Knowledge.MigrationTarget != nil {
-		return errors.New("storage: knowledge migration_target requires a rebuild job and cannot be activated directly")
+	if profile.Knowledge.MigrationTarget != nil && profile.Knowledge.MigrationTarget.Type != tenant.BackendPostgres && profile.Knowledge.MigrationTarget.Type != tenant.BackendQdrant {
+		return errors.New("storage: knowledge migration target must be postgres or qdrant")
 	}
 	if !sameRoute(profile.Session, profile.Summary) {
 		return errors.New("storage: session and summary routes must match")
 	}
-	for name, route := range map[string]tenant.BackendConfig{"audit": profile.Audit} {
-		if !route.Credential.IsZero() || route.MigrationTarget != nil {
-			return fmt.Errorf("storage: %s external routing is not available before its dedicated delivery PR", name)
-		}
+	if !profile.Audit.Credential.IsZero() {
+		return errors.New("storage: platform audit primary must not declare an external credential")
 	}
 	return nil
 }
@@ -271,7 +321,13 @@ func (router *Router) Preflight(ctx context.Context, profile tenant.StorageProfi
 		tables []string
 	}{
 		{"session", profile.Session, []string{"runtime_session_states", "runtime_session_events", "runtime_session_track_events", "runtime_session_summaries", "runtime_app_states", "runtime_user_states"}},
-		{"memory", profile.Memory, []string{"runtime_memories"}},
+	}
+	if profile.Memory.Type == tenant.BackendPostgres {
+		routes = append(routes, struct {
+			name   string
+			route  tenant.BackendConfig
+			tables []string
+		}{"memory", profile.Memory, []string{"runtime_memories"}})
 	}
 	if profile.Artifact.Type == tenant.BackendPostgres {
 		artifactRoute := profile.Artifact.Clone()
@@ -283,6 +339,12 @@ func (router *Router) Preflight(ctx context.Context, profile tenant.StorageProfi
 			route  tenant.BackendConfig
 			tables []string
 		}{"artifact", artifactRoute, []string{"runtime_artifacts"}})
+	} else if profile.Artifact.MigrationTarget != nil && profile.Artifact.MigrationTarget.Type == tenant.BackendPostgres {
+		routes = append(routes, struct {
+			name   string
+			route  tenant.BackendConfig
+			tables []string
+		}{"artifact migration target", *profile.Artifact.MigrationTarget, []string{"runtime_artifacts", "storage_migration_items"}})
 	}
 	for _, entry := range routes {
 		target, err := router.Resolve(ctx, entry.route)
@@ -303,6 +365,9 @@ func (router *Router) Preflight(ctx context.Context, profile tenant.StorageProfi
 			}
 		}
 	}
+	if err := requireTables(ctx, router.defaultTarget.DB, []string{"runtime_artifact_catalog", "runtime_knowledge_documents"}); err != nil {
+		return errors.New("storage: migration catalog schema is unavailable")
+	}
 	return nil
 }
 
@@ -312,12 +377,37 @@ func (router *Router) PreflightApp(ctx context.Context, tenantID string, app ten
 	if err := router.Preflight(ctx, app.Storage); err != nil {
 		return err
 	}
+	if app.Storage.Audit.MigrationTarget != nil && app.Storage.Audit.MigrationTarget.Type == tenant.BackendExternal {
+		credential, err := router.resolve(app.Storage.Audit.MigrationTarget.Credential)
+		if err != nil || credential == "" {
+			return errors.New("storage: audit archive credential preflight failed")
+		}
+	}
+	appName, _ := tenant.CanonicalAppName(tenantID, app.ID)
+	for _, route := range []tenant.BackendConfig{app.Storage.Memory, func() tenant.BackendConfig {
+		if app.Storage.Memory.MigrationTarget != nil {
+			return *app.Storage.Memory.MigrationTarget
+		}
+		return tenant.BackendConfig{}
+	}()} {
+		if route.Type != tenant.BackendExternal {
+			continue
+		}
+		service, err := router.memoryService(ctx, tenantID, app.ID, route)
+		if err != nil {
+			return errors.New("storage: external memory route preflight failed")
+		}
+		_, err = service.ReadMemories(ctx, memory.UserKey{AppName: appName, UserID: "preflight"}, 1)
+		_ = service.Close()
+		if err != nil {
+			return errors.New("storage: external memory route is unreachable")
+		}
+	}
 	artifactService, err := router.artifactService(ctx, app.Storage.Artifact)
 	if err != nil {
 		return errors.New("storage: artifact route preflight failed")
 	}
 	if app.Storage.Artifact.Type == tenant.BackendS3 {
-		appName, _ := tenant.CanonicalAppName(tenantID, app.ID)
 		if _, err := artifactService.ListArtifactKeys(ctx, artifact.SessionInfo{AppName: appName, UserID: "preflight", SessionID: "preflight"}); err != nil {
 			if closer, ok := artifactService.(interface{ Close() error }); ok {
 				_ = closer.Close()
@@ -333,7 +423,6 @@ func (router *Router) PreflightApp(ctx context.Context, tenantID string, app ten
 		if err != nil {
 			return errors.New("storage: artifact migration target preflight failed")
 		}
-		appName, _ := tenant.CanonicalAppName(tenantID, app.ID)
 		if _, err := target.ListArtifactKeys(ctx, artifact.SessionInfo{AppName: appName, UserID: "preflight", SessionID: "preflight"}); err != nil {
 			if closer, ok := target.(interface{ Close() error }); ok {
 				_ = closer.Close()
@@ -350,6 +439,15 @@ func (router *Router) PreflightApp(ctx context.Context, tenantID string, app ten
 	}
 	if knowledgeService != nil {
 		_ = knowledgeService.Close()
+	}
+	if app.Storage.Knowledge.MigrationTarget != nil {
+		target, err := router.knowledgeService(ctx, tenantID, app.ID, *app.Storage.Knowledge.MigrationTarget, app.Knowledge)
+		if err != nil {
+			return errors.New("storage: knowledge migration target preflight failed")
+		}
+		if target != nil {
+			_ = target.Close()
+		}
 	}
 	return nil
 }

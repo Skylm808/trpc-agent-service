@@ -96,7 +96,7 @@ func TestValidateRoutedProfileRequiresMatchingSessionSummaryTargets(t *testing.T
 	}
 }
 
-func TestValidateRoutedProfileAllowsOnlyPostgresToS3ArtifactMigration(t *testing.T) {
+func TestValidateRoutedProfileAllowsBidirectionalArtifactMigration(t *testing.T) {
 	postgres := tenant.BackendConfig{Type: tenant.BackendPostgres}
 	profile := tenant.StorageProfile{Session: postgres, Memory: postgres, Summary: postgres, Artifact: postgres, Knowledge: postgres, Audit: postgres}
 	s3 := tenant.BackendConfig{Type: tenant.BackendS3, Endpoint: "https://objects.example", Namespace: "artifacts", Credential: tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "S3_CREDENTIAL_JSON"}}
@@ -107,7 +107,7 @@ func TestValidateRoutedProfileAllowsOnlyPostgresToS3ArtifactMigration(t *testing
 	profile.Artifact = s3
 	target := postgres.Clone()
 	profile.Artifact.MigrationTarget = &target
-	if err := ValidateRoutedProfile(profile); err == nil {
-		t.Fatal("S3 source migration must be rejected until reverse enumeration exists")
+	if err := ValidateRoutedProfile(profile); err != nil {
+		t.Fatalf("S3 to postgres rejected: %v", err)
 	}
 }

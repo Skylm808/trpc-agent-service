@@ -169,13 +169,13 @@ curl -H 'Authorization: Bearer local-secret' \
 
 ### 当前进度
 
-项目基础功能约完成 **90%**。
+项目基础功能约完成 **95%**。
 
 - **已完成：** 多租户配置与隔离、Gateway/Worker 多节点运行、共享 Session/Memory、
   企业微信和飞书真实消息链路、幂等与故障接管、治理审计、OpenTelemetry Trace、
   Prometheus 告警及 Compose 验收；企业微信/飞书受控媒体下载、基础文档提取、多模态输入、
-  飞书卡片回复及其安全限制也已实现。
-- **进行中：** Knowledge/Artifact 双向迁移、外部 Memory 与 Audit Adapter。
+  飞书卡片回复及其安全限制、Knowledge/Artifact 双向迁移、外部 Memory 与 Audit/WORM
+  归档也已实现。
 - **待完成：** 一个简单可复现的 Kubernetes 多副本 Demo、重启和滚动升级验收。
 - **实施原则：** 优先跑通最小完整链路，再补容量优化和复杂故障演练；所有操作保留
   PostgreSQL、Redis 等现有数据卷，不在仓库和验收输出中保存凭据或用户消息正文。

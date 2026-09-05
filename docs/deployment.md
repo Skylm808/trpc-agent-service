@@ -133,6 +133,11 @@ PR12 支持把 Session/Summary、Memory、Artifact 分别路由到不同 Postgre
 
 PR13 增加 PGVector/Qdrant Knowledge 和 S3-compatible Artifact。启用 Knowledge 或 S3 的配置在 Admin publish 时会解析 SecretRef 并执行有界连接预检；失败时保留当前发布版本和 Runtime Bundle。具体配置见 [Knowledge/RAG 与 S3 Artifact](knowledge.md)。
 
+外部 Memory 使用 `type: external`、固定 HTTPS `endpoint` 和 Bearer `credential`；每个请求由
+Adapter 注入可信 tenant/App scope。Audit 主存储仍是 PostgreSQL，可把 `migration_target` 配成
+`external`，将脱敏后的审计 envelope 同步 POST 到 WORM 归档。两类客户端都有超时、响应大小
+限制，错误不会回显 endpoint、Secret 或正文。
+
 PR16 增加生产 MCP Registry 与固定 HTTPS JSON 业务工具。Admin validate/publish 和进程启动会对启用的 MCP 服务执行 Initialize/ListTools；运行中发布新版本时，新 Bundle 建立独立连接，旧 Bundle 引用归零后关闭旧连接。MCP 与业务工具凭据只通过 SecretRef 注入，部署环境需提供对应 secret；配置与网络边界见 [生产 MCP 与业务工具](mcp-tools.md)。
 
 迁移不能直接修改 endpoint。先发布带 `migration_target` 的双写配置，再调用受认证的 migration API backfill；任务 completed 后才发布下一版本完成 cutover。旧源库保留只读回滚窗口，不会自动清理。命令与故障恢复步骤见 [Storage Router 与迁移](storage-migrations.md)。

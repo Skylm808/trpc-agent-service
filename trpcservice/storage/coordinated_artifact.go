@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -35,6 +37,19 @@ func (service *CoordinatedArtifact) SaveArtifact(ctx context.Context, info artif
 	if err != nil {
 		return 0, err
 	}
+	tenantID, appID, sessionID, err := artifactScope(info, filename)
+	if err != nil {
+		return 0, err
+	}
+	checksum := ArtifactChecksum(value)
+	var existing string
+	err = tx.QueryRowContext(ctx, `INSERT INTO runtime_artifact_catalog (tenant_id,app_id,user_id,session_id,filename,revision,checksum) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (tenant_id,app_id,user_id,session_id,filename,revision) DO UPDATE SET checksum=runtime_artifact_catalog.checksum RETURNING checksum`, tenantID, appID, info.UserID, sessionID, filename, revision, checksum).Scan(&existing)
+	if err != nil {
+		return 0, err
+	}
+	if existing != checksum {
+		return 0, errors.New("storage: artifact catalog checksum conflict")
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -63,6 +78,13 @@ func (service *CoordinatedArtifact) DeleteArtifact(ctx context.Context, info art
 	if err := service.Delegate.DeleteArtifact(ctx, info, filename); err != nil {
 		return err
 	}
+	tenantID, appID, sessionID, err := artifactScope(info, filename)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM runtime_artifact_catalog WHERE tenant_id=$1 AND app_id=$2 AND user_id=$3 AND session_id=$4 AND filename=$5`, tenantID, appID, info.UserID, sessionID, filename); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 func (service *CoordinatedArtifact) ListVersions(ctx context.Context, info artifact.SessionInfo, filename string) ([]int, error) {
@@ -76,3 +98,17 @@ func (service *CoordinatedArtifact) Close() error {
 }
 
 var _ artifact.Service = (*CoordinatedArtifact)(nil)
+
+// ArtifactChecksum is a stable digest of the full logical artifact value.
+// It is safe to store and expose in migration diagnostics; content is not.
+func ArtifactChecksum(value *artifact.Artifact) string {
+	if value == nil {
+		return ""
+	}
+	payload, _ := json.Marshal(struct {
+		Data                []byte `json:"data"`
+		MimeType, URL, Name string
+	}{Data: value.Data, MimeType: value.MimeType, URL: value.URL, Name: value.Name})
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
+}

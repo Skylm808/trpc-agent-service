@@ -28,16 +28,33 @@ func NewJob(tenantID, appID string, version tenant.ConfigVersion, domain Domain,
 	if tenantID == "" || appID == "" || version == 0 || !validDomain(domain) || actor == "" {
 		return Job{}, errors.New("storage migration: complete tenant, app, version, domain, and actor are required")
 	}
-	if source.Type != tenant.BackendPostgres || target.Type != tenant.BackendPostgres {
-		return Job{}, errors.New("storage migration: source and target must be PostgreSQL")
+	if !validRoutes(domain, source.Type, target.Type) {
+		return Job{}, errors.New("storage migration: unsupported source or target route")
 	}
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
 		return Job{}, errors.New("storage migration: generate job ID failed")
 	}
 	sourceJSON, _ := json.Marshal(source)
-	digest := sha256.Sum256(sourceJSON)
+	// Include the trusted logical scope so identical external IDs in two
+	// tenants can never collide in the shared migration ledger.
+	digest := sha256.Sum256(append([]byte(tenantID+"\x00"+appID+"\x00"+string(domain)+"\x00"), sourceJSON...))
 	return Job{TenantID: tenantID, JobID: hex.EncodeToString(random), AppID: appID, ConfigVersion: version, Domain: domain, Source: source.Clone(), Target: target.Clone(), SourceRouteHash: hex.EncodeToString(digest[:]), Status: StatusPending, CreatedBy: actor}, nil
+}
+
+func validRoutes(domain Domain, source, target tenant.BackendType) bool {
+	switch domain {
+	case DomainSession:
+		return source == tenant.BackendPostgres && target == tenant.BackendPostgres
+	case DomainMemory:
+		return source == tenant.BackendPostgres && (target == tenant.BackendPostgres || target == tenant.BackendExternal)
+	case DomainArtifact:
+		return (source == tenant.BackendPostgres || source == tenant.BackendS3) && (target == tenant.BackendPostgres || target == tenant.BackendS3)
+	case DomainKnowledge:
+		return (source == tenant.BackendPostgres || source == tenant.BackendQdrant) && (target == tenant.BackendPostgres || target == tenant.BackendQdrant)
+	default:
+		return false
+	}
 }
 
 func (store *SQLStore) Create(ctx context.Context, job Job) (Job, error) {

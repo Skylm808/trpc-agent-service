@@ -113,3 +113,16 @@ func TestEmbeddingErrorsDoNotLeakProviderDetails(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestIngestSynchronouslyMirrorsKnowledgeIndex(t *testing.T) {
+	primary, shadow := &fakeStore{}, &fakeStore{}
+	service, _ := New("tenant-a", "app-a", primary, fakeEmbedder{})
+	target, _ := New("tenant-a", "app-a", shadow, fakeEmbedder{})
+	service.WithMigration(nil, target)
+	if _, err := service.Ingest(context.Background(), IngestRequest{DocumentID: "doc", Content: "knowledge"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(primary.docs) != 1 || len(shadow.docs) != 1 || primary.docs[0].ID != shadow.docs[0].ID {
+		t.Fatalf("primary=%d shadow=%d", len(primary.docs), len(shadow.docs))
+	}
+}

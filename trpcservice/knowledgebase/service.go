@@ -5,7 +5,9 @@ package knowledgebase
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -30,6 +32,8 @@ type Service struct {
 	store           vectorstore.VectorStore
 	embedder        embedder.Embedder
 	redactor        *servicelog.Redactor
+	catalog         *sql.DB
+	mirror          *Service
 }
 
 // IngestRequest is intentionally tenant-free. Scope is fixed when the service
@@ -49,6 +53,13 @@ func New(tenantID, appID string, store vectorstore.VectorStore, embeddings embed
 	return &Service{tenantID: tenantID, appID: appID, store: store, embedder: embeddings, redactor: servicelog.NewRedactor(nil, secrets)}, nil
 }
 
+// WithMigration configures the shared document catalog and an optional
+// synchronous shadow index. It must be called before the service is published.
+func (service *Service) WithMigration(catalog *sql.DB, mirror *Service) *Service {
+	service.catalog, service.mirror = catalog, mirror
+	return service
+}
+
 // Ingest chunks, embeds, and upserts one text document. Reserved isolation
 // metadata is always overwritten with trusted service scope.
 func (service *Service) Ingest(ctx context.Context, request IngestRequest) ([]string, error) {
@@ -56,6 +67,29 @@ func (service *Service) Ingest(ctx context.Context, request IngestRequest) ([]st
 		return nil, errors.New("knowledge: document_id and content are required")
 	}
 	ctx = servicelog.WithRedactor(ctx, service.redactor)
+	ids, err := service.ingestIndex(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	if service.mirror != nil {
+		if _, err := service.mirror.ingestIndex(ctx, request); err != nil {
+			return nil, errors.Join(errors.New("knowledge: mirror write failed"), err)
+		}
+	}
+	if service.catalog != nil {
+		metadata, err := json.Marshal(cloneMetadata(request.Metadata))
+		if err != nil {
+			return nil, errors.New("knowledge: metadata is invalid")
+		}
+		_, err = service.catalog.ExecContext(ctx, `INSERT INTO runtime_knowledge_documents (tenant_id,app_id,document_id,name,content,metadata_json,version,status) VALUES ($1,$2,$3,$4,$5,$6,1,'active') ON CONFLICT (tenant_id,app_id,document_id) DO UPDATE SET name=EXCLUDED.name,content=EXCLUDED.content,metadata_json=EXCLUDED.metadata_json,version=runtime_knowledge_documents.version+1,status='active',updated_at=NOW()`, service.tenantID, service.appID, request.DocumentID, request.Name, request.Content, metadata)
+		if err != nil {
+			return nil, errors.New("knowledge: document catalog write failed")
+		}
+	}
+	return ids, nil
+}
+
+func (service *Service) ingestIndex(ctx context.Context, request IngestRequest) ([]string, error) {
 	if len(request.DocumentID) > 256 || len(request.Content) > maxDocumentBytes {
 		return nil, errors.New("knowledge: document exceeds size limits")
 	}
@@ -147,7 +181,13 @@ func (service *Service) Search(ctx context.Context, request *knowledge.SearchReq
 }
 
 // Close releases the vector-store client.
-func (service *Service) Close() error { return service.store.Close() }
+func (service *Service) Close() error {
+	var mirrorErr error
+	if service.mirror != nil {
+		mirrorErr = service.mirror.Close()
+	}
+	return errors.Join(service.store.Close(), mirrorErr)
+}
 
 func cloneMetadata(source map[string]any) map[string]any {
 	result := make(map[string]any, len(source)+4)

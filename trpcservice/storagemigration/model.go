@@ -13,9 +13,10 @@ import (
 type Domain string
 
 const (
-	DomainSession  Domain = "session"
-	DomainMemory   Domain = "memory"
-	DomainArtifact Domain = "artifact"
+	DomainSession   Domain = "session"
+	DomainMemory    Domain = "memory"
+	DomainArtifact  Domain = "artifact"
+	DomainKnowledge Domain = "knowledge"
 )
 
 // Status is the durable migration lifecycle.
@@ -75,5 +76,5 @@ type Store interface {
 }
 
 func validDomain(domain Domain) bool {
-	return domain == DomainSession || domain == DomainMemory || domain == DomainArtifact
+	return domain == DomainSession || domain == DomainMemory || domain == DomainArtifact || domain == DomainKnowledge
 }

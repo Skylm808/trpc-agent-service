@@ -1,6 +1,6 @@
 # Storage Router 与数据迁移
 
-PR12 路由 Session/Summary、Memory 和 PostgreSQL Artifact。PR13 增加 S3-compatible Artifact、PGVector/Qdrant Knowledge，以及 PostgreSQL Artifact → S3 的安全迁移。Session/Summary、Memory 仍必须使用共享 PostgreSQL；外置 Audit 仍未交付。
+Storage Router 支持 Session/Summary、Memory、Artifact、Knowledge 和 Audit 独立选路。迁移任务覆盖 PostgreSQL 数据域、PGVector ↔ Qdrant Knowledge，以及 PostgreSQL ↔ S3 Artifact；Memory 还可选固定 HTTPS 外部服务，Audit 可同步追加到外部 WORM 归档。
 
 ## 安全迁移流程
 
@@ -39,4 +39,11 @@ POST /v1/tenants/demo/storage/migrations/{migration_id}/cancel
 - PostgreSQL 目标数据与 `storage_migration_items` 在一个事务中提交。S3 无法参与 SQL 事务，因此外部写成功后的重放会按指定 revision 读取并比对内容，再补平台 PostgreSQL ledger；冲突时 fail closed，不会继续创建 revision。
 - `migration_jobs` 使用 owner/token/lease 精确更新；过期 Worker 无权提交新 checkpoint。
 - 错误只保存 Go error type，不保存驱动错误正文，避免 DSN、数据库地址或密码进入 API、审计和日志。
-- 本阶段的完成校验是源快照行数与已处理行数。大规模生产切换仍应在回滚窗口内额外执行业务抽样和只读校验。Knowledge 跨 PGVector/Qdrant 自动迁移尚未交付，必须重新 ingest、执行召回对比后再切换。
+- Knowledge 以 `runtime_knowledge_documents` 文档目录为事实源，在目标 PGVector/Qdrant
+  重新 embedding/upsert；Artifact 以不含正文的版本目录枚举 S3 对象。两者都校验 checksum，
+  源内容在 checkpoint 后变化会 fail closed。
+- 完成校验是源快照行数与已处理行数。大规模生产切换仍应在回滚窗口内额外执行召回对比、
+  Artifact 抽样读取和业务只读校验。
+
+`domain` 可选 `session`、`memory`、`artifact`、`knowledge`。每项任务都从已发布配置读取
+source/target，Admin 请求不能注入 endpoint 或 SecretRef。

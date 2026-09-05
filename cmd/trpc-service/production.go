@@ -303,7 +303,25 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 		Approvals:          &policy.SQLApprovals{DB: db},
 		CostMicrosPerToken: 1,
 	}
-	auditStore := &audit.SQLStore{DB: db, Redactor: redactor}
+	primaryAuditStore := &audit.SQLStore{DB: db, Redactor: redactor}
+	auditStore := &audit.RoutedStore{Primary: primaryAuditStore, Resolve: func(resolveCtx context.Context, record audit.Record) (audit.Store, error) {
+		file, resolveErr := published.Current(resolveCtx, record.TenantID)
+		if resolveErr != nil || len(file.Tenants) != 1 {
+			return nil, errors.New("audit: published route is unavailable")
+		}
+		for _, app := range file.Tenants[0].Apps {
+			if app.ID != record.AgentName || app.Storage.Audit.MigrationTarget == nil || app.Storage.Audit.MigrationTarget.Type != tenant.BackendExternal {
+				continue
+			}
+			route := *app.Storage.Audit.MigrationTarget
+			token, tokenErr := secret.ResolveLocal(route.Credential)
+			if tokenErr != nil || token == "" {
+				return nil, errors.New("audit: external archive credential is unavailable")
+			}
+			return &audit.HTTPArchive{TenantID: record.TenantID, Endpoint: route.Endpoint, Token: token, Redactor: redactor}, nil
+		}
+		return nil, nil
+	}}
 	dependencies := openclaw.ComponentDependencies{
 		Inbox:             &idempotency.SQLStore{DB: db},
 		Coordinator:       coordinator,
@@ -343,7 +361,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	var retentionWorker *audit.RetentionWorker
 	if role != roleGateway {
 		retentionWorker = &audit.RetentionWorker{
-			Store:    auditStore,
+			Store:    primaryAuditStore,
 			Policies: &audit.SQLPolicySource{DB: db},
 			OnResult: func(_ int64, retentionErr error) {
 				status := "success"
@@ -379,7 +397,18 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 			_ = nodes.Close(context.Background())
 			return nil, err
 		}
-		migrationWorker, err = storagemigration.NewWorker(&storagemigration.SQLStore{DB: db}, &storagemigration.PostgresCopier{Router: storageRouter}, storagemigration.WorkerConfig{Owner: workerID + ":storage-migration"})
+		knowledgeResolver := func(resolveCtx context.Context, job storagemigration.Job, route tenant.BackendConfig) (*knowledgebase.Service, error) {
+			file, resolveErr := published.Version(resolveCtx, job.TenantID, job.ConfigVersion)
+			if resolveErr != nil {
+				return nil, errors.New("storage migration: config version unavailable")
+			}
+			snapshot, resolveErr := file.Snapshot(job.TenantID, job.AppID)
+			if resolveErr != nil {
+				return nil, errors.New("storage migration: app configuration unavailable")
+			}
+			return storageRouter.KnowledgeForRoute(resolveCtx, job.TenantID, job.AppID, route, snapshot.App().Knowledge)
+		}
+		migrationWorker, err = storagemigration.NewWorker(&storagemigration.SQLStore{DB: db}, &storagemigration.PostgresCopier{Router: storageRouter, ResolveKnowledge: knowledgeResolver}, storagemigration.WorkerConfig{Owner: workerID + ":storage-migration"})
 		if err != nil {
 			_ = component.Close(context.Background())
 			_ = nodes.Close(context.Background())

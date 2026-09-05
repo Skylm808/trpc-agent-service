@@ -47,4 +47,13 @@ Artifact 路由可使用 `type: s3`，`endpoint` 是 HTTPS S3 API 地址，`name
 
 官方 S3 Artifact Adapter 的 revision 分配本身不是并发安全的，因此平台在共享 PostgreSQL 上取得按 app/user/session/filename 派生的 advisory lock，再执行 list-and-put。多个 Worker 节点仍能得到单调 revision，不需要 sticky session。
 
-PostgreSQL Artifact 迁往 S3 时使用现有 `migration_target` 流程。新 Bundle 同步双写，Migration Worker 按租户/App 扫描 PostgreSQL revision 并写入 S3；若外部写入成功后 Worker 丢失 lease，重放会先比对目标 revision，再补平台 ledger，不会创建额外 revision。S3 目标冲突、缺失旧 revision 或内容不一致会让任务失败，禁止 cutover。当前不支持 S3 反向枚举迁回 PostgreSQL，也不支持 PGVector/Qdrant 之间自动迁移；需要重新 ingest 到新索引并做召回验证后再发布切换。
+PostgreSQL 与 S3 Artifact 双向迁移都使用 `migration_target` 流程。新 Bundle 同步双写；
+S3 每次成功写入后会把租户/App、逻辑 key、revision 和 checksum 写入共享 PostgreSQL 目录，
+目录不包含文件正文、下载 URL 或对象存储凭据。反向任务按目录读取指定 S3 revision 并写回
+PostgreSQL。Worker 丢失 lease 后可从 checkpoint 重放；内容冲突、缺失 revision 或 checksum
+不一致都会让任务失败并禁止 cutover。
+
+Knowledge ingest 同时维护租户/App 文档目录。PGVector ↔ Qdrant 迁移从该目录重新生成 embedding
+并 upsert 目标索引，在 `migration_target` 阶段对新文档同步双写。完成任务后仍应做召回抽样，
+再发布下一配置版本切换主索引。升级 PR23 之前只存在于向量库、没有进入文档目录的历史数据，
+需先通过 Admin Knowledge API 重新 ingest 一次。
