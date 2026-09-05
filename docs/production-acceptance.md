@@ -63,6 +63,21 @@ export TRPC_AGENT_ACCEPTANCE_ISOLATE_TOPOLOGY=1
 版本和租户/通道隔离；人工真实平台验收证明企业微信、飞书平台回调及回复可达。两种真实 IM
 E2E 均已通过，但仓库不保存截图、回调原文或用户消息正文。
 
+## PR24 Kubernetes 最小生产门禁
+
+在专用 kind 集群运行真实多副本拓扑；不具备集群时可先执行离线结构门禁：
+
+```bash
+./scripts/pr24_kubernetes_acceptance.sh --validate
+TRPC_AGENT_K8S_CREATE_KIND=1 ./scripts/pr24_kubernetes_acceptance.sh --run
+```
+
+真实模式部署 3 个 Gateway 和 3 个 Worker，并实际运行合成 Runner 链路、100 请求容量冒烟、
+单 Pod 重建、Redis/PostgreSQL/模型/Collector 故障恢复、Sender retry/DLQ 回归、滚动升级与
+`rollout undo`。验收前后比较 PostgreSQL 中的配置版本并确认 PVC 仍存在。HPA 在轻量 kind demo
+中验证 API admission、目标对象和上下限；基于云指标的实际扩容阈值仍须在目标生产集群按容量
+基线校准。脚本不执行 namespace/PVC/volume 删除，也不输出凭据、用户正文或 SecretRef 值。
+
 ## 发布门禁
 
 - `./check.sh`、PostgreSQL 集成测试、Kubernetes manifest 校验和镜像构建均通过；migration Job 先完成，业务 Deployment 后发布。

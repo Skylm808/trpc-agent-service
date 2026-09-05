@@ -40,3 +40,29 @@ Render and structurally validate both Kustomizations before publishing an image:
 ```
 
 Capacity, guarded failure injection, and release gates are documented in [capacity](../../docs/capacity.md), [fault drills](../../docs/fault-drills.md), and [production acceptance](../../docs/production-acceptance.md). A real cluster admission dry-run remains environment-specific because CRD/admission and policy behavior cannot be validated without that cluster's API server.
+
+## Reproducible local cluster demo
+
+The `demo` overlays run the production Gateway/Worker split on a dedicated kind cluster with three
+replicas of each role, persistent PostgreSQL/Redis StatefulSets, a protocol-compatible model stub and
+an OpenTelemetry Collector. The model stub returns only a fixed synthetic answer and neither component
+logs request bodies. Create or select the dedicated cluster and run:
+
+```bash
+kind create cluster --name trpc-agent-pr24 --wait 180s
+./scripts/pr24_kubernetes_acceptance.sh --run
+```
+
+Set `TRPC_AGENT_K8S_CREATE_KIND=1` to let the script create the named kind cluster when absent. An
+existing non-kind context is refused unless `TRPC_AGENT_K8S_CONFIRM_CONTEXT` exactly matches it. The
+script verifies the full Gateway → Redis → Worker → model → PostgreSQL path, bounded callback load,
+single-Pod recovery, dependency outages, Sender retry/DLQ behavior, PDB/HPA admission, rolling update,
+rollback, config persistence and PVC retention. It scales only explicitly named demo resources and
+never deletes the namespace, StatefulSet, PVC, volume, or database. Credentials are generated into a
+mode-0600 temporary file and stored only as a Kubernetes Secret; the report contains summaries only.
+
+To validate manifests and the no-inline-Secret boundary without a cluster:
+
+```bash
+./scripts/pr24_kubernetes_acceptance.sh --validate
+```

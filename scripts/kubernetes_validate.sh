@@ -12,6 +12,9 @@ trap 'rm -rf "$render_dir"' EXIT
 
 kubectl kustomize "$repo_root/deploy/kubernetes/base" >"$render_dir/base.yaml"
 kubectl kustomize "$repo_root/deploy/kubernetes/migration" >"$render_dir/migration.yaml"
+kubectl kustomize "$repo_root/deploy/kubernetes/demo/infra" >"$render_dir/demo-infra.yaml"
+kubectl kustomize "$repo_root/deploy/kubernetes/demo/app" >"$render_dir/demo-app.yaml"
+kubectl kustomize "$repo_root/deploy/kubernetes/demo/migration" >"$render_dir/demo-migration.yaml"
 
 require_text() {
   local pattern="$1" file="$2"
@@ -56,6 +59,18 @@ if grep -Eq '^kind: Secret$|^[[:space:]]*stringData:' "$render_dir/base.yaml" "$
   echo "rendered manifests must not contain Kubernetes Secret values" >&2
   exit 1
 fi
+if grep -Eq '^kind: Secret$|^[[:space:]]*stringData:' "$render_dir"/demo-*.yaml; then
+  echo "demo manifests must not contain Kubernetes Secret values" >&2
+  exit 1
+fi
+require_text '^kind: StatefulSet$' "$render_dir/demo-infra.yaml"
+require_text 'name: demo-postgres' "$render_dir/demo-infra.yaml"
+require_text 'name: demo-redis' "$render_dir/demo-infra.yaml"
+require_text 'name: demo-model' "$render_dir/demo-infra.yaml"
+require_text 'name: demo-otel-collector' "$render_dir/demo-infra.yaml"
+require_text 'trpc-agent-service:pr24-demo' "$render_dir/demo-app.yaml"
+require_text 'GATEWAY_TOKEN' "$render_dir/demo-app.yaml"
+require_text '^kind: Job$' "$render_dir/demo-migration.yaml"
 if grep -Eq '^kind: Job$' "$render_dir/base.yaml"; then
   echo "migration Job must remain separate from the service rollout" >&2
   exit 1

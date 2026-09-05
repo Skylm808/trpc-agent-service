@@ -150,6 +150,16 @@ Kubernetes 有序部署与 Secret 合约见 [manifest 说明](../deploy/kubernet
 [生产验收](production-acceptance.md)。HPA 的 CPU/内存只是初始基线，不能代替 Provider 配额、
 完整执行耗时、queue depth 和 Outbox backlog 的容量判定。
 
+最小真实 Kubernetes 验收使用专用 kind context 和 `deploy/kubernetes/demo` overlay：
+
+```bash
+kind create cluster --name trpc-agent-pr24 --wait 180s
+./scripts/pr24_kubernetes_acceptance.sh --run
+```
+
+脚本拒绝未明确确认的其他 context，只缩放或重启带有确定名称的 demo 资源；结束后保留 namespace、
+PostgreSQL/Redis StatefulSet 与 PVC。它生成的报告不包含 Secret、消息正文、数据库密码或完整外部标识。
+
 停止环境但保留数据：
 
 ```bash

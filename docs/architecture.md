@@ -114,8 +114,6 @@ flowchart TB
     OUT -. trace .-> OTEL
     OTEL --> MON
 
-    classDef planned stroke-dasharray: 5 5,color:#666;
-    class MEMORY planned;
 ```
 
 Agent Gateway 和 Worker 都是无状态节点，不要求负载均衡器提供 sticky session。Gateway 只根据已认证的 `channel_binding` 得到 `tenant_id`、`app_id` 和配置版本，再生成 canonical user/session。实际状态保存在共享后端；任何 Worker 取得队列消息和 session lease 后都能继续执行。
@@ -294,7 +292,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、租户成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、租户 Runner 动态并发配额、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复迁移 Worker、治理审计与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换、Gateway/Worker 角色拆分、生产 MCP Registry、HTTPS JSON 业务工具，以及企业微信和飞书两个 Channel Adapter/Sender。复杂文档解析、Knowledge 跨后端迁移、外置审计归档、投递异常 Web 运维页、Delivery/maintenance 独立角色仍未完成。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
+当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、租户 Runner 动态并发配额、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复双向迁移 Worker、外部 Memory、外置 Audit/WORM、治理审计与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换、Gateway/Worker 角色拆分、生产 MCP Registry、HTTPS JSON 业务工具，以及企业微信和飞书两个 Channel Adapter/Sender。复杂格式文档解析、投递异常 Web 运维页、Delivery/maintenance 独立角色和队列自定义指标 HPA 属于后续增强，不是本次基础验收的必要项。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
 
 ## 10. 预期效果与时间规划
 
@@ -321,13 +319,15 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | T2b：跨节点实时调度（PR11） | 已完成 | Redis Streams、共享 command/event bus、跨节点 cancel/status、预算/审批和节点心跳 | 已完成并通过 PostgreSQL/Redis 双节点集成测试 |
 | T2c：存储路由与迁移（PR12） | 已完成 | 多 PostgreSQL 域路由、双写、checkpoint backfill、校验和安全 cutover | 已完成并通过 PostgreSQL 集成测试 |
 | T3a：治理与观测（PR14） | 已完成 | OTLP/Collector、Prometheus/Grafana、审计保留 | 已完成 |
-| T3b：生产部署与验收（PR15） | 已完成 | Kubernetes 合并节点 manifest、readiness、容量工具、故障演练和验收门禁 | 代码与离线校验已完成，真实集群演练待部署方执行 |
+| T3b：生产部署与验收（PR15） | 已完成 | Kubernetes 分离 Gateway/Worker manifest、readiness、容量工具、故障演练和验收门禁 | 基线 manifest 与离线校验已完成 |
 | T3c：MCP 与业务工具（PR16） | 已完成 | 租户 MCP Registry、SecretRef、固定 HTTPS JSON 工具、发布预检和 Bundle 生命周期 | 已完成并通过真实 Streamable HTTP MCP 协议测试 |
 | T3d：消息恢复控制面（PR17） | 已完成 | 租户级 DLQ 查询/重放、uncertain 人工裁决、状态 CAS 与审计 | 已完成并通过 PostgreSQL 并发集成测试 |
 | T3e：租户并发配额（PR18） | 已完成 | Redis 跨节点 Runner semaphore、动态配置、续租与崩溃恢复 | 已完成并通过真实 Redis 双节点测试 |
 | T4a：Gateway/Worker 角色拆分（PR19） | 已完成 | producer-only Gateway、consumer-only Worker、独立 Deployment/PDB/HPA | Outbox/maintenance 暂随 Worker |
 | T4b：双 IM 多节点验收（PR20） | 已完成 | Compose Gateway + 双 Worker、故障接管、fencing、持久性与双 IM 隔离 | 自动化与可复现 Compose 验收已通过 |
 | T4c：持久化 Trace 与生产告警（PR21） | 已完成 | Tempo、Grafana Trace 数据源、跨 Outbox trace、错误率/DLQ/积压/Worker/数据库告警 | 自动化与可复现 Compose 验收已通过 |
-| T4d：运维增强 | 待排期 | Outbox/maintenance 独立角色、自定义指标 HPA | 未完成 |
+| T4d：IM 媒体与卡片（PR22） | 已完成 | 双 IM 受控媒体、文档/多模态、飞书卡片、Outbox 限流重试和 DLQ | 自动化安全与协议回归已通过 |
+| T4e：Storage 迁移补全（PR23） | 已完成 | Knowledge/Artifact 双向迁移、checksum/checkpoint/cutover、外部 Memory 与 WORM | 自动化与 PostgreSQL 集成验收已通过 |
+| T4f：Kubernetes 生产 Demo（PR24） | 已完成 | kind 多副本、容量冒烟、依赖故障、PDB/HPA、滚动升级、回滚和 PVC 保留 | 可复现真实集群验收已通过 |
 
 时间从依赖就绪后计算，不含企业微信权限、公网域名、TLS 证书或平台审核等待。

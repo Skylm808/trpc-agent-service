@@ -2,8 +2,10 @@
 set -euo pipefail
 
 namespace="${TRPC_AGENT_DRILL_NAMESPACE:-trpc-agent}"
-deployment="${TRPC_AGENT_DRILL_DEPLOYMENT:-trpc-agent-service}"
-selector="${TRPC_AGENT_DRILL_SELECTOR:-app.kubernetes.io/name=trpc-agent-service}"
+component="${TRPC_AGENT_DRILL_COMPONENT:-worker}"
+case "$component" in gateway|worker) ;; *) echo "component must be gateway or worker" >&2; exit 1 ;; esac
+deployment="trpc-agent-${component}"
+selector="app.kubernetes.io/name=trpc-agent-service,app.kubernetes.io/component=${component}"
 mode="${1:---preview}"
 
 command -v kubectl >/dev/null 2>&1 || { echo "kubectl is required" >&2; exit 1; }
