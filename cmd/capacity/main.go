@@ -33,6 +33,7 @@ type options struct {
 	Message       string
 	MaxErrorRate  float64
 	MaxP95        time.Duration
+	Rate          float64
 	Token         string
 	Binding       string
 	RunID         string
@@ -67,14 +68,16 @@ func main() {
 	concurrency := flags.Int("concurrency", 20, "parallel requests")
 	timeout := flags.Duration("timeout", 10*time.Second, "per-request timeout")
 	message := flags.String("message", "capacity probe", "gateway message (may invoke the configured model)")
+	runID := flags.String("run-id", "", "optional stable run identifier for correlating accepted requests")
 	maxErrorRate := flags.Float64("max-error-rate", 0.01, "failure threshold from 0 to 1")
 	maxP95 := flags.Duration("max-p95", 0, "optional p95 failure threshold")
+	rate := flags.Float64("rate", 0, "optional maximum request starts per second; zero is unbounded")
 	_ = flags.Parse(os.Args[1:])
 	if err := execute(context.Background(), options{
 		BaseURL: *baseURL, Scenario: *scenario, Requests: *requests, Concurrency: *concurrency,
-		Timeout: *timeout, Message: *message, MaxErrorRate: *maxErrorRate, MaxP95: *maxP95,
+		Timeout: *timeout, Message: *message, MaxErrorRate: *maxErrorRate, MaxP95: *maxP95, Rate: *rate,
 		Token: os.Getenv(loadTokenEnv), Binding: os.Getenv(loadBindingEnv),
-		RunID: time.Now().UTC().Format("20060102T150405.000000000"), Output: os.Stdout,
+		RunID: strings.TrimSpace(*runID), Output: os.Stdout,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -89,7 +92,7 @@ func execute(parent context.Context, config options) error {
 	if config.BaseURL == "" || config.Requests <= 0 || config.Requests > 1_000_000 || config.Concurrency <= 0 || config.Concurrency > 4096 || config.Timeout <= 0 {
 		return errors.New("capacity: invalid URL, requests, concurrency, or timeout")
 	}
-	if config.MaxErrorRate < 0 || config.MaxErrorRate > 1 || config.MaxP95 < 0 {
+	if config.MaxErrorRate < 0 || config.MaxErrorRate > 1 || config.MaxP95 < 0 || config.Rate < 0 || config.Rate > 1_000_000 {
 		return errors.New("capacity: thresholds are invalid")
 	}
 	switch config.Scenario {
@@ -102,7 +105,7 @@ func execute(parent context.Context, config options) error {
 		return errors.New("capacity: scenario must be health, readiness, or gateway")
 	}
 	if config.RunID == "" {
-		config.RunID = "run"
+		config.RunID = time.Now().UTC().Format("20060102T150405.000000000")
 	}
 	transport := config.HTTPTransport
 	if transport == nil {
@@ -128,6 +131,18 @@ func execute(parent context.Context, config options) error {
 	go func() {
 		defer close(jobs)
 		for index := 0; index < config.Requests; index++ {
+			if index > 0 && config.Rate > 0 {
+				delay := time.Duration(float64(time.Second) / config.Rate)
+				timer := time.NewTimer(delay)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					if !timer.Stop() {
+						<-timer.C
+					}
+					return
+				}
+			}
 			select {
 			case jobs <- index:
 			case <-ctx.Done():

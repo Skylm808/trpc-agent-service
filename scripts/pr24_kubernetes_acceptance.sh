@@ -134,9 +134,8 @@ start_port_forward() {
   return 1
 }
 start_port_forward
-go run "$repo_root/cmd/capacity" -scenario health -requests 100 -concurrency 10 -base-url "http://127.0.0.1:${local_port}" -max-error-rate 0 -max-p95 2s >"$work_dir/capacity.json"
-jq -e '.failed == 0 and .requests == 100' "$work_dir/capacity.json" >/dev/null
-echo "PASS bounded capacity smoke"
+go run "$repo_root/cmd/capacity" -scenario health -requests 100 -concurrency 10 -base-url "http://127.0.0.1:${local_port}" -max-error-rate 0 -max-p95 2s >"$work_dir/capacity-health.json"
+jq -e '.failed == 0 and .requests == 100' "$work_dir/capacity-health.json" >/dev/null
 start_port_forward
 
 config_before="$(kubectl -n "$namespace" exec demo-postgres-0 -- psql -At -U trpc_agent -d trpc_agent -c "SELECT COALESCE(MAX(current_config_version),0) FROM tenants WHERE tenant_id='demo'" 2>/dev/null)"
@@ -164,6 +163,20 @@ wait_completed() {
 request_id="$(submit_probe)"
 wait_completed "$request_id" || { echo "synthetic Runner probe timed out" >&2; exit 1; }
 echo "PASS Gateway -> Redis -> Worker -> model -> PostgreSQL chain"
+
+capacity_id="pr24-capacity-$(date -u +%Y%m%dT%H%M%S)-$$"
+TRPC_AGENT_LOAD_TOKEN="$gateway_token" TRPC_AGENT_LOAD_BINDING=demo-http \
+  go run "$repo_root/cmd/capacity" -scenario gateway -requests 20 -concurrency 5 \
+  -rate 5 -run-id "$capacity_id" -base-url "http://127.0.0.1:${local_port}" -max-error-rate 0 -max-p95 3s >"$work_dir/capacity-gateway.json"
+jq -e '.failed == 0 and .requests == 20' "$work_dir/capacity-gateway.json" >/dev/null
+capacity_completed=0
+for _ in $(seq 1 60); do
+  capacity_completed="$(kubectl -n "$namespace" exec demo-postgres-0 -- psql -At -U trpc_agent -d trpc_agent -c "SELECT count(*) FROM inbox_messages WHERE tenant_id='demo' AND external_message_id LIKE 'load-${capacity_id}-%' AND status='completed'" 2>/dev/null)"
+  [[ "$capacity_completed" == "20" ]] && break
+  sleep 2
+done
+[[ "$capacity_completed" == "20" ]] || { echo "capacity requests were accepted but did not complete" >&2; exit 1; }
+echo "PASS bounded health and full Runner capacity smoke"
 
 for component in gateway worker; do
   target="$(kubectl -n "$namespace" get pod -l "app.kubernetes.io/name=trpc-agent-service,app.kubernetes.io/component=$component" -o jsonpath='{.items[0].metadata.name}')"
@@ -233,7 +246,8 @@ pvc_count="$(kubectl -n "$namespace" get pvc -o json | jq '.items | length')"
 echo "PASS PostgreSQL config persistence and retained PVCs"
 
 mkdir -p "$(dirname "$report_path")"
-capacity_p95="$(jq -r '.p95_ms' "$work_dir/capacity.json")"
+health_p95="$(jq -r '.p95_ms' "$work_dir/capacity-health.json")"
+gateway_p95="$(jq -r '.p95_ms' "$work_dir/capacity-gateway.json")"
 image_id="$(docker image inspect "$image" --format '{{.Id}}' | cut -c1-19)"
 git_baseline="$(git -C "$repo_root" rev-parse HEAD)"
 if ! git -C "$repo_root" diff --quiet --ignore-submodules -- || [[ -n "$(git -C "$repo_root" ls-files --others --exclude-standard)" ]]; then
@@ -247,7 +261,7 @@ cat >"$report_path" <<REPORT
 - Kubernetes context：${context}
 - 镜像：${image_id}（仅记录不可逆摘要）
 - 拓扑：Gateway 3 副本、Worker 3 副本、PostgreSQL/Redis StatefulSet、Mock Model、OTel Collector
-- 容量冒烟：100 请求，失败 0，p95 ${capacity_p95}ms
+- 容量冒烟：health 100 请求、Runner 20 请求，失败 0，接入 p95 ${gateway_p95}ms，health p95 ${health_p95}ms；20 条均在 PostgreSQL Inbox 完成
 - 单 Pod 恢复：通过
 - PostgreSQL/Redis 故障与 readiness 恢复：通过
 - Model 请求重试/Collector 故障恢复：通过

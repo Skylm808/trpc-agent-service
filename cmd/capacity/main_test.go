@@ -64,6 +64,31 @@ func TestExecuteRejectsUnsafeGatewayAndThresholds(t *testing.T) {
 	if err := execute(context.Background(), base); err == nil {
 		t.Fatal("invalid threshold accepted")
 	}
+	base.MaxErrorRate, base.Rate = 0, -1
+	if err := execute(context.Background(), base); err == nil {
+		t.Fatal("negative request rate accepted")
+	}
+}
+
+func TestExecutePacesRequestStarts(t *testing.T) {
+	var output bytes.Buffer
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	})
+	err := execute(context.Background(), options{
+		BaseURL: "http://service.test", Scenario: "health", Requests: 3, Concurrency: 3,
+		Timeout: time.Second, MaxErrorRate: 0, Rate: 100, Output: &output, HTTPTransport: transport,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report summary
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.DurationMS < 15 {
+		t.Fatalf("rate limit was not applied: duration_ms=%f", report.DurationMS)
+	}
 }
 
 func TestPercentile(t *testing.T) {

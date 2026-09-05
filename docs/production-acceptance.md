@@ -72,7 +72,8 @@ E2E 均已通过，但仓库不保存截图、回调原文或用户消息正文�
 TRPC_AGENT_K8S_CREATE_KIND=1 ./scripts/pr24_kubernetes_acceptance.sh --run
 ```
 
-真实模式部署 3 个 Gateway 和 3 个 Worker，并实际运行合成 Runner 链路、100 请求容量冒烟、
+真实模式部署 3 个 Gateway 和 3 个 Worker，并实际运行合成 Runner 链路、100 个 health 请求和
+20 个并发 Gateway→Runner→PostgreSQL 完成态请求的容量冒烟、
 单 Pod 重建、Redis/PostgreSQL/模型/Collector 故障恢复、Sender retry/DLQ 回归、滚动升级与
 `rollout undo`。验收前后比较 PostgreSQL 中的配置版本并确认 PVC 仍存在。HPA 在轻量 kind demo
 中验证 API admission、目标对象和上下限；基于云指标的实际扩容阈值仍须在目标生产集群按容量
