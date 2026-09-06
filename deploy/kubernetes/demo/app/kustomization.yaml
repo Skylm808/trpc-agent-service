@@ -9,4 +9,4 @@ patches:
 images:
   - name: trpc-agent-service
     newName: trpc-agent-service
-    newTag: pr24-demo
+    newTag: kubernetes-demo

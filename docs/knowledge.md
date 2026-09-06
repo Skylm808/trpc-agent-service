@@ -1,6 +1,6 @@
 # Knowledge/RAG 与 S3 Artifact
 
-PR13 提供最小生产闭环：管理员把文本写入租户/App 的知识库，服务调用 OpenAI-compatible Embedding 并写入 PGVector 或 Qdrant；启用了 `knowledge_search` 的 Agent 可在运行时检索。它不是完整的文档管理系统，不包含 PDF/OCR、网页抓取、MCP 或业务 Tool。
+Knowledge 提供最小生产闭环：管理员把文本写入租户/App 的知识库，服务调用 OpenAI-compatible Embedding 并写入 PGVector 或 Qdrant；启用了 `knowledge_search` 的 Agent 可在运行时检索。它不是完整的文档管理系统，不包含 PDF/OCR、网页抓取、MCP 或业务 Tool。
 
 ## Knowledge 配置
 
@@ -55,5 +55,5 @@ PostgreSQL。Worker 丢失 lease 后可从 checkpoint 重放；内容冲突、�
 
 Knowledge ingest 同时维护租户/App 文档目录。PGVector ↔ Qdrant 迁移从该目录重新生成 embedding
 并 upsert 目标索引，在 `migration_target` 阶段对新文档同步双写。完成任务后仍应做召回抽样，
-再发布下一配置版本切换主索引。升级 PR23 之前只存在于向量库、没有进入文档目录的历史数据，
+再发布下一配置版本切换主索引。只存在于向量库、没有进入文档目录的早期历史数据，
 需先通过 Admin Knowledge API 重新 ingest 一次。

@@ -9,7 +9,7 @@ data:
       location /v1/chat/completions {
         default_type text/event-stream;
         add_header Cache-Control no-cache;
-        return 200 'data: {"id":"pr24-demo","object":"chat.completion.chunk","created":1,"model":"demo-model","choices":[{"index":0,"delta":{"role":"assistant","content":"OK"},"finish_reason":null}]}\n\ndata: {"id":"pr24-demo","object":"chat.completion.chunk","created":1,"model":"demo-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+        return 200 'data: {"id":"kubernetes-demo","object":"chat.completion.chunk","created":1,"model":"demo-model","choices":[{"index":0,"delta":{"role":"assistant","content":"OK"},"finish_reason":null}]}\n\ndata: {"id":"kubernetes-demo","object":"chat.completion.chunk","created":1,"model":"demo-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
       }
       location /healthz { return 200 'ok'; }
     }

@@ -12,7 +12,7 @@ for command in docker curl jq; do
 done
 [[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "ERROR invalid Compose project name" >&2; exit 1; }
 
-work_dir="$(mktemp -d "${TMPDIR:-/tmp}/trpc-agent-pr20.XXXXXX")"
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/trpc-agent-multinode.XXXXXX")"
 legacy_service_was_running=0
 cleanup() {
   if [[ "$legacy_service_was_running" == "1" ]]; then
@@ -94,7 +94,7 @@ if [[ "${TRPC_AGENT_ACCEPTANCE_RUN_MESSAGES:-0}" == "1" ]]; then
 
   submit_message() {
     local message_id="$1" accepted="$work_dir/accepted-$1.json"
-    jq -n --arg id "$message_id" --arg user "pr20-$message_id" '{channel:"http",from:$user,message_id:$id,text:"PR20 synthetic acceptance probe. Reply OK only."}' >"$work_dir/message-$1.json"
+    jq -n --arg id "$message_id" --arg user "acceptance-$message_id" '{channel:"http",from:$user,message_id:$id,text:"Synthetic acceptance probe. Reply OK only."}' >"$work_dir/message-$1.json"
     curl --fail --silent --show-error --max-time 10 -X POST --header @"$work_dir/gateway.headers" -H 'Content-Type: application/json' --data-binary @"$work_dir/message-$1.json" "$base_url/v1/gateway/messages" >"$accepted"
     jq -er '.request_id | select(length > 0)' "$accepted" >"$work_dir/request-$1"
   }
@@ -119,7 +119,7 @@ if [[ "${TRPC_AGENT_ACCEPTANCE_RUN_MESSAGES:-0}" == "1" ]]; then
     wait_message "$1"
   }
 
-  run_id="pr20-$(date -u +%Y%m%dT%H%M%S)-$$"
+  run_id="multinode-$(date -u +%Y%m%dT%H%M%S)-$$"
   : >"$work_dir/workers"
   for index in $(seq 1 "$count"); do
     submit_message "$run_id-$index"
@@ -177,4 +177,4 @@ sql_scalar "SELECT json_build_object('sessions',count(*),'events',(SELECT count(
 jq -e --slurpfile before "$work_dir/config-before.json" '.version_sum >= $before[0].version_sum and .configs >= $before[0].configs' "$work_dir/config-after.json" >/dev/null
 jq -e --slurpfile before "$work_dir/data-before.json" '.sessions >= $before[0].sessions and .events >= $before[0].events and .memories >= $before[0].memories' "$work_dir/data-after.json" >/dev/null
 echo "PASS PostgreSQL configuration and durable data did not regress"
-echo "PR20 multi-node acceptance passed (sanitized output; no message body or credential emitted)"
+echo "Multi-node acceptance passed (sanitized output; no message body or credential emitted)"

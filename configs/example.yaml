@@ -40,7 +40,7 @@ tenants:
           require_approval: []
           request_token_budget: 10000
           monthly_cost_budget_cents: 10000
-        # PR16 MCP/业务工具默认不启用，避免示例环境启动时访问外部服务。
+        # MCP/业务工具默认不启用，避免示例环境启动时访问外部服务。
         # 启用后还必须把暴露名加入 tools.allow；完整示例见 docs/mcp-tools.md。
         # mcp_servers:
         #   - server_id: crm
@@ -56,7 +56,7 @@ tenants:
         #     credential: {provider: env, key: TICKET_API_TOKEN}
         #     timeout_seconds: 10
         #     enabled: true
-        # PR13 Knowledge/RAG 默认关闭。启用时还需把 knowledge_search 加入
+        # Knowledge/RAG 默认关闭。启用时还需把 knowledge_search 加入
         # tools.allow，并配置 embedding SecretRef；完整示例见 docs/knowledge.md。
         knowledge:
           enabled: false
@@ -84,7 +84,7 @@ tenants:
               provider: env
               key: WECOM_ENCODING_AES_KEY
             enabled: false
-          # 飞书 Adapter 与 Sender 已由 PR10 交付；此处默认 disabled，填入真实
+          # 飞书 Adapter 与 Sender 已接入；此处默认 disabled，填入真实
           # App ID 并通过 Admin API 发布新版本即可启用，无需重启。
           - binding_id: demo-feishu
             type: feishu
@@ -108,7 +108,7 @@ tenants:
             type: postgres
             endpoint: postgres://postgres:5432/trpc_agent
             namespace: demo-assistant
-            # During a controlled PR12 migration, publish a new config version
+            # During a controlled storage migration, publish a new config version
             # with migration_target on both session and summary. The credential
             # SecretRef resolves to a complete target DSN; never put it inline.
             # migration_target:

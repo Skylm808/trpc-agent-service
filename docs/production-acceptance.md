@@ -24,22 +24,22 @@ export TRPC_AGENT_ACCEPTANCE_RUN_MESSAGE=1
 ./scripts/production_acceptance.sh
 ```
 
-## PR20 Compose 多节点门禁
+## Compose 多节点门禁
 
-PR20 拓扑是一个 producer-only Gateway 和两个 consumer-only Worker；默认 `all` 服务仍兼容。
+验收拓扑是一个 producer-only Gateway 和两个 consumer-only Worker；默认 `all` 服务仍兼容。
 指定既有 Compose 项目名即可复用原 PostgreSQL/Redis 命名卷：
 
 ```bash
 export TRPC_AGENT_COMPOSE_PROJECT=trpc-agent-service-pr14-check
 export TRPC_AGENT_ACCEPTANCE_START=1
-./scripts/pr20_multinode_acceptance.sh
+./scripts/multinode_acceptance.sh
 ```
 
 默认检查不会写测试消息或重启容器。真实共享后端回归使用唯一测试 tenant 并在结束时清理：
 
 ```bash
 TRPC_AGENT_ACCEPTANCE_RUN_INTEGRATION=1 \
-  ./scripts/pr20_multinode_acceptance.sh
+  ./scripts/multinode_acceptance.sh
 ```
 
 只有确认测试 tenant、binding 和模型成本后，才启用合成消息与定点 `worker-a` 重启：
@@ -51,7 +51,7 @@ export TRPC_AGENT_ACCEPTANCE_GATEWAY_TOKEN='<from secret manager>'
 export TRPC_AGENT_ACCEPTANCE_RUN_MESSAGES=1
 # 同一项目仍运行旧 service --role all 时，临时隔离并在退出时自动恢复：
 export TRPC_AGENT_ACCEPTANCE_ISOLATE_TOPOLOGY=1
-./scripts/pr20_multinode_acceptance.sh
+./scripts/multinode_acceptance.sh
 ```
 
 脚本不执行 `down`、`down -v`、`volume rm`、数据库清空或不带服务名的 stop/restart；隔离模式
@@ -63,13 +63,13 @@ export TRPC_AGENT_ACCEPTANCE_ISOLATE_TOPOLOGY=1
 版本和租户/通道隔离；人工真实平台验收证明企业微信、飞书平台回调及回复可达。两种真实 IM
 E2E 均已通过，但仓库不保存截图、回调原文或用户消息正文。
 
-## PR24 Kubernetes 最小生产门禁
+## Kubernetes 最小生产门禁
 
 在专用 kind 集群运行真实多副本拓扑；不具备集群时可先执行离线结构门禁：
 
 ```bash
-./scripts/pr24_kubernetes_acceptance.sh --validate
-TRPC_AGENT_K8S_CREATE_KIND=1 ./scripts/pr24_kubernetes_acceptance.sh --run
+./scripts/kubernetes_acceptance.sh --validate
+TRPC_AGENT_K8S_CREATE_KIND=1 ./scripts/kubernetes_acceptance.sh --run
 ```
 
 真实模式部署 3 个 Gateway 和 3 个 Worker，并实际运行合成 Runner 链路、100 个 health 请求和

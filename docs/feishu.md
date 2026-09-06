@@ -1,6 +1,6 @@
 # 飞书 Channel Adapter 与 Sender
 
-## 交付边界（PR10）
+## 能力边界
 
 `trpcservice/channels/feishu` 实现飞书自建应用的双向协议边界，与企业微信并存且租户隔离：
 
@@ -108,7 +108,7 @@ channels:
 
 ## 动态配置与版本钉住
 
-飞书完整接入 PR9 生产控制面：
+飞书完整接入生产控制面：
 
 - Admin publish 新增或修改飞书 binding 后，下一个回调即生效，无需修改 YAML 或重启；
 - 入站回调按当前发布版本解析；已进入 Runtime 的旧请求继续使用旧 `config_version`；
@@ -165,4 +165,4 @@ Inbox、Runner、DeepSeek、PostgreSQL、Outbox 并回到飞书。该结论与�
 
 - 出站支持文本和 `reply_format: card` 的基础交互卡片；复杂按钮回调、PDF/Office/OCR 属于后续增强。
 - 群聊 thread/topic 回复暂归入群会话，不单独建 thread session。
-- PR17 已提供 `uncertain` / DLQ 的 Admin 运维 API；可视化 Web 运维页面仍未实现。
+- 系统已提供 `uncertain` / DLQ 的 Admin 运维 API；可视化 Web 运维页面仍未实现。

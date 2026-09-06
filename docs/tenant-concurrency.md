@@ -1,6 +1,6 @@
 # 租户级 Runner 并发配额
 
-PR18 在所有 Worker 节点之间使用 Redis 过期信号量限制每个租户同时执行的 Runner 数量，
+系统在所有 Worker 节点之间使用 Redis 过期信号量限制每个租户同时执行的 Runner 数量，
 防止一个突发租户占满模型、Tool 和 Worker 资源。配额属于不可变租户配置：
 
 ```yaml

@@ -1,8 +1,8 @@
-# PR24 Kubernetes Demo 验收报告
+# Kubernetes Demo 验收报告
 
 - 日期：2026-09-05T13:51:46Z
 - Git 基线：34d2cd61e67eb18a8524659d0d06bf93da49a5b7+candidate
-- Kubernetes context：kind-trpc-agent-pr24
+- Kubernetes context：`kind-trpc-agent-pr24`（该次历史验收所用名称）
 - 镜像：sha256:36792783ff18（仅记录不可逆摘要）
 - 拓扑：Gateway 3 副本、Worker 3 副本、PostgreSQL/Redis StatefulSet、Mock Model、OTel Collector
 - 容量冒烟：health 100 请求、Runner 20 请求，失败 0，接入 p95 11.642ms，health p95 13.102ms；20 条均在 PostgreSQL Inbox 完成

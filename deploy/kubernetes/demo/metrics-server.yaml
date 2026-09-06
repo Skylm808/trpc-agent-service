@@ -1,5 +1,5 @@
 # Pinned from kubernetes-sigs/metrics-server v0.8.0. This demo-only copy adds
-# --kubelet-insecure-tls for kind's self-signed kubelet certificate. The PR24
+# --kubelet-insecure-tls for kind's self-signed kubelet certificate. The demo
 # script applies it only to its dedicated kind cluster; production clusters
 # must provide their platform-managed resource metrics API.
 apiVersion: v1

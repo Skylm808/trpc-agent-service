@@ -49,8 +49,8 @@ an OpenTelemetry Collector. The model stub returns only a fixed synthetic answer
 logs request bodies. Create or select the dedicated cluster and run:
 
 ```bash
-kind create cluster --name trpc-agent-pr24 --wait 180s
-./scripts/pr24_kubernetes_acceptance.sh --run
+kind create cluster --name trpc-agent-demo --wait 180s
+./scripts/kubernetes_acceptance.sh --run
 ```
 
 Set `TRPC_AGENT_K8S_CREATE_KIND=1` to let the script create the named kind cluster when absent. An
@@ -68,5 +68,5 @@ to a confirmed non-kind context. A non-kind cluster must already provide its man
 To validate manifests and the no-inline-Secret boundary without a cluster:
 
 ```bash
-./scripts/pr24_kubernetes_acceptance.sh --validate
+./scripts/kubernetes_acceptance.sh --validate
 ```

@@ -1,6 +1,6 @@
 # 生产可观测性
 
-PR14 把此前的 OpenTelemetry 埋点从 no-op 全局 Provider 接到生产链路；PR21 增加了
+OpenTelemetry SDK 已接入生产链路，并配置了
 持久化 Tempo 和生产告警：进程通过
 OTLP/gRPC 向 Collector 输出 trace 和 metrics，Collector 执行 memory limiter 与 batch，
 trace 写入 Tempo 命名卷，Prometheus 抓取 Collector 的 metrics exporter，Grafana 自动加载
@@ -15,7 +15,7 @@ curl http://127.0.0.1:9090/-/healthy
 curl http://127.0.0.1:3000/api/health
 curl http://127.0.0.1:3200/ready
 curl 'http://127.0.0.1:9090/api/v1/query?query=up'
-TRPC_AGENT_OBSERVABILITY_ACCEPTANCE_LIVE=1 ./scripts/pr21_observability_acceptance.sh
+TRPC_AGENT_OBSERVABILITY_ACCEPTANCE_LIVE=1 ./scripts/observability_acceptance.sh
 ```
 
 Grafana 默认 dashboard 位于 `Agent Platform / tRPC Agent Service`。Compose 开放匿名

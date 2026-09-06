@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	path := "configs/example.yaml"
+	path := "configs/demo.yaml"
 	if len(os.Args) > 1 {
 		path = os.Args[1]
 	}
@@ -29,13 +29,23 @@ func main() {
 	}
 	defer bundle.Close()
 	engine := &policy.Engine{Identity: policy.AuthenticatedIdentityAuthorizer{}}
-	policyRequest := policy.Request{TenantID: snapshot.TenantID(), AppID: snapshot.AppID(), UserID: "user/quickstart", RequestID: "quickstart-1", Policy: snapshot.App().Tools}
+	bindingID, externalUserID := "quickstart", "demo-user"
+	var allowedUsers []string
+	if channels := snapshot.App().Channels; len(channels) > 0 {
+		bindingID = channels[0].ID
+		allowedUsers = channels[0].AllowedUsers
+		if len(allowedUsers) > 0 {
+			externalUserID = allowedUsers[0]
+		}
+	}
+	userID := fmt.Sprintf("http/%s/%s", bindingID, externalUserID)
+	policyRequest := policy.Request{TenantID: snapshot.TenantID(), AppID: snapshot.AppID(), UserID: userID, ExternalUserID: externalUserID, RequestID: "quickstart-1", AllowedUsers: allowedUsers, Policy: snapshot.App().Tools}
 	controls, err := engine.Evaluate(context.Background(), policyRequest)
 	if err != nil {
 		fatal(err)
 	}
 	ctx := policy.WithRequest(context.Background(), engine, policyRequest)
-	result, err := bundle.Run(ctx, serviceRuntime.RunInput{RequestID: "quickstart-1", UserID: "user/quickstart", SessionID: "dm/demo-http/quickstart", Text: "calculate 6*7", ToolFilter: controls.Visibility, ToolExecutionFilter: controls.Execution, ToolPermissionPolicy: controls.Permission})
+	result, err := bundle.Run(ctx, serviceRuntime.RunInput{RequestID: "quickstart-1", UserID: userID, SessionID: fmt.Sprintf("dm/%s/%s", bindingID, externalUserID), Text: "calculate 6*7", ToolFilter: controls.Visibility, ToolExecutionFilter: controls.Execution, ToolPermissionPolicy: controls.Permission})
 	if err != nil {
 		fatal(err)
 	}

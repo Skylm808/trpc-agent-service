@@ -1,4 +1,4 @@
-# PR21 持久化 Trace 与生产告警验收报告
+# 持久化 Trace 与生产告警验收报告
 
 > 只记录计数、状态和 span 名称。不得粘贴 trace JSON、指标原文、用户消息正文、HTTP
 > Header、SecretRef 解析值、数据库 DSN 或任何平台凭据。

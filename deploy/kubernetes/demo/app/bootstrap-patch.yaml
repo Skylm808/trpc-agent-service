@@ -7,14 +7,14 @@ data:
     schema_version: 1
     tenants:
       - tenant_id: demo
-        name: PR24 Demo Tenant
+        name: Kubernetes Demo Tenant
         enabled: true
         config_version: 1
         audit: {enabled: true, retention_days: 7, store_content: false}
         runtime: {max_concurrent_runs: 8}
         apps:
           - app_id: assistant
-            name: PR24 Demo Assistant
+            name: Kubernetes Demo Assistant
             enabled: true
             config: {instruction: Reply briefly.}
             model:
@@ -34,7 +34,7 @@ data:
             channels:
               - binding_id: demo-http
                 type: http
-                provider_account_id: pr24-demo
+                provider_account_id: kubernetes-demo
                 token: {provider: env, key: GATEWAY_TOKEN}
                 enabled: true
             storage:

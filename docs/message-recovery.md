@@ -1,6 +1,6 @@
 # Inbox / Outbox 故障恢复
 
-PR17 为 PostgreSQL 中已经隔离的 Inbox DLQ、Outbox DLQ 和 Outbox `uncertain`
+Admin API 为 PostgreSQL 中已经隔离的 Inbox DLQ、Outbox DLQ 和 Outbox `uncertain`
 提供生产 Admin API。接口复用 Admin Bearer 认证和 URL tenant scope；请求体没有
 `tenant_id`，服务也不会返回消息正文、外部用户、收件人、session 或 `last_error`。
 

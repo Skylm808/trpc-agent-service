@@ -2,7 +2,7 @@
 
 ## 最小可运行环境
 
-根目录的 `docker-compose.yml` 启动 PostgreSQL、Redis、一次性 migration、兼容模式的合并 Gateway/Worker，以及 OpenTelemetry Collector、Tempo、Prometheus、Grafana；opt-in `multinode` profile 另提供一个 Gateway 和两个 Worker 的 PR20 验收拓扑。Kubernetes 基线使用 `--role gateway` 与 `--role worker` 拆成独立 Deployment。服务启动时把 `configs/example.yaml` 当作**种子**：租户在控制面还没有任何已发布版本时才写入 version 1；一旦通过 Admin API 发布过新版本，数据库就是唯一事实源，重启不再校验文件与数据库一致，也不要求重建环境。启动文件中的版本号超过数据库已发布版本时拒绝启动，避免节点使用未发布配置。
+根目录的 `docker-compose.yml` 启动 PostgreSQL、Redis、一次性 migration、兼容模式的合并 Gateway/Worker，以及 OpenTelemetry Collector、Tempo、Prometheus、Grafana；opt-in `multinode` profile 另提供一个 Gateway 和两个 Worker 的验收拓扑。Kubernetes 基线使用 `--role gateway` 与 `--role worker` 拆成独立 Deployment。服务启动时把 `configs/example.yaml` 当作**种子**：租户在控制面还没有任何已发布版本时才写入 version 1；一旦通过 Admin API 发布过新版本，数据库就是唯一事实源，重启不再校验文件与数据库一致，也不要求重建环境。启动文件中的版本号超过数据库已发布版本时拒绝启动，避免节点使用未发布配置。
 
 首次启动前执行 `cp .env.example .env`，然后只在本机 `.env` 中填写
 `DEEPSEEK_API_KEY`。生产 Runtime 使用 tRPC-Agent-Go 的 OpenAI-compatible Model
@@ -33,7 +33,7 @@ curl -H 'Authorization: Bearer local-secret' \
 
 这条链路实际使用 PostgreSQL 保存 Inbox、tRPC-Agent-Go Session/Memory、平台 Event/Summary/Memory 投影、Artifact、Outbox 和 Audit；Redis 负责 lease、fencing token 和 SSE 事件总线。同一个 `message_id` 再次发送会命中 PostgreSQL 唯一键并返回 `duplicate=true`。
 
-## 配置发布（PR9 生产控制面）
+## 配置发布
 
 Admin API 与 Gateway 共用 HTTP 端口，所有 `/v1/tenants/{tenant_id}/configs*` 请求必须携带
 `TRPC_AGENT_ADMIN_TOKENS` 中配置的 Bearer 凭据，且凭据的租户 scope 必须覆盖 URL 中的租户
@@ -78,7 +78,7 @@ Prometheus 位于 `http://127.0.0.1:9090`，Tempo 位于 `http://127.0.0.1:3200`
 
 Kubernetes 基线已把 Gateway 与 Runner Worker 分开扩容：Gateway 挂载 Channel/Admin HTTP，Worker 只消费 Redis Stream。Outbox Delivery、Storage migration Worker 和审计 retention 当前仍随 Worker 运行，尚未成为独立角色。PostgreSQL 与 Redis 使用托管高可用集群。migration schema 仍作为单独 Job 执行；迁移在事务内获取 PostgreSQL advisory lock，业务 Pod 不负责建表。Session 和 Memory 不保存在 Worker 本地，因此不要求 sticky session。
 
-默认 Compose 保留 Gateway 与 Worker 合并的 `all` 兼容进程；PR20 `multinode` profile 使用
+默认 Compose 保留 Gateway 与 Worker 合并的 `all` 兼容进程；`multinode` profile 使用
 独立 `gateway`、`worker-a`、`worker-b`，共享同一 PostgreSQL、Redis 和现有命名卷。Gateway
 不构造 Runner，Worker 不暴露回调端口。生产路径使用 Redis Streams consumer group，
 不依赖进程内 dispatcher 或 sticky session。每个 Worker 从 PostgreSQL 竞争捞取到期 retry
@@ -91,14 +91,13 @@ Redis 跨节点限流。默认 Compose 使用 `all`；多节点 profile 和 Kube
 独立 Delivery Deployment 需要扩展新的受约束角色和专属探针，当前尚未实现。
 
 跨节点请求状态、取消意图、预算、人工审批和节点心跳均保存在共享后端；取消命令另用 Redis
-Pub/Sub 做低延迟通知。PR17 已提供受认证、租户隔离并带审计的 `uncertain` / DLQ Admin
+Pub/Sub 做低延迟通知。系统已提供受认证、租户隔离并带审计的 `uncertain` / DLQ Admin
 运维 API，操作流程见[消息故障恢复](message-recovery.md)；Web 运维页面仍未实现。
-PR18 已实现按租户动态 Runner 并发配额，PR19 已拆分 Gateway/Worker，PR20 已加入 Compose
-多节点验收。企业微信与飞书真实 E2E 均已人工通过；新环境仍需部署方配置真实账号、公网
+系统已实现按租户动态 Runner 并发配额、Gateway/Worker 拆分和 Compose 多节点验收。企业微信与飞书真实 E2E 均已人工通过；新环境仍需部署方配置真实账号、公网
 HTTPS 回调和平台网络策略。尚未生产化的部分包括 Delivery/maintenance 独立角色和基于队列
 自定义指标的自动扩缩容控制器。
 
-## PR20 多节点 Compose 验收
+## 多节点 Compose 验收
 
 必须复用既有项目名以复用命名卷；下面的命令只创建或更新明确服务，不执行 `down -v`：
 
@@ -106,7 +105,7 @@ HTTPS 回调和平台网络策略。尚未生产化的部分包括 Delivery/main
 export TRPC_AGENT_COMPOSE_PROJECT=trpc-agent-service-pr14-check
 docker compose -p "$TRPC_AGENT_COMPOSE_PROJECT" --profile multinode \
   up -d --build gateway worker-a worker-b
-./scripts/pr20_multinode_acceptance.sh
+./scripts/multinode_acceptance.sh
 ```
 
 脚本默认只读。需要跑独立测试 tenant 的 PostgreSQL/Redis 集成检查时显式设置
@@ -129,16 +128,16 @@ docker compose --profile test run --rm --build integration-test
 
 ## Storage Router 与迁移
 
-PR12 支持把 Session/Summary、Memory、Artifact 分别路由到不同 PostgreSQL 集群。每个外部目标都必须先运行同版本 migration；DSN 只能由 `credential: SecretRef` 提供。启动和 Admin validate/publish 会执行连接与表检查，缺少凭据、目标不可达或 schema 不完整都会拒绝启动/发布。
+Storage Router 支持把 Session/Summary、Memory、Artifact 分别路由到不同 PostgreSQL 集群。每个外部目标都必须先运行同版本 migration；DSN 只能由 `credential: SecretRef` 提供。启动和 Admin validate/publish 会执行连接与表检查，缺少凭据、目标不可达或 schema 不完整都会拒绝启动/发布。
 
-PR13 增加 PGVector/Qdrant Knowledge 和 S3-compatible Artifact。启用 Knowledge 或 S3 的配置在 Admin publish 时会解析 SecretRef 并执行有界连接预检；失败时保留当前发布版本和 Runtime Bundle。具体配置见 [Knowledge/RAG 与 S3 Artifact](knowledge.md)。
+PGVector/Qdrant Knowledge 和 S3-compatible Artifact 已接入。启用 Knowledge 或 S3 的配置在 Admin publish 时会解析 SecretRef 并执行有界连接预检；失败时保留当前发布版本和 Runtime Bundle。具体配置见 [Knowledge/RAG 与 S3 Artifact](knowledge.md)。
 
 外部 Memory 使用 `type: external`、固定 HTTPS `endpoint` 和 Bearer `credential`；每个请求由
 Adapter 注入可信 tenant/App scope。Audit 主存储仍是 PostgreSQL，可把 `migration_target` 配成
 `external`，将脱敏后的审计 envelope 同步 POST 到 WORM 归档。两类客户端都有超时、响应大小
 限制，错误不会回显 endpoint、Secret 或正文。
 
-PR16 增加生产 MCP Registry 与固定 HTTPS JSON 业务工具。Admin validate/publish 和进程启动会对启用的 MCP 服务执行 Initialize/ListTools；运行中发布新版本时，新 Bundle 建立独立连接，旧 Bundle 引用归零后关闭旧连接。MCP 与业务工具凭据只通过 SecretRef 注入，部署环境需提供对应 secret；配置与网络边界见 [生产 MCP 与业务工具](mcp-tools.md)。
+生产 MCP Registry 与固定 HTTPS JSON 业务工具已接入。Admin validate/publish 和进程启动会对启用的 MCP 服务执行 Initialize/ListTools；运行中发布新版本时，新 Bundle 建立独立连接，旧 Bundle 引用归零后关闭旧连接。MCP 与业务工具凭据只通过 SecretRef 注入，部署环境需提供对应 secret；配置与网络边界见 [生产 MCP 与业务工具](mcp-tools.md)。
 
 迁移不能直接修改 endpoint。先发布带 `migration_target` 的双写配置，再调用受认证的 migration API backfill；任务 completed 后才发布下一版本完成 cutover。旧源库保留只读回滚窗口，不会自动清理。命令与故障恢复步骤见 [Storage Router 与迁移](storage-migrations.md)。
 
@@ -153,8 +152,8 @@ Kubernetes 有序部署与 Secret 合约见 [manifest 说明](../deploy/kubernet
 最小真实 Kubernetes 验收使用专用 kind context 和 `deploy/kubernetes/demo` overlay：
 
 ```bash
-kind create cluster --name trpc-agent-pr24 --wait 180s
-./scripts/pr24_kubernetes_acceptance.sh --run
+kind create cluster --name trpc-agent-demo --wait 180s
+./scripts/kubernetes_acceptance.sh --run
 ```
 
 脚本拒绝未明确确认的其他 context，只缩放或重启带有确定名称的 demo 资源；结束后保留 namespace、

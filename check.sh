@@ -25,4 +25,4 @@ if go list -f '{{range .Imports}}{{println .}}{{end}}' ./... | grep -E '^trpc\.g
 fi
 
 ./build.sh
-scripts/pr21_observability_acceptance.sh
+scripts/observability_acceptance.sh

@@ -1,4 +1,4 @@
-# PR20 双 IM 与多节点生产验收报告模板
+# 双 IM 与多节点生产验收报告模板
 
 > 只填写脱敏元数据和 PASS/FAIL。禁止粘贴用户消息正文、回调 payload、回复正文、SecretRef、
 > Token、Key、下载 URL、数据库 DSN/密码或平台截图。

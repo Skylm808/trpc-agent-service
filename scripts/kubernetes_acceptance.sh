@@ -3,13 +3,13 @@ set -euo pipefail
 umask 077
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cluster_name="${TRPC_AGENT_K8S_CLUSTER_NAME:-trpc-agent-pr24}"
+cluster_name="${TRPC_AGENT_K8S_CLUSTER_NAME:-trpc-agent-demo}"
 expected_context="kind-${cluster_name}"
 namespace="trpc-agent"
 mode="${1:---validate}"
 local_port="${TRPC_AGENT_K8S_LOCAL_PORT:-28080}"
-report_path="${TRPC_AGENT_K8S_REPORT:-$repo_root/docs/acceptance/pr24-kubernetes-demo.md}"
-work_dir="$(mktemp -d "${TMPDIR:-/tmp}/trpc-agent-pr24.XXXXXX")"
+report_path="${TRPC_AGENT_K8S_REPORT:-$repo_root/docs/acceptance/kubernetes-demo.md}"
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/trpc-agent-kubernetes.XXXXXX")"
 port_forward_pid=""
 postgres_scaled=false
 redis_scaled=false
@@ -25,7 +25,7 @@ cleanup() {
   rm -rf "$work_dir"
 }
 trap cleanup EXIT INT TERM
-trap 'status=$?; echo "PR24 acceptance failed at line $LINENO" >&2; exit "$status"' ERR
+trap 'status=$?; echo "Kubernetes acceptance failed at line $LINENO" >&2; exit "$status"' ERR
 
 for command in kubectl docker curl jq go openssl; do
   command -v "$command" >/dev/null 2>&1 || { echo "$command is required" >&2; exit 1; }
@@ -46,9 +46,9 @@ fi
 grep -q 'kind: StatefulSet' "$work_dir/infra.yaml"
 grep -q 'kind: HorizontalPodAutoscaler' "$work_dir/app.yaml"
 grep -q 'kind: PodDisruptionBudget' "$work_dir/app.yaml"
-grep -q 'newTag: pr24-demo' "$repo_root/deploy/kubernetes/demo/app/kustomization.yaml"
+grep -q 'newTag: kubernetes-demo' "$repo_root/deploy/kubernetes/demo/app/kustomization.yaml"
 grep -q 'registry.k8s.io/metrics-server/metrics-server:v0.8.0' "$repo_root/deploy/kubernetes/demo/metrics-server.yaml"
-echo "PASS PR24 demo manifests and secret boundary"
+echo "PASS Kubernetes demo manifests and secret boundary"
 if [[ "$mode" == "--validate" ]]; then
   exit 0
 fi
@@ -68,7 +68,7 @@ if [[ "$context" == kind-* ]]; then
   command -v kind >/dev/null 2>&1 || { echo "kind is required for a kind context" >&2; exit 1; }
 fi
 
-image="trpc-agent-service:pr24-demo"
+image="trpc-agent-service:kubernetes-demo"
 if [[ "${TRPC_AGENT_K8S_SKIP_BUILD:-0}" != "1" ]]; then
   docker build -t "$image" "$repo_root" >/dev/null
   if [[ "$context" == kind-* ]]; then
@@ -172,9 +172,9 @@ config_before="$(kubectl -n "$namespace" exec demo-postgres-0 -- psql -At -U trp
 printf 'Authorization: Bearer %s\nX-Channel-Binding: demo-http\nContent-Type: application/json\n' "$gateway_token" >"$work_dir/gateway.headers"
 submit_probe() {
   local probe_id accepted_file
-  probe_id="pr24-$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM"
+  probe_id="kubernetes-$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM"
   accepted_file="$work_dir/accepted-${probe_id}.json"
-  jq -n --arg id "$probe_id" '{channel:"http",from:("pr24-synthetic-"+$id),message_id:$id,text:"PR24 synthetic probe"}' >"$work_dir/message.json"
+  jq -n --arg id "$probe_id" '{channel:"http",from:("acceptance-synthetic-"+$id),message_id:$id,text:"Kubernetes synthetic probe"}' >"$work_dir/message.json"
   curl --fail --silent --max-time 5 -X POST --header @"$work_dir/gateway.headers" --data-binary @"$work_dir/message.json" "http://127.0.0.1:${local_port}/v1/gateway/messages" >"$accepted_file"
   jq -er '.request_id' "$accepted_file"
 }
@@ -192,7 +192,7 @@ request_id="$(submit_probe)"
 wait_completed "$request_id" || { echo "synthetic Runner probe timed out" >&2; exit 1; }
 echo "PASS Gateway -> Redis -> Worker -> model -> PostgreSQL chain"
 
-capacity_id="pr24-capacity-$(date -u +%Y%m%dT%H%M%S)-$$"
+capacity_id="kubernetes-capacity-$(date -u +%Y%m%dT%H%M%S)-$$"
 TRPC_AGENT_LOAD_TOKEN="$gateway_token" TRPC_AGENT_LOAD_BINDING=demo-http \
   go run "$repo_root/cmd/capacity" -scenario gateway -requests 20 -concurrency 5 \
   -rate 5 -run-id "$capacity_id" -base-url "http://127.0.0.1:${local_port}" -max-error-rate 0 -max-p95 3s >"$work_dir/capacity-gateway.json"
@@ -253,12 +253,12 @@ kubectl -n "$namespace" rollout status deployment/demo-otel-collector --timeout=
 collector_scaled=false
 echo "PASS model request retry and Collector dependency recovery"
 
-GOCACHE="${GOCACHE:-/tmp/trpc-agent-pr24-cache}" go test "$repo_root/trpcservice/delivery" -run 'TestWorker|TestFeishuSenderFlowsThroughOutboxWorker' -count=1 >/dev/null
+GOCACHE="${GOCACHE:-/tmp/trpc-agent-kubernetes-cache}" go test "$repo_root/trpcservice/delivery" -run 'TestWorker|TestFeishuSenderFlowsThroughOutboxWorker' -count=1 >/dev/null
 echo "PASS Sender retry/DLQ deterministic fault regression"
 
 rollout_marker="$(date -u +%Y%m%dT%H%M%S)"
 for deployment in trpc-agent-gateway trpc-agent-worker; do
-  kubectl -n "$namespace" set env deployment/"$deployment" "PR24_ROLLOUT_MARKER=$rollout_marker" >/dev/null
+  kubectl -n "$namespace" set env deployment/"$deployment" "ACCEPTANCE_ROLLOUT_MARKER=$rollout_marker" >/dev/null
   kubectl -n "$namespace" rollout status "deployment/$deployment" --timeout=5m >/dev/null
   kubectl -n "$namespace" rollout undo "deployment/$deployment" >/dev/null
   kubectl -n "$namespace" rollout status "deployment/$deployment" --timeout=5m >/dev/null
@@ -282,7 +282,7 @@ if ! git -C "$repo_root" diff --quiet --ignore-submodules -- || [[ -n "$(git -C 
   git_baseline="${git_baseline}+candidate"
 fi
 cat >"$report_path" <<REPORT
-# PR24 Kubernetes Demo 验收报告
+# Kubernetes Demo 验收报告
 
 - 日期：$(date -u +%Y-%m-%dT%H:%M:%SZ)
 - Git 基线：${git_baseline}
@@ -300,4 +300,4 @@ cat >"$report_path" <<REPORT
 
 报告不包含 Secret、用户消息正文、数据库密码、完整镜像 ID 或外部标识。
 REPORT
-echo "PR24 Kubernetes acceptance passed; report=$report_path"
+echo "Kubernetes acceptance passed; report=$report_path"

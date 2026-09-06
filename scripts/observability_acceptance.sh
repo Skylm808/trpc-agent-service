@@ -29,10 +29,10 @@ contains_line() {
   fi
 }
 
-work_dir="$(mktemp -d "${TMPDIR:-/tmp}/trpc-agent-pr21.XXXXXX")"
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/trpc-agent-observability.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 
-DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-pr21-structural-placeholder}" "${compose[@]}" config --quiet
+DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-structural-placeholder}" "${compose[@]}" config --quiet
 
 for alert in AgentHighErrorRate AgentDLQNotEmpty AgentQueueBacklogGrowing AgentNoLiveWorker AgentPostgreSQLUnavailable; do
   contains_fixed "alert: $alert" "$repo_root/deploy/prometheus-alerts.yml" || {
@@ -45,7 +45,7 @@ contains_fixed 'uid: tempo' "$repo_root/deploy/grafana/provisioning/datasources/
 echo "PASS Compose, Tempo exporter, Grafana datasource, and five production alerts are structurally present"
 
 if [[ "${TRPC_AGENT_OBSERVABILITY_ACCEPTANCE_LIVE:-0}" != "1" ]]; then
-  echo "PR21 observability structural acceptance passed (set TRPC_AGENT_OBSERVABILITY_ACCEPTANCE_LIVE=1 for live checks)"
+  echo "Observability structural acceptance passed (set TRPC_AGENT_OBSERVABILITY_ACCEPTANCE_LIVE=1 for live checks)"
   exit 0
 fi
 
@@ -97,4 +97,4 @@ if [[ -n "$trace_id" ]]; then
   fi
 fi
 
-echo "PR21 live observability acceptance passed (sanitized output; no trace payload or credential emitted)"
+echo "Live observability acceptance passed (sanitized output; no trace payload or credential emitted)"

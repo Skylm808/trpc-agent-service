@@ -9,5 +9,5 @@ resources:
   - collector.yaml
 labels:
   - pairs:
-      app.kubernetes.io/part-of: trpc-agent-pr24-demo
+      app.kubernetes.io/part-of: trpc-agent-kubernetes-demo
     includeSelectors: false

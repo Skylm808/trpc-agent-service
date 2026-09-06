@@ -17,7 +17,7 @@ flowchart TB
     subgraph IM["1. 外部入口"]
         direction LR
         WC[企业微信]
-        FS[飞书（PR10 交付）]
+        FS[飞书]
         HC[HTTP / OpenClaw Client]
     end
 
@@ -278,7 +278,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 
 ## 8. 部署方案
 
-最小可运行环境使用根目录的 Docker Compose：默认保留一个 Gateway/Worker 合并进程；PR20 `multinode` profile 提供一个 Gateway、两个 Worker、共享 PostgreSQL/Redis 和一次性 migration。两个角色均无本地会话状态，不依赖 sticky session。模型、IM 和数据库密钥从外部环境或挂载的 secret 文件读取。启动与验证命令见 [PostgreSQL + Redis 部署](deployment.md)。
+最小可运行环境使用根目录的 Docker Compose：默认保留一个 Gateway/Worker 合并进程；`multinode` profile 提供一个 Gateway、两个 Worker、共享 PostgreSQL/Redis 和一次性 migration。两个角色均无本地会话状态，不依赖 sticky session。模型、IM 和数据库密钥从外部环境或挂载的 secret 文件读取。启动与验证命令见 [PostgreSQL + Redis 部署](deployment.md)。
 
 生产可用 `--role gateway` 和 `--role worker` 拆分入口与 Runner：Gateway 只写 Redis Stream，不构造 Runtime 或启动消费者；Worker 不监听业务 HTTP 端口，负责消费、Inbox recovery、Runner、Outbox 和当前后台维护任务。Kubernetes 基线为两个角色提供独立 Deployment、PDB 和 HPA。`--role all` 只用于 Compose 兼容和小规模环境。Outbox 与 maintenance 独立角色、自定义队列指标 HPA 仍待后续增量。PostgreSQL、Redis、对象存储和向量库使用托管或高可用集群。Pod 不挂载会话本地盘，也不依赖 sticky session。配置发布先进入少量租户，指标越过阈值即停止灰度并发布回滚版本。数据库迁移由独立 Job 串行执行，不能放在每个应用 Pod 启动流程中并发运行。
 
@@ -294,7 +294,7 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 
 当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、租户 Runner 动态并发配额、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复双向迁移 Worker、外部 Memory、外置 Audit/WORM、治理审计与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换、Gateway/Worker 角色拆分、生产 MCP Registry、HTTPS JSON 业务工具，以及企业微信和飞书两个 Channel Adapter/Sender。复杂格式文档解析、投递异常 Web 运维页、Delivery/maintenance 独立角色和队列自定义指标 HPA 属于后续增强，不是本次基础验收的必要项。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
 
-## 10. 预期效果与时间规划
+## 10. 验收目标与当前状态
 
 目标是让 Gateway/Worker 无状态扩容，IM 重投不重复执行，旧 Worker 不能覆盖新状态。配置、数据、工具和密钥按租户隔离；`trace_id` 串起回调、模型、Tool、存储与回复，并支持租户成本统计。
 
@@ -309,25 +309,4 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 可观测性 | 执行一次含 Tool 的完整消息 | callback、Runner、Tool、存储和投递共享同一 trace |
 | 可部署性 | Compose 启动后执行 HTTP smoke、迁移回放和测试 | PostgreSQL/Redis 链路可运行，migration 可重复执行 |
 
-以 8 月 27 日方案提交为 T0，后续排期按可独立验收的增量推进：
-
-| 阶段 | 时间 | 交付内容 | 状态 |
-| --- | --- | --- | --- |
-| T0：方案与最小生产链路 | 2026 年 8 月 27 日 | 本文、两张图、数据模型、幂等/迁移策略、风险清单、Compose、PostgreSQL/Redis、真实模型 Provider | 已完成 |
-| T1：企业微信真实联调 | T0 后 1–2 个工作日 | 测试企业、HTTPS 回调、IP 白名单、真实收发、失败回放 | 已完成并跑通真实链路 |
-| T2a：飞书通道（PR10） | 已完成 | 飞书 Adapter/Sender、事件验签解密、身份映射、动态配置接入 | 自动化测试与人工真实 E2E 均已通过 |
-| T2b：跨节点实时调度（PR11） | 已完成 | Redis Streams、共享 command/event bus、跨节点 cancel/status、预算/审批和节点心跳 | 已完成并通过 PostgreSQL/Redis 双节点集成测试 |
-| T2c：存储路由与迁移（PR12） | 已完成 | 多 PostgreSQL 域路由、双写、checkpoint backfill、校验和安全 cutover | 已完成并通过 PostgreSQL 集成测试 |
-| T3a：治理与观测（PR14） | 已完成 | OTLP/Collector、Prometheus/Grafana、审计保留 | 已完成 |
-| T3b：生产部署与验收（PR15） | 已完成 | Kubernetes 分离 Gateway/Worker manifest、readiness、容量工具、故障演练和验收门禁 | 基线 manifest 与离线校验已完成 |
-| T3c：MCP 与业务工具（PR16） | 已完成 | 租户 MCP Registry、SecretRef、固定 HTTPS JSON 工具、发布预检和 Bundle 生命周期 | 已完成并通过真实 Streamable HTTP MCP 协议测试 |
-| T3d：消息恢复控制面（PR17） | 已完成 | 租户级 DLQ 查询/重放、uncertain 人工裁决、状态 CAS 与审计 | 已完成并通过 PostgreSQL 并发集成测试 |
-| T3e：租户并发配额（PR18） | 已完成 | Redis 跨节点 Runner semaphore、动态配置、续租与崩溃恢复 | 已完成并通过真实 Redis 双节点测试 |
-| T4a：Gateway/Worker 角色拆分（PR19） | 已完成 | producer-only Gateway、consumer-only Worker、独立 Deployment/PDB/HPA | Outbox/maintenance 暂随 Worker |
-| T4b：双 IM 多节点验收（PR20） | 已完成 | Compose Gateway + 双 Worker、故障接管、fencing、持久性与双 IM 隔离 | 自动化与可复现 Compose 验收已通过 |
-| T4c：持久化 Trace 与生产告警（PR21） | 已完成 | Tempo、Grafana Trace 数据源、跨 Outbox trace、错误率/DLQ/积压/Worker/数据库告警 | 自动化与可复现 Compose 验收已通过 |
-| T4d：IM 媒体与卡片（PR22） | 已完成 | 双 IM 受控媒体、文档/多模态、飞书卡片、Outbox 限流重试和 DLQ | 自动化安全与协议回归已通过 |
-| T4e：Storage 迁移补全（PR23） | 已完成 | Knowledge/Artifact 双向迁移、checksum/checkpoint/cutover、外部 Memory 与 WORM | 自动化与 PostgreSQL 集成验收已通过 |
-| T4f：Kubernetes 生产 Demo（PR24） | 已完成 | kind 多副本、容量冒烟、依赖故障、PDB/HPA、滚动升级、回滚和 PVC 保留 | 可复现真实集群验收已通过 |
-
-时间从依赖就绪后计算，不含企业微信权限、公网域名、TLS 证书或平台审核等待。
+当前代码已覆盖表中全部基础验收目标。企业微信与飞书的真实平台 E2E 已人工通过；多租户、跨节点、迁移、治理和可观测性由自动化及 Compose 验收覆盖；Kubernetes 提供专用 kind 集群的最小闭环。生产部署仍需按实际流量完成容量标定、托管依赖高可用配置、告警通知渠道和外部密钥系统接入。

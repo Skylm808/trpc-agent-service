@@ -133,7 +133,7 @@ services:
       retries: 20
     restart: unless-stopped
 
-  # PR20 acceptance topology. It is opt-in so the legacy `service` all-mode
+  # Multi-node acceptance topology. It is opt-in so the legacy `service` all-mode
   # remains unchanged. All three processes share the same PostgreSQL/Redis
   # services and named volumes; no host affinity or sticky session is used.
   gateway:
