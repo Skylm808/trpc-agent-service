@@ -61,6 +61,10 @@ rollback, config persistence and PVC retention. It scales only explicitly named 
 never deletes the namespace, StatefulSet, PVC, volume, or database. Credentials are generated into a
 mode-0600 temporary file and stored only as a Kubernetes Secret; the report contains summaries only.
 
+On its dedicated kind context the script installs the pinned Metrics Server v0.8.0 demo manifest and
+requires both HPAs to reach `ScalingActive=True`; the kind-only kubelet TLS exception is never applied
+to a confirmed non-kind context. A non-kind cluster must already provide its managed resource metrics API.
+
 To validate manifests and the no-inline-Secret boundary without a cluster:
 
 ```bash

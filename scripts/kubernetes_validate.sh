@@ -15,10 +15,11 @@ kubectl kustomize "$repo_root/deploy/kubernetes/migration" >"$render_dir/migrati
 kubectl kustomize "$repo_root/deploy/kubernetes/demo/infra" >"$render_dir/demo-infra.yaml"
 kubectl kustomize "$repo_root/deploy/kubernetes/demo/app" >"$render_dir/demo-app.yaml"
 kubectl kustomize "$repo_root/deploy/kubernetes/demo/migration" >"$render_dir/demo-migration.yaml"
+cp "$repo_root/deploy/kubernetes/demo/metrics-server.yaml" "$render_dir/demo-metrics-server.yaml"
 
 require_text() {
   local pattern="$1" file="$2"
-  grep -Eq "$pattern" "$file" || {
+  grep -Eq -- "$pattern" "$file" || {
     echo "missing required manifest pattern: $pattern" >&2
     exit 1
   }
@@ -71,6 +72,8 @@ require_text 'name: demo-otel-collector' "$render_dir/demo-infra.yaml"
 require_text 'trpc-agent-service:pr24-demo' "$render_dir/demo-app.yaml"
 require_text 'GATEWAY_TOKEN' "$render_dir/demo-app.yaml"
 require_text '^kind: Job$' "$render_dir/demo-migration.yaml"
+require_text 'registry.k8s.io/metrics-server/metrics-server:v0.8.0' "$render_dir/demo-metrics-server.yaml"
+require_text '--kubelet-insecure-tls' "$render_dir/demo-metrics-server.yaml"
 if grep -Eq '^kind: Job$' "$render_dir/base.yaml"; then
   echo "migration Job must remain separate from the service rollout" >&2
   exit 1

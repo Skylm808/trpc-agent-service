@@ -47,6 +47,7 @@ grep -q 'kind: StatefulSet' "$work_dir/infra.yaml"
 grep -q 'kind: HorizontalPodAutoscaler' "$work_dir/app.yaml"
 grep -q 'kind: PodDisruptionBudget' "$work_dir/app.yaml"
 grep -q 'newTag: pr24-demo' "$repo_root/deploy/kubernetes/demo/app/kustomization.yaml"
+grep -q 'registry.k8s.io/metrics-server/metrics-server:v0.8.0' "$repo_root/deploy/kubernetes/demo/metrics-server.yaml"
 echo "PASS PR24 demo manifests and secret boundary"
 if [[ "$mode" == "--validate" ]]; then
   exit 0
@@ -63,6 +64,9 @@ if [[ "$context" != "$expected_context" && "${TRPC_AGENT_K8S_CONFIRM_CONTEXT:-}"
   echo "refusing context $context; use dedicated $expected_context or set TRPC_AGENT_K8S_CONFIRM_CONTEXT to the exact current context" >&2
   exit 1
 fi
+if [[ "$context" == kind-* ]]; then
+  command -v kind >/dev/null 2>&1 || { echo "kind is required for a kind context" >&2; exit 1; }
+fi
 
 image="trpc-agent-service:pr24-demo"
 if [[ "${TRPC_AGENT_K8S_SKIP_BUILD:-0}" != "1" ]]; then
@@ -70,6 +74,10 @@ if [[ "${TRPC_AGENT_K8S_SKIP_BUILD:-0}" != "1" ]]; then
   if [[ "$context" == kind-* ]]; then
     kind load docker-image --name "${context#kind-}" "$image" >/dev/null
   fi
+fi
+if [[ "$context" == "$expected_context" ]]; then
+  kubectl apply -f "$repo_root/deploy/kubernetes/demo/metrics-server.yaml" >/dev/null
+  kubectl -n kube-system rollout status deployment/metrics-server --timeout=5m >/dev/null
 fi
 
 kubectl apply -f "$repo_root/deploy/kubernetes/demo/infra/namespace.yaml" >/dev/null
@@ -106,6 +114,16 @@ kubectl apply -k "$repo_root/deploy/kubernetes/demo/app" >/dev/null
 kubectl -n "$namespace" rollout status deployment/trpc-agent-gateway --timeout=5m >/dev/null
 kubectl -n "$namespace" rollout status deployment/trpc-agent-worker --timeout=5m >/dev/null
 
+metrics_api_ready=false
+for _ in $(seq 1 30); do
+  if kubectl get --raw /apis/metrics.k8s.io/v1beta1/nodes >/dev/null 2>&1; then
+    metrics_api_ready=true
+    break
+  fi
+  sleep 2
+done
+[[ "$metrics_api_ready" == true ]] || { echo "resource metrics API is unavailable" >&2; exit 1; }
+
 ready_count() {
   kubectl -n "$namespace" get pods -l "app.kubernetes.io/name=trpc-agent-service,app.kubernetes.io/component=$1" -o json | jq '[.items[] | select(.status.phase=="Running") | select(any(.status.containerStatuses[]?; .ready==true))] | length'
 }
@@ -116,7 +134,17 @@ kubectl -n "$namespace" get pdb -o json | jq -e \
   '[.items[] | select(.status.currentHealthy >= 3 and .status.desiredHealthy == 2 and .status.disruptionsAllowed >= 1)] | length == 2' >/dev/null
 kubectl -n "$namespace" get hpa -o json | jq -e \
   '[.items[] | {min:.spec.minReplicas,max:.spec.maxReplicas,target:.spec.scaleTargetRef.name}] | length == 2 and all(.[]; .min == 3 and .max >= 20 and (.target == "trpc-agent-gateway" or .target == "trpc-agent-worker"))' >/dev/null
-echo "PASS Gateway/Worker replicas, PDB and HPA"
+hpa_active=false
+for _ in $(seq 1 30); do
+  if kubectl -n "$namespace" get hpa -o json | jq -e \
+    '[.items[] | select(any(.status.conditions[]?; .type == "ScalingActive" and .status == "True"))] | length == 2' >/dev/null; then
+    hpa_active=true
+    break
+  fi
+  sleep 2
+done
+[[ "$hpa_active" == true ]] || { echo "HPA did not become ScalingActive" >&2; exit 1; }
+echo "PASS Gateway/Worker replicas, PDB and active HPA metrics"
 
 start_port_forward() {
   if [[ -n "$port_forward_pid" ]]; then
@@ -265,8 +293,8 @@ cat >"$report_path" <<REPORT
 - 单 Pod 恢复：通过
 - PostgreSQL/Redis 故障与 readiness 恢复：通过
 - Model 请求重试/Collector 故障恢复：通过
-- Sender retry/DLQ 回归：通过
-- PDB live status、HPA contract/admission、滚动升级与 rollback：通过
+- Sender 受控故障（retry/permanent/DLQ/uncertain）回归：通过
+- PDB live status、HPA resource metrics/ScalingActive、滚动升级与 rollback：通过
 - PostgreSQL 重启后配置版本：${config_before} → ${config_after}
 - PVC：${pvc_count} 个，验收脚本未删除 namespace、PVC 或数据卷
 
