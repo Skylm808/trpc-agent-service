@@ -149,6 +149,16 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 			want: "duplicate binding_id",
 		},
 		{
+			name: "duplicate allowed user",
+			yaml: strings.Replace(validYAML, "provider_account_id: bot-a", "provider_account_id: bot-a\n            allowed_users: [alice, alice]", 1),
+			want: "allowed_users contains duplicate",
+		},
+		{
+			name: "untrimmed allowed chat",
+			yaml: strings.Replace(validYAML, "provider_account_id: bot-a", "provider_account_id: bot-a\n            allowed_chats: [' room-a']", 1),
+			want: "allowed_chats entries must be non-empty and trimmed",
+		},
+		{
 			name: "invalid backend",
 			yaml: strings.Replace(validYAML, "type: inmemory\n            namespace", "type: invalid\n            namespace", 1),
 			want: "storage.session.type",

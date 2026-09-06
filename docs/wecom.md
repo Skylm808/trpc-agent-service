@@ -71,10 +71,16 @@ trace 或错误信息。开发组合器支持 `env` 和挂载的 `file` SecretRe
   `session_id = dm/{binding_id}/{FromUserName}`；
 - 带 `ChatId` / `RoomId` 的群聊：
   `session_id = group/{binding_id}/{chat_id}`；
+- binding 可配置 `allowed_users` 和 `allowed_chats`。ACL 使用验签解密后的
+  `FromUserName` 与 `ChatId`/`RoomId`，在 Worker 创建 Runner 前判断；名单为空保持兼容，
+  仅配置群白名单时直聊默认拒绝；
 - `tenant_id`、`app_id`、`binding_id` 和固定 `config_version` 来自服务端绑定，不能由
   XML 消息正文覆盖；
 - Outbox 同时保存 canonical user/session 和外部 user/chat ID，Sender 不需要反向猜测
   canonical ID。
+
+权限拒绝只返回受控分类，不回显外部用户 ID、群 ID 或名单内容；同名 ID 在不同租户使用各自
+配置版本独立判断。
 
 ## 消息与失败语义
 

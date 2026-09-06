@@ -225,7 +225,7 @@ PostgreSQL Memory 提交后对其他 Worker 可见；外部 Memory 和向量索�
 
 平台使用按数据域拆分的 Adapter，不设计一个包办所有后端的通用 KV 接口。Session 需要顺序和事务，Knowledge 需要向量召回，Artifact 需要大对象读写；强行统一会丢失各后端真正需要的语义。
 
-PR12 已实现 `storage.Router` 的 PostgreSQL 路由。PR13 把 Artifact 扩展到 S3-compatible，并把 Knowledge 接到 PGVector/Qdrant 与 OpenAI-compatible Embedding。Runtime Bundle 按 `(tenant_id, app_id, config_version)` 固定连接和工具；每个 Knowledge index 具有独立物理 namespace，并在 metadata filter 再次强制 tenant/App scope。Audit 外置实现仍属于后续治理工作。
+`storage.Router` 已实现 PostgreSQL 路由，Artifact 支持 S3-compatible，Knowledge 支持 PGVector/Qdrant 与 OpenAI-compatible Embedding，Memory 支持 PostgreSQL 或外部 HTTPS 服务。Runtime Bundle 按 `(tenant_id, app_id, config_version)` 固定连接和工具；每个 Knowledge index 具有独立物理 namespace，并在 metadata filter 再次强制 tenant/App scope。Audit 以 PostgreSQL 为在线事实源，并可同步归档到外置 HTTPS WORM。
 
 目标接口如下，业务代码不应直接依赖 PostgreSQL、Redis 或某个向量库 SDK：
 

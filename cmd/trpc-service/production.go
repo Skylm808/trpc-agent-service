@@ -382,6 +382,13 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 		_ = nodes.Close(context.Background())
 		return nil, err
 	}
+	storageRouter.SetOperationObserver(func(ctx context.Context, observation storage.OperationObservation) {
+		telemetry.StorageOperation(ctx, servicemetrics.StorageLabels{
+			TenantID: observation.TenantID, AppID: observation.AppID,
+			Domain: observation.Domain, Backend: observation.Backend,
+			Operation: observation.Operation, Status: observation.Status,
+		}, observation.Duration)
+	})
 	var outboxWorker *delivery.Worker
 	var migrationWorker *storagemigration.Worker
 	if role != roleGateway {

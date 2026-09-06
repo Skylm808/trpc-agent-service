@@ -172,7 +172,33 @@ type ChannelBinding struct {
 	Secret            SecretRef   `json:"secret,omitempty" yaml:"secret,omitempty"`
 	EncryptionKey     SecretRef   `json:"encryption_key,omitempty" yaml:"encryption_key,omitempty"`
 	ReplyFormat       string      `json:"reply_format,omitempty" yaml:"reply_format,omitempty"`
+	AllowedUsers      []string    `json:"allowed_users,omitempty" yaml:"allowed_users,omitempty"`
+	AllowedChats      []string    `json:"allowed_chats,omitempty" yaml:"allowed_chats,omitempty"`
 	Enabled           bool        `json:"enabled" yaml:"enabled"`
+}
+
+// AllowsIdentity applies the binding-local IM access list to provider-owned
+// user and conversation identifiers. Empty lists preserve existing bindings.
+// A chat-only policy intentionally denies direct messages.
+func (binding ChannelBinding) AllowsIdentity(externalUserID, conversationID string) bool {
+	hasUsers, hasChats := len(binding.AllowedUsers) > 0, len(binding.AllowedChats) > 0
+	if !hasUsers && !hasChats {
+		return true
+	}
+	userAllowed := !hasUsers || containsString(binding.AllowedUsers, externalUserID)
+	if conversationID == "" {
+		return hasUsers && userAllowed
+	}
+	return userAllowed && (!hasChats || containsString(binding.AllowedChats, conversationID))
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // BackendType identifies a storage implementation.
@@ -250,7 +276,12 @@ func (value AgentApp) Clone() AgentApp {
 		cloned.MCPServers[i].AllowedTools = append([]string(nil), value.MCPServers[i].AllowedTools...)
 	}
 	cloned.BusinessTools = append([]HTTPBusinessTool(nil), value.BusinessTools...)
-	cloned.Channels = append([]ChannelBinding(nil), value.Channels...)
+	cloned.Channels = make([]ChannelBinding, len(value.Channels))
+	for i := range value.Channels {
+		cloned.Channels[i] = value.Channels[i]
+		cloned.Channels[i].AllowedUsers = append([]string(nil), value.Channels[i].AllowedUsers...)
+		cloned.Channels[i].AllowedChats = append([]string(nil), value.Channels[i].AllowedChats...)
+	}
 	cloned.Storage = value.Storage.Clone()
 	return cloned
 }

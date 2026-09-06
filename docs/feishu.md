@@ -87,7 +87,13 @@ channels:
   相同外部 ID 永不冲突；
 - 单聊（`chat_type=p2p`）：`session_id = dm/{binding_id}/{open_id}`；
 - 群聊（`chat_type=group`）：`session_id = group/{binding_id}/{chat_id}`，与发送者无关；
+- binding 可配置 `allowed_users` 和 `allowed_chats`，分别匹配验签后的 `open_id` 与群聊
+  `chat_id`。Worker 使用消息固定的配置版本在 Runner 前 fail closed；仅配置群白名单时
+  直聊默认拒绝；
 - 回复时群聊使用入口钉住的 `chat_id`，单聊使用 `open_id`。
+
+权限拒绝不暴露外部 ID 或名单内容；两个租户即使使用相同用户或群 ID，也会按各自不可变配置
+版本独立判断。
 
 ## 消息与失败语义
 

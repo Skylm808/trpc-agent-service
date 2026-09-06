@@ -20,6 +20,8 @@ var (
 
 type Request struct {
 	TenantID, AppID, UserID, RequestID   string
+	ExternalUserID, ConversationID       string
+	AllowedUsers, AllowedChats           []string
 	Policy                               tenant.ToolPolicy
 	EstimatedTokens, EstimatedCostMicros int64
 }
@@ -38,6 +40,10 @@ type AuthenticatedIdentityAuthorizer struct{}
 
 func (AuthenticatedIdentityAuthorizer) Authorize(_ context.Context, request Request) error {
 	if request.TenantID == "" || request.AppID == "" || request.UserID == "" {
+		return ErrIdentityDenied
+	}
+	binding := tenant.ChannelBinding{AllowedUsers: request.AllowedUsers, AllowedChats: request.AllowedChats}
+	if !binding.AllowsIdentity(request.ExternalUserID, request.ConversationID) {
 		return ErrIdentityDenied
 	}
 	return nil
@@ -75,6 +81,12 @@ type ContextRequest struct {
 }
 
 func WithRequest(ctx context.Context, engine *Engine, request Request) context.Context {
+	// Provider identifiers and the full ACL are needed only for the pre-run
+	// identity decision. Do not expose them to tool wrappers through context.
+	request.ExternalUserID = ""
+	request.ConversationID = ""
+	request.AllowedUsers = nil
+	request.AllowedChats = nil
 	return context.WithValue(ctx, requestContextKey{}, ContextRequest{Engine: engine, Request: request})
 }
 func FromContext(ctx context.Context) (ContextRequest, bool) {

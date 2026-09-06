@@ -40,7 +40,7 @@ func RegisterSQLObserver(db *sql.DB) (*SQLObserver, error) {
 	if err != nil {
 		return nil, err
 	}
-	storageMS, err := meter.Float64ObservableGauge("agent.storage.operation.duration", metric.WithUnit("ms"))
+	storageMS, err := meter.Float64ObservableGauge("agent.storage.healthcheck.duration", metric.WithUnit("ms"))
 	if err != nil {
 		return nil, err
 	}

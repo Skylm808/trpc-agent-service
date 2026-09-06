@@ -22,6 +22,21 @@ func (labels Labels) attributes() []attribute.KeyValue {
 	return []attribute.KeyValue{attribute.String("tenant.id", labels.TenantID), attribute.String("app.id", labels.AppID), attribute.String("channel", labels.Channel), attribute.String("operation", labels.Operation), attribute.String("status", labels.Status)}
 }
 
+// StorageLabels is deliberately limited to server-owned, bounded dimensions.
+// User, session, message, endpoint, and credential values are never accepted.
+type StorageLabels struct{ TenantID, AppID, Domain, Backend, Operation, Status string }
+
+func (labels StorageLabels) attributes() []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("tenant.id", labels.TenantID),
+		attribute.String("app.id", labels.AppID),
+		attribute.String("domain", labels.Domain),
+		attribute.String("backend", labels.Backend),
+		attribute.String("operation", labels.Operation),
+		attribute.String("status", labels.Status),
+	}
+}
+
 type SpanFields struct{ TenantID, AppID, Channel, RequestID, TraceID string }
 
 type telemetryContextKey struct{}
@@ -60,6 +75,8 @@ type Telemetry struct {
 	cost       metric.Int64Counter
 	delivery   metric.Int64Counter
 	backlog    metric.Int64Histogram
+	storage    metric.Float64Histogram
+	storageErr metric.Int64Counter
 }
 
 func New(name string) (*Telemetry, error) {
@@ -95,11 +112,32 @@ func New(name string) (*Telemetry, error) {
 	if err != nil {
 		return nil, err
 	}
+	storage, err := meter.Float64Histogram("agent.storage.operation.duration", metric.WithUnit("ms"))
+	if err != nil {
+		return nil, err
+	}
+	storageErr, err := meter.Int64Counter("agent.storage.operation.errors")
+	if err != nil {
+		return nil, err
+	}
 	// Only W3C trace context crosses durable queue boundaries. Baggage is
 	// intentionally excluded because callers control it and it may contain
 	// credentials or message content that must never reach a trace backend.
 	propagator := propagation.TraceContext{}
-	return &Telemetry{tracer: otel.Tracer(name), propagator: propagator, requests: requests, duration: duration, firstToken: firstToken, tokens: tokens, cost: cost, delivery: delivery, backlog: backlog}, nil
+	return &Telemetry{tracer: otel.Tracer(name), propagator: propagator, requests: requests, duration: duration, firstToken: firstToken, tokens: tokens, cost: cost, delivery: delivery, backlog: backlog, storage: storage, storageErr: storageErr}, nil
+}
+
+// StorageOperation records a real Session or Memory adapter call. The caller
+// supplies only a success/failure classification, never an error string.
+func (telemetry *Telemetry) StorageOperation(ctx context.Context, labels StorageLabels, duration time.Duration) {
+	if telemetry == nil {
+		return
+	}
+	options := metric.WithAttributes(labels.attributes()...)
+	telemetry.storage.Record(ctx, float64(duration.Microseconds())/1000, options)
+	if labels.Status == "failed" {
+		telemetry.storageErr.Add(ctx, 1, options)
+	}
 }
 
 // ModelFirstToken records time to the first model event. The label set is the

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -308,6 +309,44 @@ func TestLaterSessionTurnDoesNotBuildOrCallRunner(t *testing.T) {
 	}
 	if builds.Load() != 0 {
 		t.Fatalf("out-of-order request built Runner bundle %d times", builds.Load())
+	}
+}
+
+func TestDeniedIMIdentityNeverBuildsOrCallsRunner(t *testing.T) {
+	file := testConfig(t)
+	file.Tenants[0].Apps[0].Channels[0].AllowedUsers = []string{"alice"}
+	inbox := idempotency.NewMemoryStore()
+	writes := sessioncoord.NewMemoryWriteStore()
+	coordinator, _ := sessioncoord.NewCoordinator(writes)
+	message := gateway.InboundMessage{
+		TenantID: "tenant-a", AppID: "assistant", BindingID: "binding-a",
+		ExternalMessageID: "denied-message", ExternalUserID: "mallory",
+		UserID: "http/binding-a/mallory", SessionID: "dm/binding-a/mallory",
+		Text: "must not reach runner", ConfigVersion: 1, ReceivedAt: time.Now(),
+	}
+	claim, won, err := inbox.Claim(context.Background(), message, "gateway", time.Minute)
+	if err != nil || !won {
+		t.Fatalf("claim=%+v won=%v err=%v", claim, won, err)
+	}
+	var builds atomic.Int32
+	factory := worker.TestRuntimeFactory(writes)
+	manager, _ := serviceruntime.NewManager(func(snapshot config.RuntimeSnapshot) (serviceruntime.Runtime, error) {
+		builds.Add(1)
+		return factory(snapshot)
+	})
+	defer manager.Close(context.Background())
+	telemetry, _ := servicemetrics.New("identity-denial-test")
+	processor := &worker.Processor{
+		WorkerID: "worker-a", Inbox: inbox, Coordinator: coordinator, Writes: writes,
+		Runtimes: manager, Snapshots: gateway.FileSnapshotResolver{File: file},
+		Policy: &policy.Engine{Identity: policy.AuthenticatedIdentityAuthorizer{}},
+		Audit:  audit.NewMemoryStore(servicelog.NewRedactor(nil, nil)), Telemetry: telemetry,
+	}
+	if err := processor.Process(context.Background(), claim.RunRequest()); !errors.Is(err, policy.ErrIdentityDenied) {
+		t.Fatalf("Process() error=%v", err)
+	}
+	if builds.Load() != 0 {
+		t.Fatalf("denied identity built Runner bundle %d times", builds.Load())
 	}
 }
 

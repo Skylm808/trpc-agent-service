@@ -1,7 +1,7 @@
 # 租户治理、审计与可观测性
 
 运行时固定执行以下链路：binding 凭证认证、租户路由、canonical identity、Inbox
-幂等 claim、身份/预算校验、工具可见性、工具执行与审批、输出脱敏、租户审计。
+幂等 claim、binding 级用户/群聊 ACL、身份/预算校验、工具可见性、工具执行与审批、输出脱敏、租户审计。
 `Processor.Policy` 是必需依赖；缺失时请求 fail closed。工具同时受 tRPC-Agent-Go 的
 `WithToolFilter`、`WithToolExecutionFilter`、`WithToolPermissionPolicy` 和最终
 `Guarded.Call` 保护，直接调用不能绕开 tenant/request scope。
@@ -33,18 +33,23 @@ tenant、app、channel、operation、status；request/user/session/message ID �
 trace/audit。SDK 经 OTLP/gRPC 输出到 Collector，Collector 再向 Prometheus 暴露指标；默认与 tenant redactor 会处理日志、SSE error、Inbox last_error、回复和
 审计 details，tRPC-Agent-Go 的上下文 logger 也在 Bundle 构建时安装脱敏包装。
 
+`allowed_users` 和 `allowed_chats` 使用经过验签后得到的平台稳定 ID，并随不可变配置版本进入
+Worker。两个列表都为空时兼容现有绑定并允许全部；`allowed_users` 限制单聊和群聊发送者，
+`allowed_chats` 限制群聊。仅设置 chat 白名单时直聊默认拒绝。拒绝在 Runtime Bundle/Runner
+创建前完成，Inbox 标记为 `rejected`，审计只保存脱敏身份和 `decision=deny`，错误不回显名单或
+外部用户 ID。相同用户或群 ID 在不同租户独立判断，不能复用另一租户的 ACL。
+
 ## 监控指标
 
 | 指标 | 建议维度 | 用途 |
 | --- | --- | --- |
-| `agent_requests_total`, `agent_errors_total` | tenant, app, channel, status | 请求量、租户错误率和灰度判断 |
-| `model_first_token_seconds`, `model_duration_seconds` | tenant, app, provider, model, status | 模型首包与完整调用耗时 |
-| `tool_duration_seconds`, `tool_calls_total` | tenant, app, tool, decision, status | Tool 性能、拒绝和审批比例 |
-| `im_callback_seconds`, `im_delivery_total` | tenant, channel, binding, status | 回调耗时、投递成功率和平台限流 |
-| `model_tokens_total`, `tenant_cost_micros_total` | tenant, app, provider, model | token 消耗、预算和租户成本 |
-| `storage_operation_seconds` | tenant, domain, backend, operation, status | Session/Memory/Storage 后端延迟 |
-| `inbox_backlog`, `outbox_backlog`, `dlq_total` | tenant, channel, status | 排队、投递和故障恢复状态 |
-| `stale_fence_rejections_total` | tenant, app | 检测 lease 转移和旧 Worker 写入 |
+| `agent.requests`, `agent.operation.duration` | tenant, app, channel, operation, status | 请求量、错误率和模型/Tool/治理操作耗时 |
+| `agent.model.first_token.duration` | tenant, app, channel, operation, status | 模型首事件耗时 |
+| `agent.im.delivery` | tenant, app, channel, status | IM 投递成功率和平台限流结果 |
+| `agent.tokens`, `agent.cost` | tenant, app, operation, status | token 消耗、预算和租户成本 |
+| `agent.storage.operation.duration`, `agent.storage.operation.errors` | tenant, app, domain, backend, operation, status | 真实 Session/Memory Adapter 调用延迟和错误率 |
+| `agent.queue.depth`, `agent.outbox.backlog` | tenant, queue, status | Inbox/Outbox/DLQ 排队与故障恢复状态 |
+| `agent.worker.live`, `agent.storage.health`, `agent.storage.healthcheck.duration` | domain, backend, operation, status | Worker 存活与平台 PostgreSQL 健康检查 |
 
 `binding_id` 只有在绑定数量受控时才能作为 metrics 标签，否则只进入 trace。延迟指标使用 histogram，并按部署基线设置 p95/p99 告警；错误率、队列等待和成本同时按租户及全局聚合。
 

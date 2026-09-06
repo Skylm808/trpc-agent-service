@@ -170,6 +170,22 @@ curl -H 'Authorization: Bearer local-secret' \
 验收报告分别作为多节点和 Kubernetes 证据。生产环境仍需按自身容量、SLA 和云资源规格重新
 执行门禁，仓库不会保存真实凭据、用户消息正文或生产数据快照。
 
+| 验收要求 | 实现与证据 | 状态 |
+| --- | --- | --- |
+| 多租户与无状态多节点 | Gateway/Worker 分离、共享 PostgreSQL/Redis、tenant 复合键、lease/fencing；`scripts/pr20_multinode_acceptance.sh` | 已通过 |
+| 数据同步与多后端 | Session/Memory Adapter、PG/S3/PGVector/Qdrant/外部服务路由、双写/checkpoint/cutover；Storage 集成测试 | 已通过 |
+| 两种 IM | 企业微信与飞书 Adapter/Sender、验签、幂等、身份/会话映射、binding 用户/群聊 ACL；协议测试与人工真实 E2E | 已通过 |
+| 治理、安全与审计 | Tool Filter/Permission、预算、审批、输出脱敏、SecretRef、PostgreSQL + 外置 WORM 审计；policy/audit 测试 | 已通过 |
+| Trace、Metric 与告警 | Callback 至 Outbox trace、真实 Session/Memory 调用指标、Tempo/Grafana/Prometheus；`scripts/pr21_observability_acceptance.sh` | 已通过 |
+| 故障恢复与部署 | Inbox/Outbox 恢复、DLQ、配置回滚、Compose 多节点、kind 多副本/PDB/HPA/回滚；PR20/PR24 报告模板 | 已通过 |
+
+生产运行时实际支持：Session/Summary 使用 PostgreSQL，Memory 使用 PostgreSQL 或外部 Memory
+Service，Artifact 使用 PostgreSQL 或 S3-compatible，Knowledge 使用 PGVector 或 Qdrant，Audit
+在线库使用 PostgreSQL 并可同步到外置 WORM。Redis 只负责 Streams、lease、fencing、跨节点限流
+和短期协调，不是 Session/Event 的事实存储。Vault/KMS 原生解析、复杂 PDF/Office/OCR、复杂
+卡片回调和托管数据库高可用属于部署增强，不是本仓库最小验收的一部分；当前 SecretRef 运行时
+解析支持环境变量与挂载文件。
+
 ## Admin API
 
 生产 Admin API 与 Gateway 共用同一 HTTP 端口，由 `TRPC_AGENT_ADMIN_TOKENS`

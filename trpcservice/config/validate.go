@@ -448,6 +448,12 @@ func validateChannel(path string, binding tenant.ChannelBinding) error {
 	if binding.ReplyFormat == "card" && binding.Type != tenant.ChannelTypeFeishu {
 		return fmt.Errorf("config: %s.reply_format card is only supported by Feishu", path)
 	}
+	if _, err := uniqueStrings(path+".allowed_users", binding.AllowedUsers); err != nil {
+		return err
+	}
+	if _, err := uniqueStrings(path+".allowed_chats", binding.AllowedChats); err != nil {
+		return err
+	}
 	switch binding.Type {
 	case tenant.ChannelTypeHTTP:
 		if err := validateSecretRef(path+".token", binding.Token, false); err != nil {

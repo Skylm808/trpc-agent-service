@@ -19,6 +19,7 @@ import (
 	serviceruntime "github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/sessioncoord"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -275,7 +276,16 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	tenantRedactor = servicelog.NewRedactor(auditPolicy.RedactFields, nil)
 	redact = func(value string) string { return tenantRedactor.RedactString(processor.redact(value)) }
 	estimatedTokens := int64(len(request.Text)/4 + 1)
-	policyRequest := policy.Request{TenantID: request.TenantID, AppID: request.AppID, UserID: request.UserID, RequestID: request.InboxID, Policy: snapshot.App().Tools, EstimatedTokens: estimatedTokens, EstimatedCostMicros: processor.Policy.EstimateCost(estimatedTokens)}
+	binding, ok := channelBinding(snapshot, request.BindingID)
+	if !ok {
+		governanceDecision = "deny"
+		if rejectErr := processor.Inbox.Reject(context.Background(), claim); rejectErr != nil {
+			return errors.Join(policy.ErrIdentityDenied, rejectErr)
+		}
+		completed = true
+		return policy.ErrIdentityDenied
+	}
+	policyRequest := policy.Request{TenantID: request.TenantID, AppID: request.AppID, UserID: request.UserID, RequestID: request.InboxID, ExternalUserID: request.ExternalUserID, ConversationID: request.ConversationID, AllowedUsers: binding.AllowedUsers, AllowedChats: binding.AllowedChats, Policy: snapshot.App().Tools, EstimatedTokens: estimatedTokens, EstimatedCostMicros: processor.Policy.EstimateCost(estimatedTokens)}
 	controls, err := processor.Policy.Evaluate(ctx, policyRequest)
 	if err != nil {
 		if isGovernanceDenial(err) {
@@ -415,12 +425,19 @@ func isGovernanceDenial(err error) bool {
 }
 
 func replyFormat(snapshot config.RuntimeSnapshot, bindingID string) string {
-	for _, binding := range snapshot.App().Channels {
-		if binding.ID == bindingID {
-			return binding.ReplyFormat
-		}
+	if binding, ok := channelBinding(snapshot, bindingID); ok {
+		return binding.ReplyFormat
 	}
 	return ""
+}
+
+func channelBinding(snapshot config.RuntimeSnapshot, bindingID string) (tenant.ChannelBinding, bool) {
+	for _, binding := range snapshot.App().Channels {
+		if binding.ID == bindingID && binding.Enabled {
+			return binding, true
+		}
+	}
+	return tenant.ChannelBinding{}, false
 }
 
 // Cancel cancels an active Runner request. Queued cancellation belongs to the durable queue.

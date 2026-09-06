@@ -69,6 +69,10 @@ tenants:
             type: wecom
             provider_account_id: replace-with-wecom-corp-id
             provider_app_id: "1000002"
+            # 留空表示兼容现有绑定、允许全部；配置 allowed_chats 后直聊默认拒绝，
+            # 除非发送者同时出现在 allowed_users。
+            allowed_users: []
+            allowed_chats: []
             webhook_url: https://example.invalid/channels/wecom/demo-wecom
             token:
               provider: env
@@ -85,6 +89,8 @@ tenants:
           - binding_id: demo-feishu
             type: feishu
             provider_account_id: replace-with-feishu-app-id
+            allowed_users: []
+            allowed_chats: []
             token:
               provider: env
               key: FEISHU_VERIFICATION_TOKEN

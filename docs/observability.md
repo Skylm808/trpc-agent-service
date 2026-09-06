@@ -47,6 +47,7 @@ header 只能使用标准 OpenTelemetry Secret 环境变量或 Secret 挂载，�
 - 按租户的 Inbox、Outbox、DLQ 深度；
 - 活跃 Worker；
 - 平台 PostgreSQL 健康和 ping 延迟；
+- 实际 Session/Memory Adapter 每个操作的耗时和错误计数；
 - 审计保留任务成功/失败。
 
 Compose 已加载错误率、DLQ 非零、队列持续增长、无活跃 Worker 和 PostgreSQL 异常五类
@@ -65,5 +66,7 @@ canary 或 trace 原文。结果使用[脱敏报告模板](observability-accepta
 `retention_days <= 0` 不删除。删除条件始终包含 `tenant_id` 和截止时间，租户之间不会互相
 清理。
 
-当前审计表是在线 PostgreSQL 存储。WORM 对象归档、法律保全和外置 SIEM 属于后续能力，
-不能把 Prometheus 或 Collector debug exporter 当作审计归档。
+当前审计表以 PostgreSQL 为在线事实存储；租户可以把 Audit `migration_target` 配置成受认证的
+外部 HTTPS WORM 端点，同步归档脱敏 envelope。归档失败进入低基数错误指标且不会把 endpoint、
+凭据或正文写入日志。法律保全流程和特定 SIEM 产品连接器仍由部署方补充，不能把 Prometheus
+或 Collector debug exporter 当作审计归档。

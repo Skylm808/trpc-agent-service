@@ -51,6 +51,18 @@ type Router struct {
 	mu            sync.Mutex
 	targets       map[[32]byte]PostgresTarget
 	closed        bool
+	observe       OperationObserver
+}
+
+// SetOperationObserver installs the process telemetry sink before Runtime
+// Bundles are created. Observations never contain payloads or external IDs.
+func (router *Router) SetOperationObserver(observer OperationObserver) {
+	if router == nil {
+		return
+	}
+	router.mu.Lock()
+	router.observe = observer
+	router.mu.Unlock()
 }
 
 // NewRouter creates a production router with one mandatory default target.
@@ -175,6 +187,13 @@ func (router *Router) services(ctx context.Context, tenantID, appID string, prof
 			return nil, fmt.Errorf("storage: resolve artifact migration target: %w", resolveErr)
 		}
 		services.Artifact = &MirroredArtifact{Primary: services.Artifact, Target: target}
+	}
+	router.mu.Lock()
+	observer := router.observe
+	router.mu.Unlock()
+	if observer != nil {
+		services.Session = &ObservedSession{Delegate: services.Session, TenantID: tenantID, AppID: appID, Backend: string(profile.Session.Type), Observe: observer}
+		services.Memory = &ObservedMemory{Delegate: services.Memory, TenantID: tenantID, AppID: appID, Backend: string(profile.Memory.Type), Observe: observer}
 	}
 	return services, nil
 }

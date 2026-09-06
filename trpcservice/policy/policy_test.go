@@ -9,6 +9,31 @@ import (
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
+func TestIMIdentityAccessIsTenantScopedAndRedactedFromToolContext(t *testing.T) {
+	engine := &Engine{Identity: AuthenticatedIdentityAuthorizer{}}
+	base := Request{AppID: "app", UserID: "wecom/shared/alice", ExternalUserID: "alice", RequestID: "request", Policy: tenant.ToolPolicy{Allow: []string{"safe"}}}
+	allowed := base
+	allowed.TenantID = "tenant-a"
+	allowed.AllowedUsers = []string{"alice"}
+	if _, err := engine.Evaluate(context.Background(), allowed); err != nil {
+		t.Fatalf("tenant-a identity rejected: %v", err)
+	}
+	denied := base
+	denied.TenantID = "tenant-b"
+	denied.AllowedUsers = []string{"bob"}
+	if _, err := engine.Evaluate(context.Background(), denied); !errors.Is(err, ErrIdentityDenied) {
+		t.Fatalf("tenant-b identity error=%v", err)
+	}
+	ctx := WithRequest(context.Background(), engine, allowed)
+	stored, ok := FromContext(ctx)
+	if !ok {
+		t.Fatal("policy context missing")
+	}
+	if stored.Request.ExternalUserID != "" || stored.Request.ConversationID != "" || stored.Request.AllowedUsers != nil || stored.Request.AllowedChats != nil {
+		t.Fatalf("tool context retained IM identity policy: %+v", stored.Request)
+	}
+}
+
 func TestVisibilityExecutionPermissionAndApproval(t *testing.T) {
 	approvals := NewMemoryApprovals()
 	engine := &Engine{Identity: AuthenticatedIdentityAuthorizer{}, Approvals: approvals, Budgets: NewMemoryBudget()}
