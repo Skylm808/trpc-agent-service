@@ -1,29 +1,11 @@
-# Runtime Bundle
+# Runtime Bundle 运行时
 
-Each `(tenant_id, app_id, config_version)` has an immutable Runtime Bundle. It
-builds an `LLMAgent` and `Runner` using only tRPC-Agent-Go v1.11.2 public APIs:
-`WithSessionService`, `WithMemoryService`, `WithArtifactService`, Knowledge
-search tools, and `WithPlugins`. Every run injects the trusted canonical app name and inbox
-request ID; the caller can provide only user text and cannot override role or
-RunOptions.
+每个 `(tenant_id, app_id, config_version)` 对应一个不可变的 Runtime Bundle。Bundle 只使用 tRPC-Agent-Go v1.11.2 的公开 API 构建 `LLMAgent` 和 `Runner`，包括 `WithSessionService`、`WithMemoryService`、`WithArtifactService`、Knowledge 检索工具和 `WithPlugins`。每次执行都会注入可信的规范化应用名和 Inbox 请求 ID；调用方只能提供用户输入，不能覆盖角色或 `RunOptions`。
 
-The manager builds once per key, allows different tenants to build in parallel,
-rejects a stale snapshot from replacing an activated head, and reference-counts
-leases. Publishing a new version retires the old Bundle only after the new one
-builds successfully; a failed build leases the last valid Bundle and retries the
-new build on a later request. The old Bundle is closed only after all old leases
-finish. A caller must hold its lease for the entire run.
+Runtime Manager 对同一个键只构建一次，同时允许不同租户并行构建。它会拒绝旧配置快照覆盖已激活的新版本，并通过引用计数管理 Bundle 租约。发布新版本时，只有新 Bundle 构建成功后才会淘汰旧 Bundle；如果新版本构建失败，本次请求直接失败，后续请求会继续尝试构建同一个不可变版本，绝不会回退到旧配置执行。旧 Bundle 只继续服务已经钉住旧版本的请求，并在其全部租约释放后关闭。调用方必须在整个执行期间持有租约。
 
-The Bundle owns the event channel. On cancellation it calls `ManagedRunner.Cancel`
-when supported and continues draining with a bound, preventing a disconnected
-client from blocking the Runner. Bundle close is idempotent and closes the
-borrowed Session and Memory services after closing the Runner.
+Bundle 负责管理 Runner 事件通道。请求取消时，如果 Runner 支持 `ManagedRunner.Cancel`，Bundle 会调用它，并在有界时间内继续排空事件，避免客户端断开后阻塞 Runner。Bundle 的关闭操作具有幂等性：先关闭 Runner，再关闭其持有的 Session、Memory 等存储服务。
 
-The service entrypoint injects PostgreSQL Session/Memory, routed PostgreSQL or
-S3 Artifact, optional PGVector/Qdrant Knowledge, Inbox, Outbox, and Audit services. Redis provides lease/fencing and the distributed
-run-event bus. Production model profiles (`deepseek`, `openai`, and
-`openai-compatible`) use tRPC-Agent-Go's public OpenAI-compatible Model. API
-credentials are resolved from `SecretRef` once per immutable Bundle and are not
-copied into snapshots, logs, traces, or errors. The deterministic quickstart
-keeps a separate mock fixture; production startup rejects it. Unsupported
-storage profiles are rejected before the Gateway starts.
+服务入口会向 Bundle 注入 PostgreSQL Session/Memory、按租户路由的 PostgreSQL 或 S3 Artifact、可选的 PGVector/Qdrant Knowledge、Inbox、Outbox 和 Audit 服务。Redis 用于 lease、fencing token 和跨节点执行事件总线。
+
+生产模型配置 `deepseek`、`openai` 和 `openai-compatible` 使用 tRPC-Agent-Go 公开的 OpenAI-compatible Model。API 凭据在每个不可变 Bundle 构建时通过 `SecretRef` 解析一次，不会复制到配置快照、日志、Trace 或错误信息中。确定性 quickstart 使用单独的 Mock Model；生产启动会拒绝 Mock Model 和不受支持的存储配置。
