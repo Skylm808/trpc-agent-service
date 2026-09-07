@@ -113,7 +113,7 @@ func gatewayComponent(ctx context.Context, path, address string, role processRol
 }
 
 func resolveLocalSecret(ref tenant.SecretRef) (string, error) {
-	return secret.ResolveLocal(ref)
+	return secret.Resolve(context.Background(), ref)
 }
 
 func gatewayTokenEnv(bindingID string) string {

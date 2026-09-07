@@ -30,6 +30,11 @@ tenants:
             key: DEEPSEEK_API_KEY
           temperature: 0
           max_tokens: 2048
+          pricing:
+            # 示例值；上线前必须按供应商合同替换并更新版本。
+            version: example-price-v1
+            input_micros_per_million: 1000000
+            output_micros_per_million: 2000000
           # 仅当所选模型真实支持图片输入时启用。
           multimodal: false
         tools:

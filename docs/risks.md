@@ -15,7 +15,7 @@
 | R9 | 模型 API key、IM token、数据库密码出现在配置、错误或 trace 中 | 凭据泄露，攻击者跨租户调用外部服务 | 配置只保存 SecretRef；运行时读取环境变量/挂载文件，Vault/KMS 通过 External Secrets、Sidecar 或 CSI 同步；结构化日志字段白名单；错误和审计写入前统一脱敏 | CI 扫描 secret pattern；用 canary secret 跑日志/trace 泄漏测试 |
 | R10 | Repository 查询漏写 `tenant_id`，或向量检索未加 tenant filter | 跨租户读取 Session、Memory、Knowledge 或审计数据 | Repository 方法强制 tenant 参数；复合 PK/FK；可选 PostgreSQL RLS；向量 collection/namespace 与 metadata 双重隔离 | 双租户相同 ID 测试；SQL 静态检查；定期越权演练 |
 | R11 | 审计后端延迟或不可用 | 当前 fail-open 会产生审计缺口；未来 fail-closed 会影响业务可用性 | 已设置独立超时、失败指标和外置归档；强监管租户启用前仍需实现租户级 fail-closed 策略 | 监控 audit failure 和延迟；当前演练 fail-open，补齐开关后再演练 fail-closed |
-| R12 | Provider 未返回 usage、固定成本系数偏离真实价格或预算并发扣减不原子 | 成本超支，租户账单不准 | 已实现请求前预留、usage reconciliation 和原子 BudgetStore；仍需增加版本化输入/输出价格、usage 缺失处理并把实际成本写入 Metric/Audit | 预算拒绝率、usage 缺失、预留与实扣差异告警 |
+| R12 | Provider 未返回 usage、价格版本过期或预算并发扣减不原子 | 成本超支，租户账单不准 | 已实现版本化输入/输出价格、请求前预留、usage 核销、原子 BudgetStore 及 Metric/Audit 成本；usage 缺失时保留保守估算 | 预算拒绝率、usage 缺失、预留与实扣差异告警 |
 | R13 | Redis 到 SQL、向量库或对象存储迁移中途失败，切换后发现数据缺失 | Session 不完整、召回下降或 Artifact 丢失 | snapshot、dual write、catch-up、checksum/抽检、原子 cutover；保留回滚窗口和源端只读副本 | migration lag、校验差异和双写失败告警；切换/回滚演练 |
 | R14 | 向量索引异步更新、删除延迟或过滤条件错误 | Agent 短暂读取旧知识，甚至召回已撤销内容 | SQL 保存文档与索引版本；检索要求 tenant/version/status filter；删除使用 tombstone；高敏知识切换前等待索引水位 | 索引 lag、版本命中率、删除后召回测试 |
 | R15 | Outbox 发送成功后，节点在写 sent 状态前崩溃 | IM 用户收到重复回复 | Outbox dedupe key 固定；发送状态 CAS；能使用平台幂等参数时同时传递；无法确认结果的消息进入人工可见状态，不盲目高频重发 | sending 超时、重复投递反馈和 DLQ 告警；在发送后注入崩溃 |

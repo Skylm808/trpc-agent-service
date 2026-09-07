@@ -69,7 +69,7 @@ Gateway 只接收和规范化请求，Worker 执行 Runner；节点不保存会�
 | 多租户 | 版本化租户/应用配置，模型、工具、IM、后端、审计策略按租户解析；数据键和查询强制带 `tenant_id` |
 | 多节点 | Gateway/Worker/all 三种角色；Redis Streams 调度；Inbox lease、fencing token、崩溃接管、优雅 drain |
 | IM | 企业微信和飞书文本链路、回调验签/解密、去重、身份映射、媒体受控下载、基础文本文件提取、飞书卡片回复 |
-| 治理安全 | 用户/群 ACL、工具白名单、预算与并发配额、危险工具确认、SecretRef、日志/trace/验收输出脱敏 |
+| 治理安全 | 用户/群 ACL、工具白名单、token/版本化成本预算、并发配额、危险工具确认、可插拔 SecretRef Resolver、日志/trace/验收输出脱敏 |
 | 数据 | Session、Event、Memory、Summary、Artifact、Knowledge、Audit 的统一租户路由；迁移 checkpoint、checksum、双写与 cutover |
 | 可观测性 | Prometheus 指标、OTLP Trace、Tempo、Grafana，以及错误率、DLQ、积压、无 Worker、数据库异常告警 |
 | 部署运维 | 单机 Compose、多 Worker Compose、最小 Kubernetes Demo；探针、PDB、HPA、滚动升级和回滚验收 |

@@ -17,10 +17,7 @@ MCP 与 HTTPS 业务工具也进入同一条链路。配置发布只把显式命
 续跑模型。本地 `MemoryApprovals` 仅供测试；多节点生产环境必须实现共享、原子、带过期
 时间和审批人审计的 ApprovalStore。
 
-预算先按输入估算原子预留，再按模型 usage reconciliation；request token 超限会取消
-Runner。当前生产组合器使用统一的固定微成本系数，因此 token 预算和并发扣减已经生效，
-但不能作为不同模型的精确账单。要启用可靠的月度成本治理，仍需在不可变模型配置中增加
-版本化的输入/输出价格，并把计算后的实际成本写入 Metrics 和 Audit。
+预算先按输入估算和 `max_tokens` 原子预留，再按模型 usage reconciliation；request token 超限会取消 Runner。月度成本预算启用时，模型配置必须包含价格版本以及每百万输入/输出 token 的微成本。Worker 收到 provider usage 后分项核销，并把实际 `cost_micros` 写入 Metrics 和 Audit；provider 未返回 usage 时保留保守预留值并标记 `reserved_estimate`。
 
 审计遵循 tenant `AuditPolicy`：`enabled=false` 不写；`store_content=false` 不保存错误
 正文；`redact_fields` 在结构化字段写入前生效；`RetentionDays` 由定时任务调用
@@ -48,13 +45,13 @@ Worker。两个列表都为空时兼容现有绑定并允许全部；`allowed_us
 | `agent.model.first_token.duration` | tenant, app, channel, operation, status | 模型首事件耗时 |
 | `agent.im.delivery` | tenant, app, channel, status | IM 投递成功率和平台限流结果 |
 | `agent.tokens` | tenant, app, operation, status | 已接入的 token 消耗与预算核对 |
-| `agent.cost` | tenant, app, operation, status | 指标已注册；接入版本化模型价格后记录租户实际成本 |
+| `agent.cost` | tenant, app, operation, status | 按 provider usage 和请求固定的价格版本记录实际微成本 |
 | `agent.storage.operation.duration`, `agent.storage.operation.errors` | tenant, app, domain, backend, operation, status | 真实 Session/Memory Adapter 调用延迟和错误率 |
 | `agent.queue.depth`, `agent.outbox.backlog` | tenant, queue, status | Inbox/Outbox/DLQ 排队与故障恢复状态 |
 | `agent.worker.live`, `agent.storage.health`, `agent.storage.healthcheck.duration` | domain, backend, operation, status | Worker 存活与平台 PostgreSQL 健康检查 |
 
-`binding_id` 只有在绑定数量受控时才能作为 metrics 标签，否则只进入 trace。延迟指标使用 histogram，并按部署基线设置 p95/p99 告警；错误率和队列等待可以按租户及全局聚合，精确成本聚合需先完成模型价格闭环。
+`binding_id` 只有在绑定数量受控时才能作为 metrics 标签，否则只进入 trace。延迟指标使用 histogram，并按部署基线设置 p95/p99 告警；错误率、队列等待和成本可以按租户及全局聚合。
 
 ## 审计字段
 
-每条审计记录包含 `tenant_id`、`channel`、`user_id`、`session_id`、`agent_name`、`tool_name`、`decision`、`latency_ms`、`error_type`、`cost_micros` 和 `trace_id`，并保留 `request_id`、`event_id` 与脱敏后的 `details_json`。当前 `cost_micros` 在价格闭环完成前为 0；`config_version` 和 `policy_version` 仍需补充到审计表。密钥、Authorization header、Cookie、模型原始请求及未获授权的消息正文不得写入日志、trace 或错误报告。
+每条审计记录包含 `tenant_id`、`channel`、`user_id`、`session_id`、`agent_name`、`tool_name`、`decision`、`latency_ms`、`error_type`、`cost_micros` 和 `trace_id`，并保留 `request_id`、`event_id` 与脱敏后的 `details_json`。价格版本和成本依据保存在脱敏 details 中；`config_version` 和 `policy_version` 仍需补充到审计表。密钥、Authorization header、Cookie、模型原始请求及未获授权的消息正文不得写入日志、trace 或错误报告。

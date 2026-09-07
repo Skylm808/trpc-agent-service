@@ -132,6 +132,17 @@ func validateApp(
 	if err := validateTools(path+".tools", app.Tools); err != nil {
 		return err
 	}
+	if app.Tools.MonthlyCostBudgetCents > 0 {
+		if strings.TrimSpace(app.Model.Pricing.Version) == "" {
+			return fmt.Errorf("config: %s.model.pricing.version is required when monthly cost budget is enabled", path)
+		}
+		if app.Model.Pricing.InputMicrosPerMillion <= 0 || app.Model.Pricing.OutputMicrosPerMillion <= 0 {
+			return fmt.Errorf("config: %s.model.pricing input and output rates must be positive when monthly cost budget is enabled", path)
+		}
+		if app.Model.MaxTokens <= 0 {
+			return fmt.Errorf("config: %s.model.max_tokens must be positive when monthly cost budget is enabled", path)
+		}
+	}
 	if err := validateToolIntegrations(path, app); err != nil {
 		return err
 	}
@@ -397,6 +408,12 @@ func validateModel(path string, model tenant.ModelProfile) error {
 	}
 	if model.MaxTokens < 0 {
 		return fmt.Errorf("config: %s.max_tokens must not be negative", path)
+	}
+	if model.Pricing.InputMicrosPerMillion < 0 || model.Pricing.OutputMicrosPerMillion < 0 {
+		return fmt.Errorf("config: %s.pricing rates must not be negative", path)
+	}
+	if (model.Pricing.InputMicrosPerMillion > 0 || model.Pricing.OutputMicrosPerMillion > 0) && strings.TrimSpace(model.Pricing.Version) == "" {
+		return fmt.Errorf("config: %s.pricing.version is required when pricing rates are configured", path)
 	}
 	if model.Provider == "openai-compatible" && strings.TrimSpace(model.BaseURL) == "" {
 		return fmt.Errorf("config: %s.base_url is required for openai-compatible provider", path)

@@ -106,13 +106,23 @@ type AppConfig struct {
 
 // ModelProfile selects and configures one model provider.
 type ModelProfile struct {
-	Provider    string    `json:"provider" yaml:"provider"`
-	Name        string    `json:"name" yaml:"name"`
-	BaseURL     string    `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	APIKey      SecretRef `json:"api_key,omitempty" yaml:"api_key,omitempty"`
-	Temperature *float64  `json:"temperature,omitempty" yaml:"temperature,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
-	Multimodal  bool      `json:"multimodal,omitempty" yaml:"multimodal,omitempty"`
+	Provider    string       `json:"provider" yaml:"provider"`
+	Name        string       `json:"name" yaml:"name"`
+	BaseURL     string       `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	APIKey      SecretRef    `json:"api_key,omitempty" yaml:"api_key,omitempty"`
+	Temperature *float64     `json:"temperature,omitempty" yaml:"temperature,omitempty"`
+	MaxTokens   int          `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+	Multimodal  bool         `json:"multimodal,omitempty" yaml:"multimodal,omitempty"`
+	Pricing     ModelPricing `json:"pricing,omitempty" yaml:"pricing,omitempty"`
+}
+
+// ModelPricing is pinned in the tenant configuration version used by a run.
+// Rates are expressed in micros per one million tokens so accounting remains
+// integer-only and can distinguish prompt and completion prices.
+type ModelPricing struct {
+	Version                string `json:"version,omitempty" yaml:"version,omitempty"`
+	InputMicrosPerMillion  int64  `json:"input_micros_per_million,omitempty" yaml:"input_micros_per_million,omitempty"`
+	OutputMicrosPerMillion int64  `json:"output_micros_per_million,omitempty" yaml:"output_micros_per_million,omitempty"`
 }
 
 // ToolPolicy controls tenant-visible and tenant-executable tools.

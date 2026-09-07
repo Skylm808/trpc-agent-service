@@ -41,7 +41,7 @@ func TestCancelScopesSameRequestIDByTenant(t *testing.T) {
 
 func TestEventProjectionSkipsZeroTokenUsage(t *testing.T) {
 	called := false
-	projection := eventProjection{onUsage: func(int64) error {
+	projection := eventProjection{onUsage: func(int64, int64) error {
 		called = true
 		return errors.New("zero usage must not be reconciled")
 	}}
@@ -53,5 +53,19 @@ func TestEventProjectionSkipsZeroTokenUsage(t *testing.T) {
 	}
 	if projection.policyErr != nil {
 		t.Fatalf("policyErr=%v", projection.policyErr)
+	}
+}
+
+func TestEventProjectionAccumulatesDistinctModelCallsWithoutDoubleCountingStreamUsage(t *testing.T) {
+	var prompt, completion int64
+	projection := eventProjection{onUsage: func(input, output int64) error {
+		prompt, completion = input, output
+		return nil
+	}}
+	projection.Observe(&event.Event{Response: &model.Response{ID: "call-a", Usage: &model.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12}}})
+	projection.Observe(&event.Event{Response: &model.Response{ID: "call-a", Usage: &model.Usage{PromptTokens: 10, CompletionTokens: 4, TotalTokens: 14}}})
+	projection.Observe(&event.Event{Response: &model.Response{ID: "call-b", Usage: &model.Usage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25}}})
+	if prompt != 30 || completion != 9 || projection.totalTokens != 39 {
+		t.Fatalf("usage prompt=%d completion=%d total=%d", prompt, completion, projection.totalTokens)
 	}
 }

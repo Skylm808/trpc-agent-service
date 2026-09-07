@@ -111,3 +111,29 @@ func TestValidateRoutedProfileAllowsBidirectionalArtifactMigration(t *testing.T)
 		t.Fatalf("S3 to postgres rejected: %v", err)
 	}
 }
+
+func TestValidateRoutedProfileRejectsSchemaOnlyBackends(t *testing.T) {
+	postgres := tenant.BackendConfig{Type: tenant.BackendPostgres}
+	base := tenant.StorageProfile{Session: postgres, Memory: postgres, Summary: postgres, Artifact: postgres, Knowledge: postgres, Audit: postgres}
+	tests := []struct {
+		name   string
+		mutate func(*tenant.StorageProfile)
+	}{
+		{"redis session", func(profile *tenant.StorageProfile) {
+			profile.Session.Type, profile.Summary.Type = tenant.BackendRedis, tenant.BackendRedis
+		}},
+		{"mysql memory", func(profile *tenant.StorageProfile) { profile.Memory.Type = tenant.BackendMySQL }},
+		{"local artifact", func(profile *tenant.StorageProfile) { profile.Artifact.Type = tenant.BackendLocal }},
+		{"milvus knowledge", func(profile *tenant.StorageProfile) { profile.Knowledge.Type = tenant.BackendMilvus }},
+		{"external audit primary", func(profile *tenant.StorageProfile) { profile.Audit.Type = tenant.BackendExternal }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profile := base.Clone()
+			test.mutate(&profile)
+			if err := ValidateRoutedProfile(profile); err == nil {
+				t.Fatal("production route accepted a backend without a runtime adapter")
+			}
+		})
+	}
+}

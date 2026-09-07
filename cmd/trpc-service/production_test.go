@@ -161,6 +161,11 @@ func TestProductionProfileRejectsInMemoryAndMock(t *testing.T) {
 		{name: "inmemory storage", app: tenant.AgentApp{ID: "app", Enabled: true, Model: tenant.ModelProfile{Provider: "deepseek", APIKey: tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "PR9_TEST_MODEL_KEY"}}, Storage: inmemoryStorageProfile()}, wantErr: "postgres"},
 		{name: "mock model", app: tenant.AgentApp{ID: "app", Enabled: true, Model: tenant.ModelProfile{Provider: "mock"}, Storage: postgresStorageProfile()}, wantErr: "test-only"},
 		{name: "missing model credential", app: tenant.AgentApp{ID: "app", Enabled: true, Model: tenant.ModelProfile{Provider: "deepseek", APIKey: tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "PR9_UNSET_MODEL_KEY"}}, Storage: postgresStorageProfile()}, wantErr: "credential"},
+		{name: "missing knowledge credential", app: tenant.AgentApp{ID: "app", Enabled: true, Model: tenant.ModelProfile{Provider: "deepseek", APIKey: tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "PR9_TEST_MODEL_KEY"}}, Storage: func() tenant.StorageProfile {
+			profile := postgresStorageProfile()
+			profile.Knowledge = tenant.BackendConfig{Type: tenant.BackendQdrant, Endpoint: "https://vectors.example", Credential: tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "PR9_UNSET_QDRANT_KEY"}}
+			return profile
+		}()}, wantErr: "knowledge storage credential"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			file := &config.File{Tenants: []tenant.Tenant{{ID: "tenant", Enabled: true, Apps: []tenant.AgentApp{test.app}}}}

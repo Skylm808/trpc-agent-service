@@ -122,7 +122,7 @@ Agent Gateway 和 Worker 都是无状态节点，不要求负载均衡器提供 
 
 `tenant_id` 是最高隔离边界。一个租户可以有多个 Agent App，每个 App 保存模型配置、系统指令、工具策略、IM 绑定、存储路由和审计策略。配置发布后不可修改；`config_versions` 保存完整的 canonical 配置和内容摘要，`tenants.current_config_version` 是发布头。并发发布使用 expected version 做 CAS，回滚会创建一个新版本，而不是覆盖旧记录。
 
-隔离规则落实在接口和数据模型中：Repository 的每个方法都显式接收 `tenant_id`；SQL 的主键、唯一键、外键和索引以租户字段开头；Runtime Bundle 的键是 `(tenant_id, app_id, config_version)`；工具在展示和执行两个阶段都经过租户策略；模型密钥、IM token 和数据库凭据只保存 `SecretRef`。当前运行时原生解析环境变量和挂载文件；Vault/KMS 需要由 External Secrets、Sidecar 或 CSI 驱动先同步为这两种形式，代码尚未直接调用 Vault/KMS API。日志与 trace 禁止记录 secret value，消息内容是否进入审计由租户的 `AuditPolicy` 决定。
+隔离规则落实在接口和数据模型中：Repository 的每个方法都显式接收 `tenant_id`；SQL 的主键、唯一键、外键和索引以租户字段开头；Runtime Bundle 的键是 `(tenant_id, app_id, config_version)`；工具在展示和执行两个阶段都经过租户策略；模型密钥、IM token 和数据库凭据只保存 `SecretRef`。运行时内置解析环境变量和挂载文件，并提供可注册的 Vault/KMS Provider 边界；未注册的外部 Provider 会 fail-closed，参考部署仍可使用 External Secrets、Sidecar 或 CSI。日志与 trace 禁止记录 secret value，消息内容是否进入审计由租户的 `AuditPolicy` 决定。
 
 用户身份和会话身份分别生成：`user_id = {channel_type}/{binding_id}/{external_user_id}`，企业微信的 `channel_type` 是 `wecom`；单聊 `session_id` 为 `dm/{binding_id}/{external_user_id}`，群聊为 `group/{binding_id}/{conversation_id}`，thread/topic 再追加 `/thread/{thread_id}`。`tenant_id` 和 `app_id` 来自服务端绑定，客户端不能自定义 `session_id`。因此同一人在不同群、绑定或租户中不会共享会话作用域。
 
@@ -257,7 +257,7 @@ Session 的事实来源选择 PostgreSQL，Redis 负责 lease、fencing 和热�
 
 Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行时再次应用白名单、危险工具审批和权限校验，最终回复经过脱敏后才能写 Outbox。审计记录 tenant、channel、user、session、agent、tool、decision、latency、error type、cost 和 trace ID。审计后端超时时，当前策略固定为业务 fail-open 并产生失败指标；尚未提供租户级 fail-closed 开关，强监管场景需要补充该配置后才能使用。
 
-监控覆盖请求量与错误率、模型首 token/总耗时、Tool 调用耗时、IM 回调与投递成功率、token 用量、Session/Memory 后端延迟、Inbox/Outbox/DLQ 积压和 Worker/数据库健康。`agent.cost` 已注册，但当前没有版本化模型价格，尚不能提供准确的租户成本。Metrics 只使用 tenant、app、channel、operation、status 等受控标签；user、session 和 message 不进入遥测，request/correlation ID 在 trace 中只记录不可逆短 hash，避免时序库基数失控和调用者借标识注入正文或 Secret。原始关联仅保留在受权限保护、按租户隔离的业务表和 audit 中。指标与审计字段见[治理、审计与可观测性](governance.md)。
+监控覆盖请求量与错误率、模型首 token/总耗时、Tool 调用耗时、IM 回调与投递成功率、token 用量、Session/Memory 后端延迟、Inbox/Outbox/DLQ 积压和 Worker/数据库健康。`agent.cost` 按配置版本中固定的输入/输出价格和 provider usage 计算，并与月度预算核销。Metrics 只使用 tenant、app、channel、operation、status 等受控标签；user、session 和 message 不进入遥测，request/correlation ID 在 trace 中只记录不可逆短 hash，避免时序库基数失控和调用者借标识注入正文或 Secret。原始关联仅保留在受权限保护、按租户隔离的业务表和 audit 中。指标与审计字段见[治理、审计与可观测性](governance.md)。
 
 节点收到取消或超时时调用 `ManagedRunner.Cancel(request_id)`，然后在有界时间内排空事件 channel。Tool 必须接受 `context.Context`，外部副作用使用业务幂等键，不能靠 goroutine 脱离请求继续执行。模型超时、数据库短暂不可用和 Outbox 投递失败进入分类重试；不可重试错误写入 DLQ，并保留原始 request/trace 关联。
 
@@ -290,13 +290,13 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 状态能力 | Session、Memory、Artifact、Knowledge 接口 | 租户后端路由、fencing、迁移任务和数据隔离 |
 | 治理 | Plugin、Guardrail、Tool Filter/Permission | 租户策略、预算账本、审批存储和审计规则 |
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
-| 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、token 统计和日志脱敏；精确成本仍需版本化价格 |
+| 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、token 统计、版本化成本和日志脱敏 |
 
 当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、租户 Runner 动态并发配额、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复双向迁移 Worker、外部 Memory、外置 Audit/WORM、治理审计与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换、Gateway/Worker 角色拆分、生产 MCP Registry、HTTPS JSON 业务工具，以及企业微信和飞书两个 Channel Adapter/Sender。复杂格式文档解析、投递异常 Web 运维页、Delivery/maintenance 独立角色和队列自定义指标 HPA 属于后续增强，不是本次基础验收的必要项。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
 
 ## 10. 验收目标与当前状态
 
-目标是让 Gateway/Worker 无状态扩容，IM 重投不重复执行，旧 Worker 不能覆盖新状态。配置、数据、工具和密钥按租户隔离；`trace_id` 串起回调、模型、Tool、存储与回复。当前 token 统计可用，租户精确成本需要补充版本化模型价格后才能形成闭环。
+目标是让 Gateway/Worker 无状态扩容，IM 重投不重复执行，旧 Worker 不能覆盖新状态。配置、数据、工具和密钥按租户隔离；`trace_id` 串起回调、模型、Tool、存储与回复。token 与租户成本按不可变配置版本形成预留、实际 usage 核销、Metrics 和 Audit 闭环。
 
 验收时使用以下结果判断链路是否成立：
 

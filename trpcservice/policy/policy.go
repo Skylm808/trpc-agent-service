@@ -4,6 +4,7 @@ package policy
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"time"
 
@@ -195,6 +196,27 @@ func (engine *Engine) EstimateCost(tokens int64) int64 {
 		return 0
 	}
 	return tokens * engine.CostMicrosPerToken
+}
+
+// EstimateModelCost calculates version-pinned prompt/completion cost. Each
+// non-empty component rounds up to one micro so small calls are never free.
+func EstimateModelCost(pricing tenant.ModelPricing, promptTokens, completionTokens int64) int64 {
+	inputCost := tokenCost(promptTokens, pricing.InputMicrosPerMillion)
+	outputCost := tokenCost(completionTokens, pricing.OutputMicrosPerMillion)
+	if inputCost > math.MaxInt64-outputCost {
+		return math.MaxInt64
+	}
+	return inputCost + outputCost
+}
+
+func tokenCost(tokens, rate int64) int64 {
+	if tokens <= 0 || rate <= 0 {
+		return 0
+	}
+	if tokens > (math.MaxInt64-999999)/rate {
+		return math.MaxInt64
+	}
+	return (tokens*rate + 999999) / 1000000
 }
 
 func (engine *Engine) Reconcile(ctx context.Context, request Request, actualTokens, actualCostMicros int64) error {

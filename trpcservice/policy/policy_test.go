@@ -112,3 +112,13 @@ func TestBudgetReconcileRejectsOutputOverrun(t *testing.T) {
 		t.Fatal("actual output overrun was accepted")
 	}
 }
+
+func TestEstimateModelCostSeparatesPromptAndCompletion(t *testing.T) {
+	pricing := tenant.ModelPricing{Version: "price-v1", InputMicrosPerMillion: 1_000_000, OutputMicrosPerMillion: 2_000_000}
+	if got := EstimateModelCost(pricing, 3, 4); got != 11 {
+		t.Fatalf("cost=%d, want 11", got)
+	}
+	if got := EstimateModelCost(tenant.ModelPricing{InputMicrosPerMillion: 1}, 1, 0); got != 1 {
+		t.Fatalf("small call must round up to one micro, got %d", got)
+	}
+}

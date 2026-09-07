@@ -38,6 +38,10 @@ tenants:
             key: MODEL_API_KEY
           temperature: 0.2
           max_tokens: 2048
+          pricing:
+            version: price-2026-09
+            input_micros_per_million: 1000000
+            output_micros_per_million: 2000000
         tools:
           allow: [calculator, search]
           deny: [shell]
@@ -162,6 +166,16 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 			name: "invalid backend",
 			yaml: strings.Replace(validYAML, "type: inmemory\n            namespace", "type: invalid\n            namespace", 1),
 			want: "storage.session.type",
+		},
+		{
+			name: "budget without pricing version",
+			yaml: strings.Replace(validYAML, "version: price-2026-09", "version: ''", 1),
+			want: "pricing.version is required",
+		},
+		{
+			name: "budget without output pricing",
+			yaml: strings.Replace(validYAML, "output_micros_per_million: 2000000", "output_micros_per_million: 0", 1),
+			want: "input and output rates must be positive",
 		},
 		{
 			name: "credentials in endpoint",

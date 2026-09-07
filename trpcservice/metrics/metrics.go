@@ -100,7 +100,7 @@ func New(name string) (*Telemetry, error) {
 	if err != nil {
 		return nil, err
 	}
-	cost, err := meter.Int64Counter("agent.cost", metric.WithUnit("us"))
+	cost, err := meter.Int64Counter("agent.cost", metric.WithUnit("{microcurrency}"), metric.WithDescription("Tenant model cost in micro currency units"))
 	if err != nil {
 		return nil, err
 	}

@@ -32,7 +32,6 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/policy"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/recovery"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/sessioncoord"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storagemigration"
@@ -233,7 +232,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 
 	writes := &sessioncoord.SQLWriteStore{DB: db}
 	coordinator := &sessioncoord.RedisCoordinator{Redis: redisBackend, Fencer: writes}
-	storageRouter, err := storage.NewRouter(postgresDSN, db, secret.ResolveLocal)
+	storageRouter, err := storage.NewRouter(postgresDSN, db, resolveLocalSecret)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +245,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	if err := preflightPublishedStorage(connectCtx, db, storageRouter); err != nil {
 		return nil, err
 	}
-	toolRegistry, err := servicetool.NewCatalogRegistry(secret.ResolveLocal)
+	toolRegistry, err := servicetool.NewCatalogRegistry(resolveLocalSecret)
 	if err != nil {
 		return nil, err
 	}
@@ -298,10 +297,9 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	}
 	statusStore := &openclaw.SQLStatusStore{DB: db}
 	policyEngine := &policy.Engine{
-		Identity:           policy.AuthenticatedIdentityAuthorizer{},
-		Budgets:            &policy.SQLBudgetStore{DB: db},
-		Approvals:          &policy.SQLApprovals{DB: db},
-		CostMicrosPerToken: 1,
+		Identity:  policy.AuthenticatedIdentityAuthorizer{},
+		Budgets:   &policy.SQLBudgetStore{DB: db},
+		Approvals: &policy.SQLApprovals{DB: db},
 	}
 	primaryAuditStore := &audit.SQLStore{DB: db, Redactor: redactor}
 	auditStore := &audit.RoutedStore{Primary: primaryAuditStore, Resolve: func(resolveCtx context.Context, record audit.Record) (audit.Store, error) {
@@ -314,7 +312,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 				continue
 			}
 			route := *app.Storage.Audit.MigrationTarget
-			token, tokenErr := secret.ResolveLocal(route.Credential)
+			token, tokenErr := resolveLocalSecret(route.Credential)
 			if tokenErr != nil || token == "" {
 				return nil, errors.New("audit: external archive credential is unavailable")
 			}
@@ -510,7 +508,7 @@ func (routes *publishedDeliveryRoutes) Resolve(message gateway.OutboundMessage) 
 	if selected == nil {
 		return nil, errors.New("delivery: published channel binding is unavailable")
 	}
-	appSecret, err := secret.ResolveLocal(selected.Secret)
+	appSecret, err := resolveLocalSecret(selected.Secret)
 	if err != nil {
 		return nil, errors.New("delivery: channel application secret is unavailable")
 	}
@@ -705,7 +703,7 @@ func expectedCredential(published *config.PublishedCache) openclaw.ExpectedCrede
 			return "", err
 		}
 		if !binding.Token.IsZero() {
-			return secret.ResolveLocal(binding.Token)
+			return resolveLocalSecret(binding.Token)
 		}
 		credential := os.Getenv(gatewayTokenEnv(bindingID))
 		if credential == "" {
@@ -738,11 +736,11 @@ func wecomBindingProvider(db *sql.DB, published *config.PublishedCache) wecom.Bi
 			if err != nil || binding.Type != tenant.ChannelTypeWeCom {
 				continue
 			}
-			token, err := secret.ResolveLocal(binding.Token)
+			token, err := resolveLocalSecret(binding.Token)
 			if err != nil {
 				continue
 			}
-			aesKey, err := secret.ResolveLocal(binding.EncryptionKey)
+			aesKey, err := resolveLocalSecret(binding.EncryptionKey)
 			if err != nil {
 				continue
 			}
@@ -750,7 +748,7 @@ func wecomBindingProvider(db *sql.DB, published *config.PublishedCache) wecom.Bi
 			if err != nil {
 				continue
 			}
-			appSecret, err := secret.ResolveLocal(binding.Secret)
+			appSecret, err := resolveLocalSecret(binding.Secret)
 			if err != nil {
 				continue
 			}
@@ -789,7 +787,7 @@ func feishuBindingProvider(db *sql.DB, published *config.PublishedCache) feishu.
 			if err != nil || binding.Type != tenant.ChannelTypeFeishu {
 				continue
 			}
-			token, err := secret.ResolveLocal(binding.Token)
+			token, err := resolveLocalSecret(binding.Token)
 			if err != nil {
 				continue
 			}
@@ -798,13 +796,13 @@ func feishuBindingProvider(db *sql.DB, published *config.PublishedCache) feishu.
 				FeishuAppID: binding.ProviderAccountID, VerificationToken: token,
 				ConfigVersion: version,
 			}
-			appSecret, err := secret.ResolveLocal(binding.Secret)
+			appSecret, err := resolveLocalSecret(binding.Secret)
 			if err != nil {
 				continue
 			}
 			candidate.AppSecret = appSecret
 			if !binding.EncryptionKey.IsZero() {
-				encryptKey, err := secret.ResolveLocal(binding.EncryptionKey)
+				encryptKey, err := resolveLocalSecret(binding.EncryptionKey)
 				if err != nil {
 					continue
 				}
@@ -916,18 +914,18 @@ func validatePersistentProfiles(file *config.File) error {
 				if app.Model.Provider == "mock" {
 					return fmt.Errorf("tenant %q app %q: mock model is test-only", currentTenant.ID, app.ID)
 				}
-				if _, err := secret.ResolveLocal(app.Model.APIKey); err != nil {
+				if _, err := resolveLocalSecret(app.Model.APIKey); err != nil {
 					return fmt.Errorf("tenant %q app %q: model credential is unavailable", currentTenant.ID, app.ID)
 				}
 				if err := storage.ValidateRoutedProfile(app.Storage); err != nil {
 					return fmt.Errorf("tenant %q app %q: %w", currentTenant.ID, app.ID, err)
 				}
-				for domain, route := range map[string]tenant.BackendConfig{"session": app.Storage.Session, "memory": app.Storage.Memory, "summary": app.Storage.Summary, "artifact": app.Storage.Artifact} {
+				for domain, route := range map[string]tenant.BackendConfig{"session": app.Storage.Session, "memory": app.Storage.Memory, "summary": app.Storage.Summary, "artifact": app.Storage.Artifact, "knowledge": app.Storage.Knowledge, "audit": app.Storage.Audit} {
 					for _, candidate := range []tenant.BackendConfig{route, migrationTarget(route)} {
 						if candidate.Type == "" || candidate.Credential.IsZero() {
 							continue
 						}
-						if _, err := secret.ResolveLocal(candidate.Credential); err != nil {
+						if _, err := resolveLocalSecret(candidate.Credential); err != nil {
 							return fmt.Errorf("tenant %q app %q: %s storage credential is unavailable", currentTenant.ID, app.ID, domain)
 						}
 					}

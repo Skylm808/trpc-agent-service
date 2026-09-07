@@ -1,6 +1,8 @@
 package secret
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +24,27 @@ func TestResolveLocalEnvironmentAndFile(t *testing.T) {
 	value, err = ResolveLocal(tenant.SecretRef{Provider: tenant.SecretProviderFile, Key: path})
 	if err != nil || value != "file-value" {
 		t.Fatalf("file value=%q err=%v", value, err)
+	}
+}
+
+func TestResolverSupportsRegisteredVaultProviderWithoutLeakingMetadata(t *testing.T) {
+	resolver := NewResolver()
+	if err := resolver.Register(tenant.SecretProviderVault, ProviderFunc(func(_ context.Context, key string) (string, error) {
+		if key == "tenant/model" {
+			return "resolved-value", nil
+		}
+		return "", errors.New("backend mentioned sensitive lookup metadata")
+	})); err != nil {
+		t.Fatal(err)
+	}
+	value, err := resolver.Resolve(context.Background(), tenant.SecretRef{Provider: tenant.SecretProviderVault, Key: "tenant/model"})
+	if err != nil || value != "resolved-value" {
+		t.Fatalf("value=%q err=%v", value, err)
+	}
+	const missing = "tenant/missing-sensitive"
+	_, err = resolver.Resolve(context.Background(), tenant.SecretRef{Provider: tenant.SecretProviderVault, Key: missing})
+	if err == nil || strings.Contains(err.Error(), missing) || strings.Contains(err.Error(), "sensitive lookup metadata") {
+		t.Fatalf("resolver leaked provider error: %v", err)
 	}
 }
 

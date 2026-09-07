@@ -154,14 +154,24 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 			}
 		}
 		tokens := int64(0)
+		costMicros := int64(0)
 		toolName := ""
 		if projection != nil {
 			tokens = int64(projection.totalTokens)
+			costMicros = projection.costMicros
 			toolName = projection.lastTool
+			if projection.pricingVersion != "" {
+				details["pricing_version"] = projection.pricingVersion
+				if projection.usageObserved {
+					details["cost_basis"] = "provider_usage"
+				} else {
+					details["cost_basis"] = "reserved_estimate"
+				}
+			}
 		}
-		processor.Telemetry.Request(ctx, servicemetrics.Labels{TenantID: request.TenantID, AppID: request.AppID, Channel: request.BindingID, Operation: "runner", Status: decision}, time.Since(started), tokens, 0)
+		processor.Telemetry.Request(ctx, servicemetrics.Labels{TenantID: request.TenantID, AppID: request.AppID, Channel: request.BindingID, Operation: "runner", Status: decision}, time.Since(started), tokens, costMicros)
 		if auditEnabled && processor.Audit != nil {
-			record := audit.Record{TenantID: request.TenantID, Channel: request.BindingID, UserID: request.UserID, SessionID: request.SessionID, AgentName: request.AppID, ToolName: toolName, Decision: decision, Latency: time.Since(started), ErrorType: errorType, TraceID: request.TraceID, RequestID: request.InboxID, Details: details}
+			record := audit.Record{TenantID: request.TenantID, Channel: request.BindingID, UserID: request.UserID, SessionID: request.SessionID, AgentName: request.AppID, ToolName: toolName, Decision: decision, Latency: time.Since(started), ErrorType: errorType, CostMicros: costMicros, TraceID: request.TraceID, RequestID: request.InboxID, Details: details}
 			record.Channel = tenantRedactor.RedactField("channel", record.Channel)
 			record.UserID = tenantRedactor.RedactField("user_id", record.UserID)
 			record.SessionID = tenantRedactor.RedactField("session_id", record.SessionID)
@@ -285,7 +295,9 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 		completed = true
 		return policy.ErrIdentityDenied
 	}
-	policyRequest := policy.Request{TenantID: request.TenantID, AppID: request.AppID, UserID: request.UserID, RequestID: request.InboxID, ExternalUserID: request.ExternalUserID, ConversationID: request.ConversationID, AllowedUsers: binding.AllowedUsers, AllowedChats: binding.AllowedChats, Policy: snapshot.App().Tools, EstimatedTokens: estimatedTokens, EstimatedCostMicros: processor.Policy.EstimateCost(estimatedTokens)}
+	app := snapshot.App()
+	estimatedCost := policy.EstimateModelCost(app.Model.Pricing, estimatedTokens, int64(app.Model.MaxTokens))
+	policyRequest := policy.Request{TenantID: request.TenantID, AppID: request.AppID, UserID: request.UserID, RequestID: request.InboxID, ExternalUserID: request.ExternalUserID, ConversationID: request.ConversationID, AllowedUsers: binding.AllowedUsers, AllowedChats: binding.AllowedChats, Policy: app.Tools, EstimatedTokens: estimatedTokens + int64(app.Model.MaxTokens), EstimatedCostMicros: estimatedCost}
 	controls, err := processor.Policy.Evaluate(ctx, policyRequest)
 	if err != nil {
 		if isGovernanceDenial(err) {
@@ -319,9 +331,13 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	runCtx = policy.WithRequest(runCtx, processor.Policy, policyRequest)
 	runCtx = servicelog.WithRedactor(runCtx, tenantRedactor)
 	runCtx = servicemetrics.WithTelemetry(runCtx, processor.Telemetry, processor.spanFields(request))
-	projection = &eventProjection{publisher: processor.Publisher, request: request, workerID: processor.WorkerID, redact: redact}
-	projection.onUsage = func(tokens int64) error {
-		return processor.Policy.Reconcile(runCtx, policyRequest, tokens, processor.Policy.EstimateCost(tokens))
+	projection = &eventProjection{publisher: processor.Publisher, request: request, workerID: processor.WorkerID, redact: redact, costMicros: estimatedCost, pricingVersion: app.Model.Pricing.Version}
+	projection.onUsage = func(promptTokens, completionTokens int64) error {
+		actualTokens := promptTokens + completionTokens
+		actualCost := policy.EstimateModelCost(app.Model.Pricing, promptTokens, completionTokens)
+		projection.costMicros = actualCost
+		projection.usageObserved = true
+		return processor.Policy.Reconcile(runCtx, policyRequest, actualTokens, actualCost)
 	}
 	projection.cancel = cancelRun
 	processor.register(request.TenantID, request.InboxID, cancelRun)
@@ -624,20 +640,28 @@ func (processor *Processor) cancellationRequested(ctx context.Context, request g
 }
 
 type eventProjection struct {
-	publisher   gateway.EventPublisher
-	request     gateway.RunRequest
-	workerID    string
-	reply       string
-	lastTool    string
-	totalTokens int
-	redact      func(string) string
-	pendingTool string
-	pendingCall string
-	pendingArgs []byte
-	onUsage     func(int64) error
-	cancel      context.CancelFunc
-	policyErr   error
+	publisher        gateway.EventPublisher
+	request          gateway.RunRequest
+	workerID         string
+	reply            string
+	lastTool         string
+	totalTokens      int
+	promptTokens     int
+	completionTokens int
+	costMicros       int64
+	pricingVersion   string
+	usageObserved    bool
+	redact           func(string) string
+	pendingTool      string
+	pendingCall      string
+	pendingArgs      []byte
+	onUsage          func(int64, int64) error
+	cancel           context.CancelFunc
+	policyErr        error
+	usageByResponse  map[string]usageTotals
 }
+
+type usageTotals struct{ prompt, completion int }
 
 func (projection *eventProjection) Observe(item *event.Event) {
 	if item == nil || item.Response == nil {
@@ -648,9 +672,23 @@ func (projection *eventProjection) Observe(item *event.Event) {
 		base.PromptTokens = item.Usage.PromptTokens
 		base.CompletionTokens = item.Usage.CompletionTokens
 		base.TotalTokens = item.Usage.TotalTokens
-		projection.totalTokens = item.Usage.TotalTokens
-		if item.Usage.TotalTokens > 0 && projection.onUsage != nil && projection.policyErr == nil {
-			if err := projection.onUsage(int64(item.Usage.TotalTokens)); err != nil {
+		if projection.usageByResponse == nil {
+			projection.usageByResponse = make(map[string]usageTotals)
+		}
+		usageKey := item.Response.ID
+		if usageKey == "" {
+			usageKey = "<unknown-response>"
+		}
+		current := usageTotals{prompt: item.Usage.PromptTokens, completion: item.Usage.CompletionTokens}
+		previous := projection.usageByResponse[usageKey]
+		if current.prompt >= previous.prompt && current.completion >= previous.completion {
+			projection.promptTokens += current.prompt - previous.prompt
+			projection.completionTokens += current.completion - previous.completion
+			projection.usageByResponse[usageKey] = current
+		}
+		projection.totalTokens = projection.promptTokens + projection.completionTokens
+		if (item.Usage.PromptTokens > 0 || item.Usage.CompletionTokens > 0) && projection.onUsage != nil && projection.policyErr == nil {
+			if err := projection.onUsage(int64(projection.promptTokens), int64(projection.completionTokens)); err != nil {
 				projection.policyErr = err
 				if projection.cancel != nil {
 					projection.cancel()

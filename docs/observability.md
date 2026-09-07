@@ -42,7 +42,7 @@ header 只能使用标准 OpenTelemetry Secret 环境变量或 Secret 挂载，�
 `queue/domain/backend` 标签。user、session、request、message、trace ID 不进入标签。
 当前包括：
 
-- 请求量、操作延迟、模型首事件耗时和 token；`agent.cost` 已注册，但精确成本需等待版本化模型价格接入；
+- 请求量、操作延迟、模型首事件耗时、输入/输出 token 和按版本价格计算的 `agent.cost`；
 - IM 投递成功/失败；
 - 按租户的 Inbox、Outbox、DLQ 深度；
 - 活跃 Worker；

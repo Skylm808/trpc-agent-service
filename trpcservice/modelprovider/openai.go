@@ -2,6 +2,7 @@
 package modelprovider
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -33,7 +34,7 @@ func newOpenAICompatible(profile tenant.ModelProfile, transport http.RoundTrippe
 	if strings.TrimSpace(profile.Name) == "" {
 		return nil, errors.New("model provider: model name is required")
 	}
-	apiKey, err := secret.ResolveLocal(profile.APIKey)
+	apiKey, err := secret.Resolve(context.Background(), profile.APIKey)
 	if err != nil {
 		return nil, errors.New("model provider: resolve API credential failed")
 	}
