@@ -72,15 +72,15 @@ tenants:
 	now := time.Now().UTC()
 	store := &audit.SQLStore{DB: db}
 	for _, record := range []audit.Record{
-		{TenantID: tenantID, Decision: "allow", TraceID: "old", CreatedAt: now.Add(-48 * time.Hour)},
-		{TenantID: tenantID, Decision: "allow", TraceID: "new", CreatedAt: now.Add(-time.Hour)},
+		{TenantID: tenantID, Decision: "allow", TraceID: "old", ConfigVersion: 1, PolicyVersion: 1, CreatedAt: now.Add(-48 * time.Hour)},
+		{TenantID: tenantID, Decision: "allow", TraceID: "new", ConfigVersion: 1, PolicyVersion: 1, CreatedAt: now.Add(-time.Hour)},
 	} {
 		if err := store.Append(ctx, record); err != nil {
 			t.Fatal(err)
 		}
 	}
 	result := make(chan error, 1)
-	worker := &audit.RetentionWorker{Store: store, Policies: &audit.SQLPolicySource{DB: db}, Interval: time.Hour, Now: func() time.Time { return now }, OnResult: func(deleted int64, err error) {
+	worker := &audit.RetentionWorker{Store: store, Policies: &audit.SQLPolicySource{DB: db, TenantID: tenantID}, Interval: time.Hour, Now: func() time.Time { return now }, OnResult: func(deleted int64, err error) {
 		if err == nil && deleted != 1 {
 			err = fmt.Errorf("deleted=%d", deleted)
 		}
@@ -105,5 +105,9 @@ tenants:
 	var count int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_logs WHERE tenant_id=$1`, tenantID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("remaining=%d err=%v", count, err)
+	}
+	var configVersion, policyVersion uint64
+	if err := db.QueryRowContext(ctx, `SELECT config_version,policy_version FROM audit_logs WHERE tenant_id=$1`, tenantID).Scan(&configVersion, &policyVersion); err != nil || configVersion != 1 || policyVersion != 1 {
+		t.Fatalf("audit versions config=%d policy=%d err=%v", configVersion, policyVersion, err)
 	}
 }

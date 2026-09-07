@@ -213,7 +213,7 @@ command bus 只做低延迟通知。预算和工具审批同样使用 PostgreSQL
 | `memory_entries` | `tenant_id`, `app_id`, `user_id`, `memory_id`, `source_event_id`, `version`, `content` | 稳定 memory ID；按来源 event 幂等写入 |
 | `inbox_messages` | `tenant_id`, `binding_id`, `external_message_id`, `inbox_seq`, `status`, `attempts` | 吸收 IM 重投并保存恢复状态 |
 | `outbox_messages` | `tenant_id`, `outbox_id`, `dedupe_key`, `binding_id`, `status`, `retry_at` | 回复可靠投递、去重、重试和 DLQ |
-| `audit_logs` | `tenant_id`, `channel`, `user_id`, `session_id`, `agent_name`, `tool_name`, `decision`, `latency_ms`, `error_type`, `cost`, `trace_id` | 记录治理决定、调用结果、成本和链路关联 |
+| `audit_logs` | `tenant_id`, `channel`, `user_id`, `session_id`, `agent_name`, `tool_name`, `decision`, `latency_ms`, `error_type`, `cost_micros`, `config_version`, `policy_version`, `trace_id` | 记录治理决定、调用结果、成本和版本链路 |
 | `run_statuses` / `worker_nodes` | request 状态、cancel intent、worker、heartbeat、draining | 跨节点控制与节点失联观测 |
 | `policy_budget_*` / `tool_approvals` | period、request、reserved/actual cost、tool | 原子共享预算与人工审批 |
 
@@ -257,7 +257,7 @@ Session 的事实来源选择 PostgreSQL，Redis 负责 lease、fencing 和热�
 
 Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行时再次应用白名单、危险工具审批和权限校验，最终回复经过脱敏后才能写 Outbox。审计记录 tenant、channel、user、session、agent、tool、decision、latency、error type、cost 和 trace ID。审计后端超时时，当前策略固定为业务 fail-open 并产生失败指标；尚未提供租户级 fail-closed 开关，强监管场景需要补充该配置后才能使用。
 
-监控覆盖请求量与错误率、模型首 token/总耗时、Tool 调用耗时、IM 回调与投递成功率、token 用量、Session/Memory 后端延迟、Inbox/Outbox/DLQ 积压和 Worker/数据库健康。`agent.cost` 按配置版本中固定的输入/输出价格和 provider usage 计算，并与月度预算核销。Metrics 只使用 tenant、app、channel、operation、status 等受控标签；user、session 和 message 不进入遥测，request/correlation ID 在 trace 中只记录不可逆短 hash，避免时序库基数失控和调用者借标识注入正文或 Secret。原始关联仅保留在受权限保护、按租户隔离的业务表和 audit 中。指标与审计字段见[治理、审计与可观测性](governance.md)。
+监控覆盖请求量与错误率、模型首 token/总耗时、Tool 调用耗时、IM 回调与投递成功率、token 用量、Session/Memory 后端延迟、Inbox/Outbox/DLQ 积压和 Worker/数据库健康。`agent.cost.micros` 按配置版本中固定的输入/输出价格和 provider usage 计算，并与月度预算核销；`agent.model.usage_missing` 监测无法精确核销的模型响应。Metrics 只使用 tenant、app、channel、operation、status 等受控标签；user、session 和 message 不进入遥测，request/correlation ID 在 trace 中只记录不可逆短 hash，避免时序库基数失控和调用者借标识注入正文或 Secret。原始关联仅保留在受权限保护、按租户隔离的业务表和 audit 中。指标与审计字段见[治理、审计与可观测性](governance.md)。
 
 节点收到取消或超时时调用 `ManagedRunner.Cancel(request_id)`，然后在有界时间内排空事件 channel。Tool 必须接受 `context.Context`，外部副作用使用业务幂等键，不能靠 goroutine 脱离请求继续执行。模型超时、数据库短暂不可用和 Outbox 投递失败进入分类重试；不可重试错误写入 DLQ，并保留原始 request/trace 关联。
 

@@ -171,7 +171,7 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 		}
 		processor.Telemetry.Request(ctx, servicemetrics.Labels{TenantID: request.TenantID, AppID: request.AppID, Channel: request.BindingID, Operation: "runner", Status: decision}, time.Since(started), tokens, costMicros)
 		if auditEnabled && processor.Audit != nil {
-			record := audit.Record{TenantID: request.TenantID, Channel: request.BindingID, UserID: request.UserID, SessionID: request.SessionID, AgentName: request.AppID, ToolName: toolName, Decision: decision, Latency: time.Since(started), ErrorType: errorType, CostMicros: costMicros, TraceID: request.TraceID, RequestID: request.InboxID, Details: details}
+			record := audit.Record{TenantID: request.TenantID, Channel: request.BindingID, UserID: request.UserID, SessionID: request.SessionID, AgentName: request.AppID, ToolName: toolName, Decision: decision, Latency: time.Since(started), ErrorType: errorType, CostMicros: costMicros, ConfigVersion: request.ConfigVersion, PolicyVersion: request.ConfigVersion, TraceID: request.TraceID, RequestID: request.InboxID, Details: details}
 			record.Channel = tenantRedactor.RedactField("channel", record.Channel)
 			record.UserID = tenantRedactor.RedactField("user_id", record.UserID)
 			record.SessionID = tenantRedactor.RedactField("session_id", record.SessionID)
@@ -182,6 +182,9 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 			if auditErr != nil {
 				processor.Telemetry.Request(ctx, servicemetrics.Labels{TenantID: request.TenantID, AppID: request.AppID, Channel: request.BindingID, Operation: "audit", Status: "failed"}, 0, 0, 0)
 			}
+		}
+		if projection != nil && projection.pricingVersion != "" && !projection.usageObserved {
+			processor.Telemetry.ModelUsageMissing(ctx, servicemetrics.Labels{TenantID: request.TenantID, AppID: request.AppID, Channel: request.BindingID, Operation: "model", Status: "missing"})
 		}
 	}()
 	defer func() {

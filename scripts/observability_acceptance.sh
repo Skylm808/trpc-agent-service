@@ -34,7 +34,7 @@ trap 'rm -rf "$work_dir"' EXIT
 
 DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-structural-placeholder}" "${compose[@]}" config --quiet
 
-for alert in AgentHighErrorRate AgentDLQNotEmpty AgentQueueBacklogGrowing AgentNoLiveWorker AgentPostgreSQLUnavailable; do
+for alert in AgentHighErrorRate AgentDLQNotEmpty AgentQueueBacklogGrowing AgentNoLiveWorker AgentPostgreSQLUnavailable AgentModelUsageMissing; do
   contains_fixed "alert: $alert" "$repo_root/deploy/prometheus-alerts.yml" || {
     echo "ERROR missing required alert: $alert" >&2
     exit 1
@@ -42,7 +42,7 @@ for alert in AgentHighErrorRate AgentDLQNotEmpty AgentQueueBacklogGrowing AgentN
 done
 contains_fixed 'exporters: [otlp/tempo]' "$repo_root/deploy/otel-collector.yaml"
 contains_fixed 'uid: tempo' "$repo_root/deploy/grafana/provisioning/datasources/tempo.yml"
-echo "PASS Compose, Tempo exporter, Grafana datasource, and five production alerts are structurally present"
+echo "PASS Compose, Tempo exporter, Grafana datasource, and six production alerts are structurally present"
 
 if [[ "${TRPC_AGENT_OBSERVABILITY_ACCEPTANCE_LIVE:-0}" != "1" ]]; then
   echo "Observability structural acceptance passed (set TRPC_AGENT_OBSERVABILITY_ACCEPTANCE_LIVE=1 for live checks)"
@@ -65,7 +65,7 @@ curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 2 
 curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 2 --max-time 5 http://127.0.0.1:3000/api/health >"$work_dir/grafana-health.json"
 jq -e '.database == "ok"' "$work_dir/grafana-health.json" >/dev/null
 curl --fail --silent --show-error --max-time 5 http://127.0.0.1:9090/api/v1/rules >"$work_dir/rules.json"
-for alert in AgentHighErrorRate AgentDLQNotEmpty AgentQueueBacklogGrowing AgentNoLiveWorker AgentPostgreSQLUnavailable; do
+for alert in AgentHighErrorRate AgentDLQNotEmpty AgentQueueBacklogGrowing AgentNoLiveWorker AgentPostgreSQLUnavailable AgentModelUsageMissing; do
   jq -e --arg alert "$alert" '[.data.groups[].rules[] | select(.name == $alert)] | length == 1' "$work_dir/rules.json" >/dev/null
 done
 curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3000/api/datasources/uid/tempo >"$work_dir/tempo-datasource.json"

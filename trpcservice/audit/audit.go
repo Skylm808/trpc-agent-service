@@ -17,6 +17,7 @@ type Record struct {
 	TenantID, Channel, UserID, SessionID, AgentName, ToolName, Decision, ErrorType, TraceID, RequestID, EventID string
 	Latency                                                                                                     time.Duration
 	CostMicros                                                                                                  int64
+	ConfigVersion, PolicyVersion                                                                                tenant.ConfigVersion
 	Details                                                                                                     map[string]any
 	CreatedAt                                                                                                   time.Time
 }
@@ -118,7 +119,7 @@ func (store *SQLStore) Append(ctx context.Context, record Record) error {
 	if created.IsZero() {
 		created = store.now().UTC()
 	}
-	_, err = store.DB.ExecContext(ctx, `INSERT INTO audit_logs (tenant_id,audit_id,channel,user_id,session_id,agent_name,tool_name,decision,latency_ms,error_type,cost_micros,trace_id,request_id,event_id,details_json,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`, record.TenantID, auditID(record, created), record.Channel, record.UserID, record.SessionID, record.AgentName, record.ToolName, record.Decision, record.Latency.Milliseconds(), redactor.RedactString(record.ErrorType), record.CostMicros, record.TraceID, record.RequestID, record.EventID, payload, created)
+	_, err = store.DB.ExecContext(ctx, `INSERT INTO audit_logs (tenant_id,audit_id,channel,user_id,session_id,agent_name,tool_name,decision,latency_ms,error_type,cost_micros,config_version,policy_version,trace_id,request_id,event_id,details_json,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`, record.TenantID, auditID(record, created), record.Channel, record.UserID, record.SessionID, record.AgentName, record.ToolName, record.Decision, record.Latency.Milliseconds(), redactor.RedactString(record.ErrorType), record.CostMicros, record.ConfigVersion, record.PolicyVersion, record.TraceID, record.RequestID, record.EventID, payload, created)
 	return err
 }
 func (store *SQLStore) Prune(ctx context.Context, tenantID string, before time.Time) (int64, error) {

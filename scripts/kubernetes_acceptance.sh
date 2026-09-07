@@ -111,6 +111,10 @@ kubectl -n "$namespace" delete job trpc-agent-migrate --ignore-not-found --wait=
 kubectl apply -k "$repo_root/deploy/kubernetes/demo/migration" >/dev/null
 kubectl -n "$namespace" wait --for=condition=complete job/trpc-agent-migrate --timeout=5m >/dev/null
 kubectl apply -k "$repo_root/deploy/kubernetes/demo/app" >/dev/null
+# ConfigMap updates do not change the Deployment pod template hash. Restart the
+# two stateless roles explicitly so repeatable acceptance runs always exercise
+# the rendered configuration that was just applied.
+kubectl -n "$namespace" rollout restart deployment/trpc-agent-gateway deployment/trpc-agent-worker >/dev/null
 kubectl -n "$namespace" rollout status deployment/trpc-agent-gateway --timeout=5m >/dev/null
 kubectl -n "$namespace" rollout status deployment/trpc-agent-worker --timeout=5m >/dev/null
 

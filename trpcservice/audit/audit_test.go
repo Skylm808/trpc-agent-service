@@ -37,6 +37,18 @@ func TestAuditTenantScopeAndSecretRedaction(t *testing.T) {
 	}
 }
 
+func TestAuditPreservesConfigAndPolicyVersions(t *testing.T) {
+	store := NewMemoryStore(nil)
+	record := Record{TenantID: "tenant", Decision: "allow", TraceID: "trace", ConfigVersion: 7, PolicyVersion: 7}
+	if err := store.Append(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	records := store.Records("tenant")
+	if len(records) != 1 || records[0].ConfigVersion != 7 || records[0].PolicyVersion != 7 {
+		t.Fatalf("audit versions=%+v", records)
+	}
+}
+
 func TestAuditRetentionIsTenantScoped(t *testing.T) {
 	store := NewMemoryStore(nil)
 	now := time.Now().UTC()

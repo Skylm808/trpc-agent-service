@@ -27,13 +27,22 @@ type cycleLocker interface {
 }
 
 // SQLPolicySource resolves policy only from current immutable publications.
-type SQLPolicySource struct{ DB *sql.DB }
+type SQLPolicySource struct {
+	DB       *sql.DB
+	TenantID string
+}
 
 func (source *SQLPolicySource) ListAuditPolicies(ctx context.Context) ([]TenantPolicy, error) {
 	if source == nil || source.DB == nil {
 		return nil, errors.New("audit: policy database is required")
 	}
-	rows, err := source.DB.QueryContext(ctx, `SELECT t.tenant_id,cv.config_yaml FROM tenants t JOIN config_versions cv ON cv.tenant_id=t.tenant_id AND cv.version=t.current_config_version WHERE t.enabled`)
+	query := `SELECT t.tenant_id,cv.config_yaml FROM tenants t JOIN config_versions cv ON cv.tenant_id=t.tenant_id AND cv.version=t.current_config_version WHERE t.enabled`
+	var args []any
+	if source.TenantID != "" {
+		query += ` AND t.tenant_id=$1`
+		args = append(args, source.TenantID)
+	}
+	rows, err := source.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

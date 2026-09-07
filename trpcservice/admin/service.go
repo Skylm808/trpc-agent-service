@@ -373,7 +373,7 @@ func (service *Service) recordDecision(ctx context.Context, tenantID, action str
 	defer cancel()
 	_ = service.audit.Append(auditCtx, audit.Record{
 		TenantID: tenantID, AgentName: action, Decision: decision, Latency: service.now().Sub(started),
-		ErrorType: errorType, TraceID: traceID, RequestID: traceID, Details: details,
+		ErrorType: errorType, ConfigVersion: newVersion, PolicyVersion: newVersion, TraceID: traceID, RequestID: traceID, Details: details,
 	})
 }
 

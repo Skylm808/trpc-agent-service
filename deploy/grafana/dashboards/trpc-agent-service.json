@@ -34,7 +34,7 @@
       "id": 4,
       "targets": [
         {"expr": "sum by (tenant_id) (rate(agent_tokens_total[5m]))", "legendFormat": "tokens {{tenant_id}}"},
-        {"expr": "sum by (tenant_id) (rate(agent_cost_us_total[5m]))", "legendFormat": "cost {{tenant_id}}"}
+        {"expr": "sum by (tenant_id) (rate(agent_cost_micros_total[5m]))", "legendFormat": "cost {{tenant_id}}"}
       ],
       "title": "Tenant tokens and cost",
       "type": "timeseries"

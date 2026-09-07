@@ -20,7 +20,7 @@
 | Compose 渲染与 Prometheus rule 校验 | PASS / FAIL | `<rule count>` |
 | Tempo OTLP exporter 与持久卷 | PASS / FAIL | `<health only>` |
 | Grafana Tempo 数据源 | PASS / FAIL | `<datasource uid only>` |
-| 错误率 / DLQ / 积压 / 无 Worker / PostgreSQL 告警 | PASS / FAIL | `<alert names only>` |
+| 错误率 / DLQ / 积压 / 无 Worker / PostgreSQL / usage 缺失告警 | PASS / FAIL | `<alert names only>` |
 | `traceparent` 跨 Inbox 和 Outbox 持久化 | PASS / FAIL | `<span names only>` |
 | Baggage / tracestate / 正文 / Secret canary 不进入遥测 | PASS / FAIL | `<absent=true>` |
 

@@ -52,3 +52,12 @@ groups:
         annotations:
           summary: Agent platform PostgreSQL health check is failing
           description: Check the database service and connection pool; never place DSNs or passwords in alert annotations.
+
+      - alert: AgentModelUsageMissing
+        expr: sum(rate(agent_model_usage_missing_total[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Model responses are missing token usage
+          description: Cost remains conservatively reserved; inspect the provider integration without attaching prompts, responses, or credentials.

@@ -24,6 +24,10 @@ data:
               api_key: {provider: env, key: DEEPSEEK_API_KEY}
               temperature: 0
               max_tokens: 64
+              pricing:
+                version: demo-price-v1
+                input_micros_per_million: 1000000
+                output_micros_per_million: 2000000
             tools:
               allow: [calculator]
               deny: [shell]

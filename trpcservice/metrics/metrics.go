@@ -66,17 +66,18 @@ func identifierHash(value string) string {
 }
 
 type Telemetry struct {
-	tracer     trace.Tracer
-	propagator propagation.TextMapPropagator
-	requests   metric.Int64Counter
-	duration   metric.Float64Histogram
-	firstToken metric.Float64Histogram
-	tokens     metric.Int64Counter
-	cost       metric.Int64Counter
-	delivery   metric.Int64Counter
-	backlog    metric.Int64Histogram
-	storage    metric.Float64Histogram
-	storageErr metric.Int64Counter
+	tracer       trace.Tracer
+	propagator   propagation.TextMapPropagator
+	requests     metric.Int64Counter
+	duration     metric.Float64Histogram
+	firstToken   metric.Float64Histogram
+	tokens       metric.Int64Counter
+	cost         metric.Int64Counter
+	usageMissing metric.Int64Counter
+	delivery     metric.Int64Counter
+	backlog      metric.Int64Histogram
+	storage      metric.Float64Histogram
+	storageErr   metric.Int64Counter
 }
 
 func New(name string) (*Telemetry, error) {
@@ -100,7 +101,11 @@ func New(name string) (*Telemetry, error) {
 	if err != nil {
 		return nil, err
 	}
-	cost, err := meter.Int64Counter("agent.cost", metric.WithUnit("{microcurrency}"), metric.WithDescription("Tenant model cost in micro currency units"))
+	cost, err := meter.Int64Counter("agent.cost.micros", metric.WithDescription("Tenant model cost in micro currency units"))
+	if err != nil {
+		return nil, err
+	}
+	usageMissing, err := meter.Int64Counter("agent.model.usage_missing", metric.WithDescription("Model responses missing provider token usage"))
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +129,7 @@ func New(name string) (*Telemetry, error) {
 	// intentionally excluded because callers control it and it may contain
 	// credentials or message content that must never reach a trace backend.
 	propagator := propagation.TraceContext{}
-	return &Telemetry{tracer: otel.Tracer(name), propagator: propagator, requests: requests, duration: duration, firstToken: firstToken, tokens: tokens, cost: cost, delivery: delivery, backlog: backlog, storage: storage, storageErr: storageErr}, nil
+	return &Telemetry{tracer: otel.Tracer(name), propagator: propagator, requests: requests, duration: duration, firstToken: firstToken, tokens: tokens, cost: cost, usageMissing: usageMissing, delivery: delivery, backlog: backlog, storage: storage, storageErr: storageErr}, nil
 }
 
 // StorageOperation records a real Session or Memory adapter call. The caller
@@ -147,6 +152,13 @@ func (telemetry *Telemetry) ModelFirstToken(ctx context.Context, labels Labels, 
 		return
 	}
 	telemetry.firstToken.Record(ctx, float64(duration.Microseconds())/1000, metric.WithAttributes(labels.attributes()...))
+}
+
+func (telemetry *Telemetry) ModelUsageMissing(ctx context.Context, labels Labels) {
+	if telemetry == nil {
+		return
+	}
+	telemetry.usageMissing.Add(ctx, 1, metric.WithAttributes(labels.attributes()...))
 }
 func (telemetry *Telemetry) Start(ctx context.Context, name string, fields SpanFields) (context.Context, trace.Span) {
 	if telemetry == nil {

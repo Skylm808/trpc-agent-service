@@ -125,6 +125,7 @@ Admin API 是平台控制面，用于租户配置的预览、发布、回滚，�
 ## 文档
 
 - [架构设计](docs/architecture.md)：组件职责、路由、隔离、一致性与容量设计
+- [需求验收矩阵](docs/acceptance-matrix.md)：题目要求对应的代码、测试与验收证据
 - [部署指南](docs/deployment.md)：Compose、生产参数和运维操作
 - [数据模型](docs/data-model.md)：核心表和租户键
 - [数据同步与幂等](docs/message-runtime.md)：顺序、幂等、lease 与 fencing

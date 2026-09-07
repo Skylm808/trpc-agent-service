@@ -45,7 +45,8 @@ Worker。两个列表都为空时兼容现有绑定并允许全部；`allowed_us
 | `agent.model.first_token.duration` | tenant, app, channel, operation, status | 模型首事件耗时 |
 | `agent.im.delivery` | tenant, app, channel, status | IM 投递成功率和平台限流结果 |
 | `agent.tokens` | tenant, app, operation, status | 已接入的 token 消耗与预算核对 |
-| `agent.cost` | tenant, app, operation, status | 按 provider usage 和请求固定的价格版本记录实际微成本 |
+| `agent.cost.micros` | tenant, app, operation, status | 按 provider usage 和请求固定的价格版本记录实际微成本 |
+| `agent.model.usage_missing` | tenant, app, channel, operation, status | Provider 未返回 usage；继续保留成本预留并触发告警 |
 | `agent.storage.operation.duration`, `agent.storage.operation.errors` | tenant, app, domain, backend, operation, status | 真实 Session/Memory Adapter 调用延迟和错误率 |
 | `agent.queue.depth`, `agent.outbox.backlog` | tenant, queue, status | Inbox/Outbox/DLQ 排队与故障恢复状态 |
 | `agent.worker.live`, `agent.storage.health`, `agent.storage.healthcheck.duration` | domain, backend, operation, status | Worker 存活与平台 PostgreSQL 健康检查 |
@@ -54,4 +55,4 @@ Worker。两个列表都为空时兼容现有绑定并允许全部；`allowed_us
 
 ## 审计字段
 
-每条审计记录包含 `tenant_id`、`channel`、`user_id`、`session_id`、`agent_name`、`tool_name`、`decision`、`latency_ms`、`error_type`、`cost_micros` 和 `trace_id`，并保留 `request_id`、`event_id` 与脱敏后的 `details_json`。价格版本和成本依据保存在脱敏 details 中；`config_version` 和 `policy_version` 仍需补充到审计表。密钥、Authorization header、Cookie、模型原始请求及未获授权的消息正文不得写入日志、trace 或错误报告。
+每条审计记录包含 `tenant_id`、`channel`、`user_id`、`session_id`、`agent_name`、`tool_name`、`decision`、`latency_ms`、`error_type`、`cost_micros`、`config_version`、`policy_version` 和 `trace_id`，并保留 `request_id`、`event_id` 与脱敏后的 `details_json`。Worker 的策略版本与入站固定的配置版本一致；价格版本和成本依据保存在脱敏 details 中。密钥、Authorization header、Cookie、模型原始请求及未获授权的消息正文不得写入日志、trace 或错误报告。
