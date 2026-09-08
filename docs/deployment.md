@@ -139,7 +139,7 @@ Adapter 注入可信 tenant/App scope。Audit 主存储仍是 PostgreSQL，可�
 
 生产 MCP Registry 与固定 HTTPS JSON 业务工具已接入。Admin validate/publish 和进程启动会对启用的 MCP 服务执行 Initialize/ListTools；运行中发布新版本时，新 Bundle 建立独立连接，旧 Bundle 引用归零后关闭旧连接。MCP 与业务工具凭据只通过 SecretRef 注入，部署环境需提供对应 secret；配置与网络边界见 [生产 MCP 与业务工具](mcp-tools.md)。
 
-迁移不能直接修改 endpoint。先发布带 `migration_target` 的双写配置，再调用受认证的 migration API backfill；任务 completed 后才发布下一版本完成 cutover。旧源库保留只读回滚窗口，不会自动清理。命令与故障恢复步骤见 [Storage Router 与迁移](storage-migrations.md)。
+迁移不能直接修改 endpoint。先发布带 `migration_target` 的双写配置，再调用受认证的 migration API backfill；任务 completed 后才发布下一版本完成 cutover。Runner Session 支持 Redis ↔ PostgreSQL 双向 backfill，并校验 state/event/track/summary 完整快照。旧源库保留只读回滚窗口，不会自动清理。命令与故障恢复步骤见 [Storage Router 与迁移](storage-migrations.md)。
 
 ## Kubernetes、容量和验收
 

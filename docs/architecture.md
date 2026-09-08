@@ -252,7 +252,7 @@ Adapter 可以替换实现，但不能削弱这些语义。某个后端无法提
 
 默认选择 PostgreSQL Runner Session；低延迟租户可选择 Redis Session，但必须配置独立 namespace、同步写、AOF 和多副本。平台 Event/state/fencing 始终保留在 PostgreSQL，因此 Redis 故障不会破坏 Inbox、提交顺序或已发送记录；当前版本尚未自动用平台 Event 重建丢失的 Redis 对话历史，启用方必须把这项恢复复杂度纳入取舍。Knowledge 与 Artifact 不进入主事务：event 提交后创建派生任务，异步更新向量索引或对象元数据。
 
-后端迁移采用 `dual write -> snapshot/backfill -> verify -> cutover -> rollback window`。先发布带 `migration_target` 的配置版本，新 Bundle 从主库读取并同步双写目标；再通过 Admin API 创建租户/App/domain 任务。多个 Migration Worker 使用 PostgreSQL claim lease 和 `SKIP LOCKED` 分批处理，checkpoint 可恢复。任务完成后，下一次配置发布才能把目标提升为主路由。copier 覆盖 PostgreSQL Session/Summary/Memory/Artifact、PostgreSQL ↔ S3 Artifact 和 PGVector ↔ Qdrant Knowledge；Artifact/Knowledge 通过安全目录和 checksum 校验，任何冲突都阻止 cutover。
+后端迁移采用 `dual write -> snapshot/backfill -> verify -> cutover -> rollback window`。先发布带 `migration_target` 的配置版本，新 Bundle 从主库读取并同步双写目标；再通过 Admin API 创建租户/App/domain 任务。多个 Migration Worker 使用 PostgreSQL claim lease 和 `SKIP LOCKED` 分批处理，checkpoint 可恢复。任务完成后，下一次配置发布才能把目标提升为主路由。copier 覆盖 Redis ↔ PostgreSQL Runner Session/State/Event/Track/Summary、PostgreSQL Memory、PostgreSQL ↔ S3 Artifact 和 PGVector ↔ Qdrant Knowledge；各域通过可信目录和 checksum 校验，任何冲突都阻止 cutover。
 
 ## 7. 治理、可观测性与故障处理
 

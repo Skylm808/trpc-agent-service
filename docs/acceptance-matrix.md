@@ -28,7 +28,7 @@
 | Event → state → summary/memory 顺序 | 已实现 | 原子写入和派生幂等键；`TestAtomicIdempotencySummaryAndMemory` |
 | Memory 跨节点可见 | 已实现 | PostgreSQL 或外部 Memory；双租户双 Worker E2E 和 External Memory 测试 |
 | 后端迁移 | 已实现最小闭环 | checkpoint、lease、checksum、双写、verify、cutover；Migration Worker 测试 |
-| PGVector ↔ Qdrant、S3 → PostgreSQL | 已实现最小闭环 | Admin Migration Job、迁移 catalog；PR23 路由测试 |
+| Redis ↔ PostgreSQL Session、PGVector ↔ Qdrant、S3 ↔ PostgreSQL | 已实现最小闭环 | Admin Migration Job、迁移 catalog；临时 PG/Redis 双向集成测试 |
 | IM 重投幂等 | 已实现 | 租户/绑定/外部消息唯一 Inbox；`TestConcurrentDuplicatesHaveOneWinner` |
 | 一致性取舍和最小表结构 | 已完成 | `docs/architecture.md`、`docs/storage-migrations.md`、`migrations/*.sql` |
 

@@ -108,6 +108,15 @@ func TestStorageCutoverRequiresCompletedMatchingMigration(t *testing.T) {
 	}
 }
 
+func TestStorageRouteIdentityIncludesNamespace(t *testing.T) {
+	left := tenant.BackendConfig{Type: tenant.BackendRedis, Endpoint: "redis://redis:6379/0", Namespace: "tenant-a"}
+	right := left.Clone()
+	right.Namespace = "tenant-b"
+	if samePrimaryRoute(left, right) {
+		t.Fatal("different Redis namespaces were treated as the same cutover route")
+	}
+}
+
 func TestServicePublishIsolationAndRollback(t *testing.T) {
 	service, err := NewService(repository.NewMemoryStore())
 	if err != nil {

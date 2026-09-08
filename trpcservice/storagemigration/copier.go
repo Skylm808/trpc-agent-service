@@ -15,7 +15,9 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
+	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
 // Copier advances one bounded backfill batch.
@@ -48,6 +50,9 @@ func (copier *PostgresCopier) Step(ctx context.Context, job Job, batchSize int) 
 	appName, err := tenant.CanonicalAppName(job.TenantID, job.AppID)
 	if err != nil {
 		return Progress{}, err
+	}
+	if job.Domain == DomainSession && (job.Source.Type == tenant.BackendRedis || job.Target.Type == tenant.BackendRedis) {
+		return copier.stepRoutedSession(ctx, job, appName, batchSize)
 	}
 	if job.Domain == DomainArtifact && job.Source.Type == tenant.BackendPostgres && job.Target.Type == tenant.BackendS3 {
 		return copier.stepArtifactToS3(ctx, job, appName, batchSize)
@@ -122,6 +127,397 @@ func (copier *PostgresCopier) Step(ctx context.Context, job Job, batchSize int) 
 		return Progress{}, errors.New("storage migration: copied row count is below source snapshot")
 	}
 	return progress, nil
+}
+
+type sessionCheckpoint struct {
+	Cursor string `json:"cursor,omitempty"`
+}
+
+type sessionKeyRow struct {
+	cursor string
+	key    session.Key
+}
+
+type portableSession struct {
+	State     session.StateMap                       `json:"state"`
+	Events    []event.Event                          `json:"events"`
+	Tracks    map[session.Track]*session.TrackEvents `json:"tracks,omitempty"`
+	Summaries map[string]*session.Summary            `json:"summaries,omitempty"`
+}
+
+func (copier *PostgresCopier) stepRoutedSession(ctx context.Context, job Job, appName string, batchSize int) (Progress, error) {
+	ledger := copier.Router.MigrationLedgerDB()
+	if ledger == nil {
+		return Progress{}, errors.New("storage migration: session catalog unavailable")
+	}
+	var mark sessionCheckpoint
+	if len(job.Checkpoint) > 0 && json.Unmarshal(job.Checkpoint, &mark) != nil {
+		return Progress{}, errors.New("storage migration: invalid session checkpoint")
+	}
+	progress := Progress{SourceRows: job.SourceRows, CopiedRows: job.CopiedRows}
+	if progress.SourceRows == 0 {
+		if err := ledger.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_heads WHERE tenant_id=$1 AND app_id=$2`, job.TenantID, job.AppID).Scan(&progress.SourceRows); err != nil {
+			return Progress{}, errors.New("storage migration: count session catalog failed")
+		}
+	}
+	rows, err := selectSessionKeyBatch(ctx, ledger, job.TenantID, job.AppID, appName, mark.Cursor, batchSize)
+	if err != nil {
+		return Progress{}, err
+	}
+	if len(rows) == 0 {
+		progress.Done = true
+		progress.Checkpoint, _ = json.Marshal(mark)
+		if progress.CopiedRows < progress.SourceRows {
+			return Progress{}, errors.New("storage migration: copied session count is below source catalog")
+		}
+		return progress, nil
+	}
+	source, err := copier.Router.SessionForRoute(ctx, job.TenantID, job.AppID, job.Source)
+	if err != nil {
+		return Progress{}, errors.New("storage migration: source session backend unavailable")
+	}
+	defer source.Close()
+	target, err := copier.Router.SessionForRoute(ctx, job.TenantID, job.AppID, job.Target)
+	if err != nil {
+		return Progress{}, errors.New("storage migration: target session backend unavailable")
+	}
+	defer target.Close()
+	for _, row := range rows {
+		copied, err := copier.copySessionSnapshot(ctx, ledger, job, source, target, row.key)
+		if err != nil {
+			return Progress{}, err
+		}
+		if copied {
+			progress.CopiedRows++
+		}
+		mark.Cursor = row.cursor
+	}
+	progress.Checkpoint, _ = json.Marshal(mark)
+	return progress, nil
+}
+
+func selectSessionKeyBatch(ctx context.Context, db *sql.DB, tenantID, appID, appName, cursor string, limit int) ([]sessionKeyRow, error) {
+	rows, err := db.QueryContext(ctx, `SELECT jsonb_build_array(user_id,session_id)::text,user_id,session_id
+		FROM session_heads WHERE tenant_id=$1 AND app_id=$2
+		AND jsonb_build_array(user_id,session_id)::text>$3
+		ORDER BY jsonb_build_array(user_id,session_id)::text LIMIT $4`, tenantID, appID, cursor, limit)
+	if err != nil {
+		return nil, errors.New("storage migration: list session catalog failed")
+	}
+	defer rows.Close()
+	var result []sessionKeyRow
+	for rows.Next() {
+		var row sessionKeyRow
+		row.key.AppName = appName
+		if err := rows.Scan(&row.cursor, &row.key.UserID, &row.key.SessionID); err != nil {
+			return nil, errors.New("storage migration: decode session catalog failed")
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("storage migration: read session catalog failed")
+	}
+	return result, nil
+}
+
+func (copier *PostgresCopier) copySessionSnapshot(ctx context.Context, ledger *sql.DB, job Job, source, target session.Service, key session.Key) (bool, error) {
+	current, err := source.GetSession(ctx, key, session.WithEventNum(1<<30))
+	if err != nil || current == nil {
+		return false, errors.New("storage migration: source session is unavailable")
+	}
+	snapshot, checksum, err := sessionSnapshot(current)
+	if err != nil {
+		return false, err
+	}
+	sourceKey := sessionSourceKey(key)
+	var stored string
+	err = ledger.QueryRowContext(ctx, `SELECT checksum FROM storage_migration_items WHERE source_route_hash=$1 AND table_name='runtime_session_snapshot' AND source_key=$2`, job.SourceRouteHash, sourceKey).Scan(&stored)
+	if err == nil {
+		if stored != checksum {
+			return false, errors.New("storage migration: source session changed after checkpoint")
+		}
+		if err := verifySessionSnapshot(ctx, target, key, snapshot, checksum); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, errors.New("storage migration: read session ledger failed")
+	}
+	existing, err := target.GetSession(ctx, key, session.WithEventNum(1<<30))
+	if err != nil {
+		return false, errors.New("storage migration: inspect target session failed")
+	}
+	if existing == nil {
+		if err := importSessionSnapshot(ctx, target, job.Target.Type, key, snapshot); err != nil {
+			return false, err
+		}
+	} else {
+		existingSnapshot, _, err := sessionSnapshot(existing)
+		if err != nil {
+			return false, errors.New("storage migration: inspect target session failed")
+		}
+		if sessionCoreChecksum(existingSnapshot) != sessionCoreChecksum(snapshot) {
+			if err := reconcileSessionSnapshot(ctx, target, job.Target.Type, existing, snapshot); err != nil {
+				return false, err
+			}
+		}
+	}
+	if err := copier.Router.ImportSessionSummaries(ctx, job.TenantID, job.AppID, job.Target, key, snapshot.Summaries); err != nil {
+		return false, fmt.Errorf("storage migration: import session summaries failed: %w", err)
+	}
+	if err := verifySessionSnapshot(ctx, target, key, snapshot, checksum); err != nil {
+		return false, err
+	}
+	latest, err := source.GetSession(ctx, key, session.WithEventNum(1<<30))
+	if err != nil || latest == nil {
+		return false, errors.New("storage migration: source session changed during copy")
+	}
+	_, latestChecksum, err := sessionSnapshot(latest)
+	if err != nil || latestChecksum != checksum {
+		return false, errors.New("storage migration: source session changed during copy")
+	}
+	if _, err := ledger.ExecContext(ctx, `INSERT INTO storage_migration_items (source_route_hash,table_name,source_key,checksum) VALUES ($1,'runtime_session_snapshot',$2,$3) ON CONFLICT DO NOTHING`, job.SourceRouteHash, sourceKey, checksum); err != nil {
+		return false, errors.New("storage migration: save session ledger failed")
+	}
+	return true, nil
+}
+
+// sessionCoreChecksum excludes summaries because normal dual-write keeps the
+// session/state/event stream current while summary snapshots are backfilled by
+// this migration. The full checksum is still required after summary import.
+func sessionCoreChecksum(value portableSession) string {
+	value.Summaries = nil
+	payload, _ := json.Marshal(value)
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
+}
+
+func importSessionSnapshot(ctx context.Context, target session.Service, targetType tenant.BackendType, key session.Key, snapshot portableSession) error {
+	created, err := target.CreateSession(ctx, key, nil)
+	if err != nil {
+		return errors.New("storage migration: create target session failed")
+	}
+	for index := range snapshot.Events {
+		if err := target.AppendEvent(ctx, created, &snapshot.Events[index]); err != nil {
+			return errors.New("storage migration: append target session event failed")
+		}
+	}
+	if len(snapshot.Tracks) > 0 {
+		trackTarget, ok := target.(session.TrackService)
+		if !ok {
+			return errors.New("storage migration: target session tracks are unsupported")
+		}
+		for _, history := range snapshot.Tracks {
+			if history == nil {
+				continue
+			}
+			for index := range history.Events {
+				item := history.Events[index]
+				if err := trackTarget.AppendTrackEvent(ctx, created, &item); err != nil {
+					return errors.New("storage migration: append target track event failed")
+				}
+			}
+		}
+	}
+	return applySessionState(ctx, target, targetType, key, snapshot.State)
+}
+
+func reconcileSessionSnapshot(ctx context.Context, target session.Service, targetType tenant.BackendType, current *session.Session, snapshot portableSession) error {
+	existing, _, err := sessionSnapshot(current)
+	if err != nil || !stateIsSubset(existing.State, snapshot.State) || !eventsArePrefix(existing.Events, snapshot.Events) || !tracksArePrefix(existing.Tracks, snapshot.Tracks) {
+		return errors.New("storage migration: destination session conflicts with source")
+	}
+	for index := len(existing.Events); index < len(snapshot.Events); index++ {
+		if err := target.AppendEvent(ctx, current, &snapshot.Events[index]); err != nil {
+			return errors.New("storage migration: repair target session event failed")
+		}
+	}
+	if len(snapshot.Tracks) > 0 {
+		trackTarget, ok := target.(session.TrackService)
+		if !ok {
+			return errors.New("storage migration: target session tracks are unsupported")
+		}
+		for track, history := range snapshot.Tracks {
+			if history == nil {
+				continue
+			}
+			start := 0
+			if prior := existing.Tracks[track]; prior != nil {
+				start = len(prior.Events)
+			}
+			for index := start; index < len(history.Events); index++ {
+				item := history.Events[index]
+				if err := trackTarget.AppendTrackEvent(ctx, current, &item); err != nil {
+					return errors.New("storage migration: repair target track event failed")
+				}
+			}
+		}
+	}
+	key := session.Key{AppName: current.AppName, UserID: current.UserID, SessionID: current.ID}
+	return applySessionState(ctx, target, targetType, key, snapshot.State)
+}
+
+func applySessionState(ctx context.Context, target session.Service, targetType tenant.BackendType, key session.Key, state session.StateMap) error {
+	local, app, user := splitSessionState(state, targetType)
+	if len(local) > 0 && target.UpdateSessionState(ctx, key, local) != nil {
+		return errors.New("storage migration: update target session state failed")
+	}
+	if len(app) > 0 && target.UpdateAppState(ctx, key.AppName, app) != nil {
+		return errors.New("storage migration: update target app state failed")
+	}
+	if len(user) > 0 && target.UpdateUserState(ctx, session.UserKey{AppName: key.AppName, UserID: key.UserID}, user) != nil {
+		return errors.New("storage migration: update target user state failed")
+	}
+	return nil
+}
+
+func stateIsSubset(current, source session.StateMap) bool {
+	for key, value := range current {
+		if !bytes.Equal(value, source[key]) {
+			return false
+		}
+	}
+	return true
+}
+
+func eventsArePrefix(current, source []event.Event) bool {
+	if len(current) > len(source) {
+		return false
+	}
+	for index := range current {
+		left, _ := json.Marshal(current[index])
+		right, _ := json.Marshal(source[index])
+		if !bytes.Equal(left, right) {
+			return false
+		}
+	}
+	return true
+}
+
+func tracksArePrefix(current, source map[session.Track]*session.TrackEvents) bool {
+	for track, history := range current {
+		target := source[track]
+		if history == nil {
+			continue
+		}
+		if target == nil || len(history.Events) > len(target.Events) {
+			return false
+		}
+		for index := range history.Events {
+			left, _ := json.Marshal(history.Events[index])
+			right, _ := json.Marshal(target.Events[index])
+			if !bytes.Equal(left, right) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func splitSessionState(state session.StateMap, targetType tenant.BackendType) (local, app, user session.StateMap) {
+	local, app, user = make(session.StateMap), make(session.StateMap), make(session.StateMap)
+	for key, value := range state {
+		switch {
+		case strings.HasPrefix(key, session.StateAppPrefix):
+			if targetType == tenant.BackendRedis {
+				key = strings.TrimPrefix(key, session.StateAppPrefix)
+			}
+			app[key] = append([]byte(nil), value...)
+		case strings.HasPrefix(key, session.StateUserPrefix):
+			if targetType == tenant.BackendRedis {
+				key = strings.TrimPrefix(key, session.StateUserPrefix)
+			}
+			user[key] = append([]byte(nil), value...)
+		default:
+			local[key] = append([]byte(nil), value...)
+		}
+	}
+	return local, app, user
+}
+
+func sessionSnapshot(value *session.Session) (portableSession, string, error) {
+	if value == nil {
+		return portableSession{}, "", errors.New("storage migration: session snapshot is nil")
+	}
+	cloned := value.Clone()
+	snapshot := portableSession{State: cloned.State, Events: cloned.Events, Tracks: cloned.Tracks, Summaries: cloned.Summaries}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return portableSession{}, "", errors.New("storage migration: encode session snapshot failed")
+	}
+	digest := sha256.Sum256(payload)
+	return snapshot, hex.EncodeToString(digest[:]), nil
+}
+
+func verifySessionSnapshot(ctx context.Context, target session.Service, key session.Key, expected portableSession, expectedChecksum string) error {
+	current, err := target.GetSession(ctx, key, session.WithEventNum(1<<30))
+	if err != nil || current == nil {
+		return errors.New("storage migration: target session verification failed")
+	}
+	snapshot, actual, err := sessionSnapshot(current)
+	if err != nil || actual != expectedChecksum {
+		return errors.New("storage migration: target session checksum mismatch: " + sessionMismatchKind(snapshot, expected))
+	}
+	return nil
+}
+
+func sessionMismatchKind(actual, expected portableSession) string {
+	// The caller deliberately receives only a structural category. Neither
+	// state values, event bodies nor summaries are ever formatted into errors.
+	parts := []struct {
+		name           string
+		actual, expect portableSession
+	}{
+		{"state", portableSession{State: actual.State}, portableSession{State: expected.State}},
+		{"events", portableSession{Events: actual.Events}, portableSession{Events: expected.Events}},
+		{"tracks", portableSession{Tracks: actual.Tracks}, portableSession{Tracks: expected.Tracks}},
+		{"summaries", portableSession{Summaries: actual.Summaries}, portableSession{Summaries: expected.Summaries}},
+	}
+	for _, part := range parts {
+		if checksumPortable(part.actual) != checksumPortable(part.expect) {
+			if part.name == "state" {
+				return stateMismatchKind(actual.State, expected.State)
+			}
+			if part.name == "summaries" {
+				return fmt.Sprintf("summaries(%d/%d)", len(actual.Summaries), len(expected.Summaries))
+			}
+			return part.name
+		}
+	}
+	return "content"
+}
+
+func stateMismatchKind(actual, expected session.StateMap) string {
+	missing, extra, changed := 0, 0, 0
+	for key, value := range expected {
+		other, ok := actual[key]
+		if !ok {
+			missing++
+		} else if !bytes.Equal(value, other) {
+			changed++
+		}
+	}
+	for key := range actual {
+		if _, ok := expected[key]; !ok {
+			extra++
+		}
+	}
+	return fmt.Sprintf("state(%d/%d,missing=%d,extra=%d,changed=%d)", len(actual), len(expected), missing, extra, changed)
+}
+
+func checksumPortable(value portableSession) string {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
+}
+
+func sessionSourceKey(key session.Key) string {
+	payload, _ := json.Marshal([]string{key.UserID, key.SessionID})
+	return string(payload)
 }
 
 func (copier *PostgresCopier) stepMemoryToExternal(ctx context.Context, job Job, appName string, batchSize int) (Progress, error) {

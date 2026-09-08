@@ -4,16 +4,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 IMAGE="${TRPC_AGENT_POSTGRES_IMAGE:-postgres:16-alpine}"
 CONTAINER="trpc-agent-service-migrations-$$"
+REDIS_IMAGE="${TRPC_AGENT_REDIS_IMAGE:-redis:7-alpine}"
+REDIS_CONTAINER="trpc-agent-service-session-migrations-redis-$$"
 DATABASE="trpc_agent_service"
 
 cleanup() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
 }
 
 diagnose() {
   local line="$1"
   echo "PostgreSQL integration test failed near line ${line}" >&2
   docker logs --tail 80 "$CONTAINER" >&2 || true
+  docker logs --tail 80 "$REDIS_CONTAINER" >&2 || true
 }
 
 trap cleanup EXIT
@@ -24,6 +28,10 @@ docker run -d --name "$CONTAINER" \
   -e POSTGRES_PASSWORD=test-only \
   -e POSTGRES_DB="$DATABASE" \
   "$IMAGE" >/dev/null
+
+docker run -d --name "$REDIS_CONTAINER" \
+  -p 127.0.0.1::6379 \
+  "$REDIS_IMAGE" redis-server --save '' --appendonly no >/dev/null
 
 ready=false
 for _ in $(seq 1 60); do
@@ -40,6 +48,19 @@ for _ in $(seq 1 60); do
 done
 if [[ "$ready" != true ]]; then
   echo "PostgreSQL did not finish initialization within 60 seconds" >&2
+  exit 1
+fi
+
+redis_ready=false
+for _ in $(seq 1 30); do
+  if docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -qx PONG; then
+    redis_ready=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$redis_ready" != true ]]; then
+  echo "Redis did not become ready within 30 seconds" >&2
   exit 1
 fi
 
@@ -109,6 +130,7 @@ if [[ "$actual_indexes" != "$expected_indexes" ]]; then
 fi
 
 postgres_port="$(docker port "$CONTAINER" 5432/tcp | sed 's/.*://')"
+redis_port="$(docker port "$REDIS_CONTAINER" 6379/tcp | sed 's/.*://')"
 (
   cd "$ROOT"
   TRPC_AGENT_POSTGRES_TEST_DSN="postgres://postgres:test-only@127.0.0.1:${postgres_port}/${DATABASE}?sslmode=disable" \
@@ -120,7 +142,8 @@ postgres_port="$(docker port "$CONTAINER" 5432/tcp | sed 's/.*://')"
   TRPC_AGENT_POSTGRES_TEST_DSN="postgres://postgres:test-only@127.0.0.1:${postgres_port}/${DATABASE}?sslmode=disable" \
     go test ./trpcservice/cluster -run TestPostgresCrossNodeStatusCancelHeartbeatBudgetAndApproval -count=1
   TRPC_AGENT_POSTGRES_TEST_DSN="postgres://postgres:test-only@127.0.0.1:${postgres_port}/${DATABASE}?sslmode=disable" \
-    go test ./trpcservice/storagemigration -run TestPostgresMigrationWorkerResumesAndCopiesTenantMemory -count=1
+  TRPC_AGENT_REDIS_TEST_URL="redis://127.0.0.1:${redis_port}/0" \
+    go test ./trpcservice/storagemigration -run 'Test(PostgresMigrationWorkerResumesAndCopiesTenantMemory|RunnerSessionMigratesRedisPostgresBothWays)$' -count=1
 )
 
 down
@@ -131,4 +154,4 @@ if [[ "$remaining" != "0" ]]; then
 fi
 
 up
-echo "PostgreSQL migrations and integration paths through message recovery and storage migration: up/up/down/up passed"
+echo "PostgreSQL migrations and integration paths through message recovery and Redis/PostgreSQL session migration: up/up/down/up passed"

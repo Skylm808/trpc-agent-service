@@ -131,6 +131,20 @@ func TestRoutedProfileValidationCoversMigrationBoundaries(t *testing.T) {
 	if err := ValidateRoutedProfile(profile); err == nil {
 		t.Fatal("different Redis Session/Summary namespaces accepted")
 	}
+	redisTarget := tenant.BackendConfig{Type: tenant.BackendRedis, Endpoint: "redis://redis:6379/0", Namespace: "migration-target"}
+	profile = valid.Clone()
+	profile.Session.MigrationTarget = &redisTarget
+	profile.Summary.MigrationTarget = &redisTarget
+	if err := ValidateRoutedProfile(profile); err != nil {
+		t.Fatalf("PostgreSQL to Redis Session migration rejected: %v", err)
+	}
+	postgresTarget := tenant.BackendConfig{Type: tenant.BackendPostgres}
+	profile.Session, profile.Summary = redisSession, redisSession
+	profile.Session.MigrationTarget = &postgresTarget
+	profile.Summary.MigrationTarget = &postgresTarget
+	if err := ValidateRoutedProfile(profile); err != nil {
+		t.Fatalf("Redis to PostgreSQL Session migration rejected: %v", err)
+	}
 }
 
 func TestRedisSessionRouteValidation(t *testing.T) {

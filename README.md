@@ -119,7 +119,7 @@ Kubernetes 脚本会创建本地 kind 集群并走通部署、扩缩容、Pod �
 | Artifact | InMemory、PostgreSQL、S3 | PostgreSQL |
 | Audit | InMemory（仅离线）、PostgreSQL；可同步至外置 WORM Archive | PostgreSQL + 归档 |
 
-InMemory 只用于测试和离线 Demo；生产模式会拒绝关键数据域使用内存后端。Redis Runner Session 必须配置独立 `namespace`，平台事件顺序、fencing、Inbox 和 Outbox 仍由 PostgreSQL 强一致保存。迁移由 Admin API 创建、推进并 cutover，迁移状态和配置版本持久化且保持租户隔离。
+InMemory 只用于测试和离线 Demo；生产模式会拒绝关键数据域使用内存后端。Redis Runner Session 必须配置独立 `namespace`，平台事件顺序、fencing、Inbox 和 Outbox 仍由 PostgreSQL 强一致保存。Runner Session/State/Event/Track/Summary 已支持 Redis ↔ PostgreSQL 分批迁移；迁移由 Admin API 创建、推进并 cutover，checkpoint、checksum、配置版本及租户边界都持久化在 PostgreSQL。
 
 ## Admin API
 

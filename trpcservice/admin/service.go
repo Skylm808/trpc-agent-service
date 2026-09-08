@@ -343,7 +343,7 @@ func (service *Service) validateStorageTransition(ctx context.Context, tenantID 
 }
 
 func samePrimaryRoute(left, right tenant.BackendConfig) bool {
-	return left.Type == right.Type && left.Endpoint == right.Endpoint && left.Credential == right.Credential
+	return left.Type == right.Type && left.Endpoint == right.Endpoint && left.Namespace == right.Namespace && left.Credential == right.Credential
 }
 
 // recordDecision appends one redacted audit record per publish/rollback call.

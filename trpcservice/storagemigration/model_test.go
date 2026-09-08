@@ -11,6 +11,8 @@ func TestNewJobAllowsPR23MigrationRoutes(t *testing.T) {
 		domain         Domain
 		source, target tenant.BackendType
 	}{
+		{DomainSession, tenant.BackendPostgres, tenant.BackendRedis},
+		{DomainSession, tenant.BackendRedis, tenant.BackendPostgres},
 		{DomainArtifact, tenant.BackendPostgres, tenant.BackendS3},
 		{DomainArtifact, tenant.BackendS3, tenant.BackendPostgres},
 		{DomainKnowledge, tenant.BackendPostgres, tenant.BackendQdrant},

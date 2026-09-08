@@ -45,7 +45,8 @@ func NewJob(tenantID, appID string, version tenant.ConfigVersion, domain Domain,
 func validRoutes(domain Domain, source, target tenant.BackendType) bool {
 	switch domain {
 	case DomainSession:
-		return source == tenant.BackendPostgres && target == tenant.BackendPostgres
+		return (source == tenant.BackendPostgres || source == tenant.BackendRedis) &&
+			(target == tenant.BackendPostgres || target == tenant.BackendRedis)
 	case DomainMemory:
 		return source == tenant.BackendPostgres && (target == tenant.BackendPostgres || target == tenant.BackendExternal)
 	case DomainArtifact:

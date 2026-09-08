@@ -1,10 +1,12 @@
 # Storage Router 与数据迁移
 
-Storage Router 支持 Session/Summary、Memory、Artifact、Knowledge 和 Audit 独立选路。迁移任务覆盖 PostgreSQL 数据域、PGVector ↔ Qdrant Knowledge，以及 PostgreSQL ↔ S3 Artifact；Memory 还可选固定 HTTPS 外部服务，Audit 可同步追加到外部 WORM 归档。
+Storage Router 支持 Session/Summary、Memory、Artifact、Knowledge 和 Audit 独立选路。迁移任务覆盖 Redis ↔ PostgreSQL Runner Session、PostgreSQL 数据域、PGVector ↔ Qdrant Knowledge，以及 PostgreSQL ↔ S3 Artifact；Memory 还可选固定 HTTPS 外部服务，Audit 可同步追加到外部 WORM 归档。
 
 Runner Session/Summary 现在可直接选择 PostgreSQL 或 Redis。Redis 路由必须设置 namespace，
-并由 tenant/App 再派生物理 key prefix；当前迁移 Worker 不提供 PostgreSQL ↔ Redis Session
-在线 backfill，因此已有租户切换这两种后端前必须另行完成历史会话迁移和校验，不能直接发布 cutover。
+并由 tenant/App 再派生物理 key prefix。迁移 Worker 以 PostgreSQL `session_heads` 为可信会话目录，
+分批复制 state、event、track 与 summary，在目标端复算完整 checksum；目标已有双写数据时先校验不含
+summary 的核心快照；若目标只是可证明的源前缀，则可有界续传，再安全补齐 summary。源数据变化、
+目标分叉或校验失败都会阻止 cutover。
 
 ## 安全迁移流程
 
@@ -39,6 +41,8 @@ POST /v1/tenants/demo/storage/migrations/{migration_id}/cancel
 ## 一致性与故障恢复
 
 - Session/Summary 使用同一路由，避免事件在一个集群而摘要在另一个集群。
+- Redis ↔ PostgreSQL Session backfill 不扫描 Redis key，也不会输出用户正文；只枚举平台 `session_heads` 中当前租户/App 的 `(user_id, session_id)`。因此 Redis 故障后不能凭空恢复从未进入目录或平台事实流的历史内容。
+- Session checkpoint 以用户/session 组合键推进；ledger 保存源快照 checksum。重复 batch 会验证目标而不重复追加 event/track；双写或中断后的目标必须与源一致，或可证明是源的事件/Track 前缀和状态子集，否则 fail closed。
 - Backfill 只复制 canonical app_name 或显式 tenant/app 范围内的数据；两个租户使用相同用户、session 或文件名也不会互相读取。
 - PostgreSQL 目标数据与 `storage_migration_items` 在一个事务中提交。S3 无法参与 SQL 事务，因此外部写成功后的重放会按指定 revision 读取并比对内容，再补平台 PostgreSQL ledger；冲突时 fail closed，不会继续创建 revision。
 - `migration_jobs` 使用 owner/token/lease 精确更新；过期 Worker 无权提交新 checkpoint。
@@ -51,3 +55,7 @@ POST /v1/tenants/demo/storage/migrations/{migration_id}/cancel
 
 `domain` 可选 `session`、`memory`、`artifact`、`knowledge`。每项任务都从已发布配置读取
 source/target，Admin 请求不能注入 endpoint 或 SecretRef。
+
+CI 中的 `scripts/postgres_migrations_test.sh` 会启动临时 PostgreSQL 与 Redis，自动验证
+Redis → PostgreSQL → Redis 双向迁移、摘要回填、checksum ledger 和 checkpoint；容器结束即删除，
+不接触 Compose 数据卷或真实租户数据。
