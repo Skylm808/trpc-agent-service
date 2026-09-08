@@ -126,6 +126,7 @@ tenants:
           summary:
             type: postgres
             endpoint: postgres://postgres:5432/trpc_agent
+            namespace: demo-assistant
           artifact:
             type: postgres
             endpoint: postgres://postgres:5432/trpc_agent

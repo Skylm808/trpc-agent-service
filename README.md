@@ -151,3 +151,7 @@ go test -tags=integration ./internal/storage/...
 ```
 
 涉及真实企业微信、飞书、模型、数据库或对象存储的测试必须显式提供环境变量；默认测试不会读取真实凭据。仓库禁止提交 `.env`、`configs/local.yaml`、Secret、下载 URL、媒体 key 或用户消息正文。
+
+## 许可证
+
+本项目采用 [Apache License 2.0](LICENSE)。

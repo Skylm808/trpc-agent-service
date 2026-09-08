@@ -78,6 +78,17 @@ func TestPersistentCompositionRejectsMockModel(t *testing.T) {
 	}
 }
 
+func TestExampleConfigurationPassesPersistentProfileGate(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "fixture-key")
+	file, err := config.LoadFile("../../configs/example.yaml")
+	if err != nil {
+		t.Fatalf("LoadFile(example) error = %v", err)
+	}
+	if err := validatePersistentProfiles(file); err != nil {
+		t.Fatalf("example configuration rejected by production gate: %v", err)
+	}
+}
+
 func TestRunExitsCleanlyOnInterrupt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
