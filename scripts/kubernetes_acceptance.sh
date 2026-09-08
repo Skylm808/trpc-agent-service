@@ -225,7 +225,13 @@ expect_unready() {
 for backend in redis postgres; do
   if [[ "$backend" == redis ]]; then resource="statefulset/demo-redis"; redis_scaled=true; else resource="statefulset/demo-postgres"; postgres_scaled=true; fi
   kubectl -n "$namespace" scale "$resource" --replicas=0 >/dev/null
-  kubectl -n "$namespace" wait --for=delete pod -l "app.kubernetes.io/name=demo-${backend}" --timeout=3m >/dev/null
+  # A cold local kind control plane can be briefly saturated after image load
+  # and rollout. Keep the dependency outage bounded, but allow the StatefulSet
+  # controller enough time to reconcile the requested zero replicas.
+  kubectl -n "$namespace" wait --for=delete pod -l "app.kubernetes.io/name=demo-${backend}" --timeout=5m >/dev/null || {
+    echo "$backend StatefulSet did not scale down within 5m" >&2
+    exit 1
+  }
   sleep 6
   expect_unready || { echo "$backend outage did not affect readiness" >&2; exit 1; }
   kubectl -n "$namespace" scale "$resource" --replicas=1 >/dev/null

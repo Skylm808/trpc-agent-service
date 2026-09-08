@@ -570,7 +570,7 @@ func validateBackend(
 
 func sameBackend(left, right tenant.BackendConfig) bool {
 	return left.Type == right.Type && left.Endpoint == right.Endpoint &&
-		left.Credential.Provider == right.Credential.Provider && left.Credential.Key == right.Credential.Key
+		left.Namespace == right.Namespace && left.Credential.Provider == right.Credential.Provider && left.Credential.Key == right.Credential.Key
 }
 
 func validateSecretRef(path string, ref tenant.SecretRef, required bool) error {

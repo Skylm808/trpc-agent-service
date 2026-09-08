@@ -8,7 +8,7 @@
 | R2 | 企业微信或飞书因超时重复投递，同一消息被多个 Gateway 同时接收 | 模型与工具重复调用，产生重复费用或副作用 | Inbox 唯一键包含 `tenant_id + binding_id + external_message_id`；首次 claim 才能入队；事件消息使用稳定派生 ID | 监控 duplicate claim 比例；并发回放同一 MsgId |
 | R3 | 同一 session 的多条消息在队列中乱序到达 | 后发消息覆盖前序 state，Summary 截断位置错误 | 入站分配单调 `inbox_seq`；提交要求等于 `last_event_seq + 1`；乱序请求退避重试 | `out_of_order` 指标和热点 session 告警；随机打乱队列消息测试 |
 | R4 | PostgreSQL 短暂不可用、连接池耗尽或热点 session 行锁竞争 | Gateway 无法 claim，Worker 无法提交，队列积压 | Gateway 快速返回可重试错误；连接池限额和超时；按租户限流；热点 session 串行消费；跨可用区主备 | 监控连接池等待、事务 p99、deadlock、Inbox backlog；主库切换演练 |
-| R5 | Redis 主从切换、数据丢失或集群不可用 | lease、命令总线或热点缓存失效，Worker 暂停调度 | Redis 开启 AOF 和多副本；fence 最终仍由 PostgreSQL 写入校验；Redis 不作为 Session 事实来源；不可安全取 lease 时停止执行 | 监控 failover、AOF 延迟和 lease renewal；断开 Redis 验证 fail-closed |
+| R5 | Redis 主从切换、数据丢失或集群不可用 | lease、命令总线失效；选择 Redis Runner Session 的租户还可能丢失对话上下文 | 默认 Session 使用 PostgreSQL；Redis Session 仅用于明确接受取舍的租户并开启 AOF/多副本；平台 Event/state/fence 仍在 PostgreSQL；不可安全取 lease 时停止执行 | 监控 failover、AOF 延迟和 lease renewal；断开 Redis 验证 fail-closed，并定期验证 Session 备份恢复 |
 | R6 | 模型超时、客户端断开后事件 channel 无人消费，或 Tool goroutine 忽略取消 | goroutine/连接泄漏，节点并发逐步耗尽 | 贯穿 `context.Context`；调用 `ManagedRunner.Cancel`；有界排空事件 channel；Tool 禁止启动无托管后台任务 | goroutine、活跃 Runner、取消耗时指标；注入永不返回的模型/工具 |
 | R7 | Tool 已产生外部副作用，但 Worker 在记录结果前崩溃，重试再次调用 | 重复转账、重复建单或重复通知 | 危险 Tool 二次确认；传递 request/tool-call 幂等键；外部系统采用幂等写；不具备幂等能力的 Tool 标记为不可自动重试 | 审计 tool decision 和 call ID；崩溃点故障注入 |
 | R8 | IM 回调超过平台时限、回复超过长度或触发频率限制 | 平台重复回调，回复丢失或账号被限流 | 回调只做验签、Inbox claim 和入队；回复从 Outbox 异步发送；按平台分片、租户限流、指数退避和 DLQ | 回调耗时、投递成功率、429/45009、Outbox backlog 告警 |

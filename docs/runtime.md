@@ -6,6 +6,6 @@ Runtime Manager 对同一个键只构建一次，同时允许不同租户并行�
 
 Bundle 负责管理 Runner 事件通道。请求取消时，如果 Runner 支持 `ManagedRunner.Cancel`，Bundle 会调用它，并在有界时间内继续排空事件，避免客户端断开后阻塞 Runner。Bundle 的关闭操作具有幂等性：先关闭 Runner，再关闭其持有的 Session、Memory 等存储服务。
 
-服务入口会向 Bundle 注入 PostgreSQL Session/Memory、按租户路由的 PostgreSQL 或 S3 Artifact、可选的 PGVector/Qdrant Knowledge、Inbox、Outbox 和 Audit 服务。Redis 用于 lease、fencing token 和跨节点执行事件总线。
+服务入口会向 Bundle 注入按租户选择的 PostgreSQL 或 Redis Runner Session、PostgreSQL/外部 Memory、按租户路由的 PostgreSQL 或 S3 Artifact、可选的 PGVector/Qdrant Knowledge、Inbox、Outbox 和 Audit 服务。Redis 同时用于 lease、fencing token 和跨节点执行事件总线；无论 Runner Session 选择哪种后端，平台 Event/state/fencing 都由 PostgreSQL 保存。
 
 生产模型配置 `deepseek`、`openai` 和 `openai-compatible` 使用 tRPC-Agent-Go 公开的 OpenAI-compatible Model。API 凭据在每个不可变 Bundle 构建时通过 `SecretRef` 解析一次，不会复制到配置快照、日志、Trace 或错误信息中。确定性 quickstart 使用单独的 Mock Model；生产启动会拒绝 Mock Model 和不受支持的存储配置。

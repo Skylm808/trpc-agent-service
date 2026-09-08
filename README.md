@@ -100,6 +100,8 @@ Compose 使用命名数据卷保存 PostgreSQL、Redis、Tempo 和 Grafana 数�
 常用验收入口：
 
 ```bash
+./scripts/dual_im_contract_acceptance.sh
+./scripts/coverage_acceptance.sh
 ./scripts/observability_acceptance.sh
 ./scripts/kubernetes_acceptance.sh
 ```
@@ -110,13 +112,14 @@ Kubernetes 脚本会创建本地 kind 集群并走通部署、扩缩容、Pod �
 
 | 数据域 | 可选后端 | 默认生产选择 |
 | --- | --- | --- |
-| Session / Event / Summary | InMemory（仅离线）、PostgreSQL | PostgreSQL |
+| Runner Session / Summary | InMemory（仅离线）、PostgreSQL、Redis | PostgreSQL |
+| 平台 Event / state / fencing | PostgreSQL | PostgreSQL |
 | Memory | InMemory（仅离线）、PostgreSQL、外部 Memory Service | PostgreSQL |
 | Knowledge | InMemory、PGVector、Qdrant | PGVector |
 | Artifact | InMemory、PostgreSQL、S3 | PostgreSQL |
 | Audit | InMemory（仅离线）、PostgreSQL；可同步至外置 WORM Archive | PostgreSQL + 归档 |
 
-InMemory 只用于测试和离线 Demo；生产模式会拒绝关键数据域使用内存后端。迁移由 Admin API 创建、推进并 cutover，迁移状态和配置版本持久化且保持租户隔离。
+InMemory 只用于测试和离线 Demo；生产模式会拒绝关键数据域使用内存后端。Redis Runner Session 必须配置独立 `namespace`，平台事件顺序、fencing、Inbox 和 Outbox 仍由 PostgreSQL 强一致保存。迁移由 Admin API 创建、推进并 cutover，迁移状态和配置版本持久化且保持租户隔离。
 
 ## Admin API
 
@@ -126,6 +129,9 @@ Admin API 是平台控制面，用于租户配置的预览、发布、回滚，�
 
 - [架构设计](docs/architecture.md)：组件职责、路由、隔离、一致性与容量设计
 - [需求验收矩阵](docs/acceptance-matrix.md)：题目要求对应的代码、测试与验收证据
+- [双 IM 可复现验收](docs/acceptance/dual-im-contract-current.md)：合成加密回调到模拟平台回复
+- [当前容量报告](docs/acceptance/capacity-current.md)：Compose 健康/就绪探针实测
+- [关键模块覆盖率](docs/acceptance/coverage-current.md)：高风险模块覆盖率与 CI 门槛
 - [部署指南](docs/deployment.md)：Compose、生产参数和运维操作
 - [数据模型](docs/data-model.md)：核心表和租户键
 - [数据同步与幂等](docs/message-runtime.md)：顺序、幂等、lease 与 fencing

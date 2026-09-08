@@ -40,6 +40,8 @@ redis_port="$(docker port "$CONTAINER" 6379/tcp | sed 's/.*://')"
     go test ./trpcservice/cluster -run 'TestRedis(StreamDistributesWorkAcrossNodes|ProducerOnlyGatewayQueuesUntilWorkerStarts)' -count=1
   TRPC_AGENT_REDIS_TEST_URL="redis://127.0.0.1:${redis_port}/0" \
     go test ./trpcservice/worker -run TestRedisRunLimiterCoordinatesNodesAndExpiresPermits -count=1
+  TRPC_AGENT_REDIS_TEST_URL="redis://127.0.0.1:${redis_port}/0" \
+    go test ./trpcservice/storage -run TestRedisSessionBackendIsSharedAndNamespaceIsolated -count=1
 )
 
-echo "Redis role-split queue and tenant concurrency quota integration paths passed"
+echo "Redis role-split queue, tenant quota, and shared Session integration paths passed"

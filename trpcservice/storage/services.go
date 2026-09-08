@@ -17,6 +17,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 	sessionpostgres "trpc.group/trpc-go/trpc-agent-go/session/postgres"
+	sessionredis "trpc.group/trpc-go/trpc-agent-go/session/redis"
 )
 
 // Services groups storage instances owned by one Runtime Bundle.
@@ -65,6 +66,23 @@ func newPostgresSession(dsn string) (session.Service, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("storage: create PostgreSQL session service: %w", err)
+	}
+	return service, nil
+}
+
+func newRedisSession(rawURL, keyPrefix string) (session.Service, error) {
+	if rawURL == "" || keyPrefix == "" {
+		return nil, errors.New("storage: Redis session URL and tenant key prefix are required")
+	}
+	service, err := sessionredis.NewService(
+		sessionredis.WithRedisClientURL(rawURL),
+		sessionredis.WithKeyPrefix(keyPrefix),
+		sessionredis.WithEnableUserSessionIndex(true),
+	)
+	if err != nil {
+		// The upstream URL parser includes the full URL in parse errors. Redis
+		// credentials may arrive through SecretRef, so never expose that error.
+		return nil, errors.New("storage: create Redis session service failed")
 	}
 	return service, nil
 }

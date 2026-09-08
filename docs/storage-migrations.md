@@ -2,6 +2,10 @@
 
 Storage Router 支持 Session/Summary、Memory、Artifact、Knowledge 和 Audit 独立选路。迁移任务覆盖 PostgreSQL 数据域、PGVector ↔ Qdrant Knowledge，以及 PostgreSQL ↔ S3 Artifact；Memory 还可选固定 HTTPS 外部服务，Audit 可同步追加到外部 WORM 归档。
 
+Runner Session/Summary 现在可直接选择 PostgreSQL 或 Redis。Redis 路由必须设置 namespace，
+并由 tenant/App 再派生物理 key prefix；当前迁移 Worker 不提供 PostgreSQL ↔ Redis Session
+在线 backfill，因此已有租户切换这两种后端前必须另行完成历史会话迁移和校验，不能直接发布 cutover。
+
 ## 安全迁移流程
 
 1. 在目标 PostgreSQL 上使用相同版本的 `--migrate-only` 初始化 schema。不要在业务 Pod 内自动建表。

@@ -128,7 +128,7 @@ docker compose --profile test run --rm --build integration-test
 
 ## Storage Router 与迁移
 
-Storage Router 支持把 Session/Summary、Memory、Artifact 分别路由到不同 PostgreSQL 集群。每个外部目标都必须先运行同版本 migration；DSN 只能由 `credential: SecretRef` 提供。启动和 Admin validate/publish 会执行连接与表检查，缺少凭据、目标不可达或 schema 不完整都会拒绝启动/发布。
+Storage Router 支持把 Runner Session/Summary 选为 PostgreSQL 或 Redis，并把 Memory、Artifact 分别路由到其他生产后端。Redis 示例为 `session/summary: {type: redis, endpoint: redis://redis:6379/0, namespace: runner-session}`；带密码时不在 endpoint 写凭据，而由 `credential: SecretRef` 提供完整 URL。Redis Session 会再叠加 tenant/App 物理前缀，启动和 Admin validate/publish 会执行连接预检。平台 Event/state/fencing、Inbox 与 Outbox 始终保存在 PostgreSQL。
 
 PGVector/Qdrant Knowledge 和 S3-compatible Artifact 已接入。启用 Knowledge 或 S3 的配置在 Admin publish 时会解析 SecretRef 并执行有界连接预检；失败时保留当前发布版本和 Runtime Bundle。具体配置见 [Knowledge/RAG 与 S3 Artifact](knowledge.md)。
 

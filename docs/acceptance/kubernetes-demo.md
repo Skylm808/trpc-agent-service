@@ -1,11 +1,11 @@
 # Kubernetes Demo 验收报告
 
-- 日期：2026-09-07T14:33:07Z
-- Git 基线：05aa0a13bba79e9a553d8e7a890b968e8c633399+candidate
+- 日期：2026-09-08T03:05:12Z
+- Git 基线：f6528fe55d527aff2237bad35a6613432e086230+candidate
 - Kubernetes context：kind-trpc-agent-demo
-- 镜像：sha256:6e8109e12352（仅记录不可逆摘要）
+- 镜像：sha256:f156da4b7871（仅记录不可逆摘要）
 - 拓扑：Gateway 3 副本、Worker 3 副本、PostgreSQL/Redis StatefulSet、Mock Model、OTel Collector
-- 容量冒烟：health 100 请求、Runner 20 请求，失败 0，接入 p95 11.112ms，health p95 10.735ms；20 条均在 PostgreSQL Inbox 完成
+- 容量冒烟：health 100 请求、Runner 20 请求，失败 0，接入 p95 9.839ms，health p95 10.207ms；20 条均在 PostgreSQL Inbox 完成
 - 单 Pod 恢复：通过
 - PostgreSQL/Redis 故障与 readiness 恢复：通过
 - Model 请求重试/Collector 故障恢复：通过

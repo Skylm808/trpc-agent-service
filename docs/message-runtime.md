@@ -27,10 +27,11 @@ OpenClaw/IM callback
 
 进程内 `MemoryStore`、`Coordinator` 和 `MemoryWriteStore` 只是确定性测试替身，不是部署选项。
 生产部署必须使用 `SQLStore` 的 PostgreSQL claim、`RedisCoordinator`，以及
-`SQLWriteStore`（或等价的 `WriteStore + FenceValidator` 共享事务后端）。`FencedSessionService` 的
-“校验后调用 delegate”只适用于同一原子后端；生产 Session Adapter 必须在同一数据库
-事务或 Lua 脚本中完成 `last_fence = token` 校验与 event/state 修改，不能把一次远端
-预检查当作事务隔离。
+`SQLWriteStore`（或等价的 `WriteStore + FenceValidator` 强一致后端）。平台 Event/state、
+Summary/Memory 投影和 Outbox 始终在当前 fence 下写 PostgreSQL。Runner 自身的对话 Session
+可按租户选择 PostgreSQL 或 Redis；`FencedSessionService` 在 PostgreSQL 行锁持有期间调用
+具体 Adapter，阻止新 owner 推进 fence。Redis Session 使用同步写和 tenant/App 物理前缀，
+不把一次无锁远端预检查当作事务隔离。
 
 ## 顺序和故障语义
 

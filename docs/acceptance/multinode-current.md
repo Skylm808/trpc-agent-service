@@ -1,7 +1,7 @@
 # 多节点 Compose 验收报告
 
-- 日期：2026-09-07T14:36:54Z
-- Git 基线：`05aa0a13bba79e9a553d8e7a890b968e8c633399+candidate`
+- 日期：2026-09-08
+- Git 基线：`f6528fe55d527aff2237bad35a6613432e086230+candidate`
 - Compose project：`trpc-agent-service-pr14-check`
 - 拓扑：Gateway 1、Worker 2、共享 PostgreSQL/Redis
 - 数据卷操作：未执行 `down -v`、`volume rm`、数据库清空或卷重建

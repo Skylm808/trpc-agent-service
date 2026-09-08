@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/backend"
@@ -13,6 +15,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
 // SecretResolver resolves a SecretRef without exposing its value to callers.
@@ -126,34 +129,26 @@ func (router *Router) services(ctx context.Context, tenantID, appID string, prof
 	if err := ValidateRoutedProfile(profile); err != nil {
 		return nil, err
 	}
-	if !sameRoute(profile.Session, profile.Summary) {
-		return nil, errors.New("storage: session and summary must use the same PostgreSQL route")
-	}
-	sessionTarget, err := router.Resolve(ctx, profile.Session)
-	if err != nil {
-		return nil, fmt.Errorf("storage: resolve session backend: %w", err)
-	}
 	artifactService, err := router.artifactService(ctx, profile.Artifact)
 	if err != nil {
 		return nil, fmt.Errorf("storage: resolve artifact backend: %w", err)
 	}
-	services, err := newPostgresServices(sessionTarget.DSN, sessionTarget.DSN, router.defaultTarget.DB)
+	sessionService, err := router.sessionService(ctx, tenantID, appID, profile.Session)
 	if err != nil {
 		if closer, ok := artifactService.(interface{ Close() error }); ok {
 			_ = closer.Close()
 		}
-		return nil, err
+		return nil, fmt.Errorf("storage: resolve session backend: %w", err)
 	}
-	services.Artifact = artifactService
-	if err := services.Memory.Close(); err != nil {
-		_ = services.Close()
-		return nil, err
-	}
-	services.Memory, err = router.memoryService(ctx, tenantID, appID, profile.Memory)
+	memoryService, err := router.memoryService(ctx, tenantID, appID, profile.Memory)
 	if err != nil {
-		_ = services.Close()
+		_ = sessionService.Close()
+		if closer, ok := artifactService.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
 		return nil, fmt.Errorf("storage: resolve memory backend: %w", err)
 	}
+	services := &Services{Session: sessionService, Memory: memoryService, Artifact: artifactService}
 	services.Knowledge, err = router.knowledgeForRoutes(ctx, tenantID, appID, profile.Knowledge, knowledgePolicy)
 	if err != nil {
 		_ = services.Close()
@@ -196,6 +191,45 @@ func (router *Router) services(ctx context.Context, tenantID, appID string, prof
 		services.Memory = &ObservedMemory{Delegate: services.Memory, TenantID: tenantID, AppID: appID, Backend: string(profile.Memory.Type), Observe: observer}
 	}
 	return services, nil
+}
+
+func (router *Router) sessionService(ctx context.Context, tenantID, appID string, route tenant.BackendConfig) (session.Service, error) {
+	switch route.Type {
+	case tenant.BackendPostgres:
+		target, err := router.Resolve(ctx, route)
+		if err != nil {
+			return nil, err
+		}
+		return newPostgresSession(target.DSN)
+	case tenant.BackendRedis:
+		if tenantID == "" || appID == "" || strings.TrimSpace(route.Namespace) == "" || route.MigrationTarget != nil || ((route.Endpoint == "") == route.Credential.IsZero()) {
+			return nil, errors.New("storage: Redis session scope, namespace, and direct route are required")
+		}
+		rawURL := strings.TrimSpace(route.Endpoint)
+		if !route.Credential.IsZero() {
+			resolved, err := router.resolve(route.Credential)
+			if err != nil || strings.TrimSpace(resolved) == "" {
+				return nil, errors.New("storage: resolve Redis session credential failed")
+			}
+			rawURL = strings.TrimSpace(resolved)
+		}
+		if !validRedisURL(rawURL) {
+			return nil, errors.New("storage: Redis session URL is invalid")
+		}
+		return newRedisSession(rawURL, physicalNamespace(route.Namespace, tenantID, appID))
+	default:
+		return nil, fmt.Errorf("storage: session backend %q is unavailable", route.Type)
+	}
+}
+
+func validRedisURL(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && (parsed.Scheme == "redis" || parsed.Scheme == "rediss") && parsed.Host != "" && parsed.Fragment == ""
+}
+
+func validRedisEndpoint(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && validRedisURL(value) && parsed.User == nil && parsed.RawQuery == ""
 }
 
 // Resolve returns the concrete PostgreSQL target for a backend route.
@@ -269,8 +303,11 @@ func (router *Router) Close() error {
 // ValidateRoutedProfile is the production route gate used by Admin publish.
 func ValidateRoutedProfile(profile tenant.StorageProfile) error {
 	for name, route := range map[string]tenant.BackendConfig{"session": profile.Session, "summary": profile.Summary} {
-		if route.Type != tenant.BackendPostgres {
-			return fmt.Errorf("storage: %s backend must be postgres, got %q", name, route.Type)
+		if route.Type != tenant.BackendPostgres && route.Type != tenant.BackendRedis {
+			return fmt.Errorf("storage: %s backend must be postgres or redis, got %q", name, route.Type)
+		}
+		if route.Type == tenant.BackendRedis && (strings.TrimSpace(route.Namespace) == "" || ((route.Endpoint == "") == route.Credential.IsZero()) || (route.Endpoint != "" && !validRedisEndpoint(route.Endpoint))) {
+			return fmt.Errorf("storage: %s Redis backend requires namespace and a valid endpoint or credential", name)
 		}
 		if route.MigrationTarget != nil && route.MigrationTarget.Type != tenant.BackendPostgres {
 			return fmt.Errorf("storage: %s migration target must be postgres, got %q", name, route.MigrationTarget.Type)
@@ -322,6 +359,9 @@ func ValidateRoutedProfile(profile tenant.StorageProfile) error {
 	if !sameRoute(profile.Session, profile.Summary) {
 		return errors.New("storage: session and summary routes must match")
 	}
+	if profile.Session.Type == tenant.BackendRedis && profile.Session.MigrationTarget != nil {
+		return errors.New("storage: Redis session migration target is not supported")
+	}
 	if !profile.Audit.Credential.IsZero() {
 		return errors.New("storage: platform audit primary must not declare an external credential")
 	}
@@ -338,8 +378,23 @@ func (router *Router) Preflight(ctx context.Context, profile tenant.StorageProfi
 		name   string
 		route  tenant.BackendConfig
 		tables []string
-	}{
-		{"session", profile.Session, []string{"runtime_session_states", "runtime_session_events", "runtime_session_track_events", "runtime_session_summaries", "runtime_app_states", "runtime_user_states"}},
+	}{}
+	if profile.Session.Type == tenant.BackendPostgres {
+		routes = append(routes, struct {
+			name   string
+			route  tenant.BackendConfig
+			tables []string
+		}{"session", profile.Session, []string{"runtime_session_states", "runtime_session_events", "runtime_session_track_events", "runtime_session_summaries", "runtime_app_states", "runtime_user_states"}})
+	} else {
+		service, err := router.sessionService(ctx, "preflight", "preflight", profile.Session)
+		if err != nil {
+			return errors.New("storage: Redis session route preflight failed")
+		}
+		_, probeErr := service.GetSession(ctx, session.Key{AppName: "tenant/preflight/app/preflight", UserID: "preflight", SessionID: "preflight"})
+		closeErr := service.Close()
+		if probeErr != nil || closeErr != nil {
+			return errors.New("storage: Redis session route is unreachable")
+		}
 	}
 	if profile.Memory.Type == tenant.BackendPostgres {
 		routes = append(routes, struct {
@@ -482,7 +537,7 @@ func requireTables(ctx context.Context, db *sql.DB, tables []string) error {
 }
 
 func sameRoute(left, right tenant.BackendConfig) bool {
-	if left.Type != right.Type || left.Endpoint != right.Endpoint || left.Credential != right.Credential {
+	if left.Type != right.Type || left.Endpoint != right.Endpoint || left.Credential != right.Credential || left.Namespace != right.Namespace {
 		return false
 	}
 	if left.MigrationTarget == nil || right.MigrationTarget == nil {

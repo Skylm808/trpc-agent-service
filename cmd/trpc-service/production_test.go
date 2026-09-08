@@ -177,6 +177,19 @@ func TestProductionProfileRejectsInMemoryAndMock(t *testing.T) {
 	}
 }
 
+func TestProductionProfileAcceptsNamespacedRedisRunnerSession(t *testing.T) {
+	t.Setenv("PR9_TEST_MODEL_KEY", "fixture-key")
+	profile := postgresStorageProfile()
+	redisSession := tenant.BackendConfig{Type: tenant.BackendRedis, Endpoint: "redis://redis:6379/0", Namespace: "runner-session"}
+	profile.Session, profile.Summary = redisSession, redisSession
+	file := &config.File{Tenants: []tenant.Tenant{{ID: "tenant", Enabled: true, Apps: []tenant.AgentApp{{
+		ID: "app", Enabled: true, Model: tenant.ModelProfile{Provider: "deepseek", APIKey: tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "PR9_TEST_MODEL_KEY"}}, Storage: profile,
+	}}}}}
+	if err := validatePersistentProfiles(file); err != nil {
+		t.Fatalf("Redis Runner Session profile rejected: %v", err)
+	}
+}
+
 // Admin publishes run through the same gate: an InMemory production config is
 // rejected at validate/publish time instead of failing at Runtime build.
 func TestAdminPublishRejectsNonPersistentProfile(t *testing.T) {

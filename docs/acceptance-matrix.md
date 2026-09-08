@@ -1,5 +1,10 @@
 # 需求验收矩阵
 
+> 双 IM 证据分为两层：企业微信、飞书真实平台 E2E 已完成人工验收；CI 中的
+> `scripts/dual_im_contract_acceptance.sh` 使用纯合成凭据重放两种加密回调，并贯穿
+> Inbox、Worker、离线 Runner、Session/Memory/Summary、Outbox 和模拟平台 API。
+> 前者证明真实平台可用，后者让评审者无需真实账号或消息正文即可复现协议与平台链路。
+
 本文把题目要求映射到当前代码、设计文档和可复现证据。状态中的“已实现”表示存在可运行代码和自动化测试；“Demo 通过”表示最小部署闭环，不等同于真实生产容量认证；“人工通过”表示真实外部平台已经验证，仓库只保留脱敏结论。
 
 ## 多租户与节点部署
@@ -27,13 +32,13 @@
 | IM 重投幂等 | 已实现 | 租户/绑定/外部消息唯一 Inbox；`TestConcurrentDuplicatesHaveOneWinner` |
 | 一致性取舍和最小表结构 | 已完成 | `docs/architecture.md`、`docs/storage-migrations.md`、`migrations/*.sql` |
 
-生产 Runtime 支持 PostgreSQL Session/Summary、PostgreSQL/外部 Memory、PGVector/Qdrant Knowledge、PostgreSQL/S3 Artifact，以及 PostgreSQL Audit + 外置 WORM。配置层保留的其他枚举用于离线模式或后续 Adapter，生产发布门禁不会让未实现组合进入运行态。
+生产 Runtime 支持 PostgreSQL/Redis Runner Session/Summary、PostgreSQL/外部 Memory、PGVector/Qdrant Knowledge、PostgreSQL/S3 Artifact，以及 PostgreSQL Audit + 外置 WORM。Redis Session 使用 tenant/App 派生的物理 key prefix，集成测试验证两个节点可见且不同租户隔离；平台 Event/state/fencing 仍以 PostgreSQL 为强一致事实流。配置层保留的其他枚举用于离线模式或后续 Adapter，生产发布门禁不会让未实现组合进入运行态。
 
 ## IM 接入
 
 | 验收要求 | 状态 | 实现与验证证据 |
 | --- | --- | --- |
-| 至少两类 IM，且包含企业微信 | 人工通过 | 企业微信、飞书真实平台 E2E；`docs/wecom.md`、`docs/feishu.md` |
+| 至少两类 IM，且包含企业微信 | 已实现 + 人工通过 | 企业微信、飞书真实平台 E2E；`TestDualIMContractE2E` 可自动重放完整合成链路 |
 | IM 消息转 Runner、Event 转回复/卡片 | 已实现 | Callback → Inbox → Runner → Outbox → Sender；Channel/Sender 测试 |
 | 验签、解密、绑定、去重、身份映射 | 已实现 | 动态 Binding Provider 与 canonical identity；企业微信/飞书 Handler 测试 |
 | 群聊/单聊 session 和跨租户隔离 | 已实现 | `dm/{binding}/{user}`、`group/{binding}/{conversation}`；跨通道身份测试 |
@@ -61,7 +66,7 @@
 | IM、数据库、模型和工具故障降级 | 已实现基础闭环 | 分类重试、DLQ、Outbox、timeout/cancel；Delivery/Recovery 测试 |
 | Context、goroutine 生命周期和事件排空 | 已实现 | Managed Runner、bounded drain、组件 Close；Runtime/Queue drain 测试 |
 | 灰度、版本固定和租户回滚 | 已实现 | 不可变配置、旧 Bundle drain、Admin rollback；Runtime switch 测试 |
-| 容量评估 | 已实现工具与 Demo | `cmd/capacity`、`docs/capacity.md`、Kubernetes Demo 报告 |
+| 容量评估 | 已实现工具与本机实测 | `cmd/capacity`、`docs/capacity.md`、`docs/acceptance/capacity-current.md` |
 | 最小 Compose 部署 | 已实现 | `docker-compose.yml`、生产/多节点验收脚本 |
 | Kubernetes 推荐拓扑 | Demo 通过 | Kustomize、多副本、PDB/HPA；Kubernetes 验收脚本与报告 |
 
@@ -79,4 +84,4 @@
 
 原生绑定具体厂商的 Vault/KMS SDK、队列自定义指标 HPA、租户级 Audit fail-closed、复杂 PDF/OCR、更多微信产品接入和真实生产规模压测属于后续增强。当前 Kubernetes 结论是“可复现最小 Demo 通过”，不是云上生产集群认证。
 
-本轮脱敏实跑结果见 `docs/acceptance/multinode-current.md`、`docs/acceptance/kubernetes-demo.md` 和 `docs/acceptance/observability-current.md`。
+本轮脱敏实跑结果见 `docs/acceptance/` 下的双 IM、覆盖率、容量、多节点、Kubernetes 和可观测性报告。

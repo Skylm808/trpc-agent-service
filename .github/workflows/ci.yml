@@ -21,6 +21,8 @@ jobs:
       - run: ./check.sh
       - run: ./scripts/kubernetes_validate.sh
       - run: ./demo.sh
+      - run: ./scripts/dual_im_contract_acceptance.sh
+      - run: ./scripts/coverage_acceptance.sh
       - run: ./scripts/kubernetes_acceptance.sh --validate
       - run: docker build -t trpc-agent-service:ci .
       - run: ./scripts/postgres_migrations_test.sh

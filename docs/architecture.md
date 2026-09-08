@@ -61,7 +61,7 @@ flowchart TB
         direction LR
         ROUTER[租户数据后端路由]
         PG[(PostgreSQL<br/>Session/Event/Summary/Audit)]
-        REDIS[(Redis<br/>Lease/Fencing/Queue/热点状态)]
+        REDIS[(Redis<br/>可选 Runner Session<br/>Lease/Fencing/Queue)]
         VECTOR[(PGVector / Qdrant<br/>Knowledge 向量索引)]
         OBJECT[(PostgreSQL / S3-compatible<br/>Artifact/文件)]
         MEMORY[外部 Memory Service]
@@ -225,7 +225,7 @@ PostgreSQL Memory 提交后对其他 Worker 可见；外部 Memory 和向量索�
 
 平台使用按数据域拆分的 Adapter，不设计一个包办所有后端的通用 KV 接口。Session 需要顺序和事务，Knowledge 需要向量召回，Artifact 需要大对象读写；强行统一会丢失各后端真正需要的语义。
 
-`storage.Router` 已实现 PostgreSQL 路由，Artifact 支持 S3-compatible，Knowledge 支持 PGVector/Qdrant 与 OpenAI-compatible Embedding，Memory 支持 PostgreSQL 或外部 HTTPS 服务。Runtime Bundle 按 `(tenant_id, app_id, config_version)` 固定连接和工具；每个 Knowledge index 具有独立物理 namespace，并在 metadata filter 再次强制 tenant/App scope。Audit 以 PostgreSQL 为在线事实源，并可同步归档到外置 HTTPS WORM。
+`storage.Router` 已实现 PostgreSQL/Redis Runner Session 路由，Artifact 支持 S3-compatible，Knowledge 支持 PGVector/Qdrant 与 OpenAI-compatible Embedding，Memory 支持 PostgreSQL 或外部 HTTPS 服务。Runtime Bundle 按 `(tenant_id, app_id, config_version)` 固定连接和工具；Redis Session 和每个 Knowledge index 都具有独立物理 namespace，Knowledge 还在 metadata filter 再次强制 tenant/App scope。Audit 以 PostgreSQL 为在线事实源，并可同步归档到外置 HTTPS WORM。
 
 目标接口如下，业务代码不应直接依赖 PostgreSQL、Redis 或某个向量库 SDK：
 
@@ -243,13 +243,14 @@ Adapter 可以替换实现，但不能削弱这些语义。某个后端无法提
 | 数据域 | 生产后端 | 存储内容 | 一致性与取舍 |
 | --- | --- | --- | --- |
 | Tenant / Config / Channel Binding | PostgreSQL | 租户、App、不可变配置版本、IM 绑定 | 强一致；发布频率低，适合事务和审计 |
-| Inbox / Session / Event / Summary / Audit | PostgreSQL | 幂等消息、会话头、事件流、摘要、审计 | 事务强一致；热点 session 可能产生行锁竞争 |
-| Lease / Fencing / Queue / 热点缓存 | Redis Cluster | Worker 所有权、单调 token、短期状态、命令与事件总线 | 低延迟；不能把易失缓存当作事实来源，需 AOF/集群和降级策略 |
+| Inbox / 平台 Event / state / Summary 投影 / Audit | PostgreSQL | 幂等消息、会话头、事实事件流、派生摘要、审计 | 事务强一致；热点 session 可能产生行锁竞争 |
+| Runner Session / Summary | PostgreSQL 或 Redis | tRPC-Agent-Go 对话上下文和 Runner 摘要 | PG 强一致且易恢复；Redis 延迟低但需 AOF/多副本并接受恢复复杂度 |
+| Lease / Fencing / Queue / 热点缓存 | Redis Cluster | Worker 所有权、单调 token、短期状态、命令与事件总线 | 低延迟；fence 最终由 PostgreSQL 校验，Redis 故障时执行 fail-closed |
 | Memory | PostgreSQL 或外部 Memory 服务 | 用户长期事实、source event、版本状态 | SQL 便于强隔离；外部服务通常最终一致，读取要接受短暂不可见 |
 | Knowledge | PGVector / Qdrant | embedding、文本 chunk、metadata | ingest 完成后可见；物理 namespace 与强制 metadata filter 双重隔离 |
 | Artifact | PostgreSQL / S3-compatible | 图片、文件、工具产物 | revision 强一致分配；S3 跨节点分配由共享 PostgreSQL advisory lock 协调 |
 
-Session 的事实来源选择 PostgreSQL，Redis 负责 lease、fencing 和热点加速。这样 Redis 故障不会让历史事件消失，代价是一次 turn 至少包含 Inbox 和 Session 事务。Knowledge 与 Artifact 不进入主事务：event 提交后创建派生任务，异步更新向量索引或对象元数据。Agent 可以在短时间内读到旧知识版本，但不能读到其他租户的数据。
+默认选择 PostgreSQL Runner Session；低延迟租户可选择 Redis Session，但必须配置独立 namespace、同步写、AOF 和多副本。平台 Event/state/fencing 始终保留在 PostgreSQL，因此 Redis 故障不会破坏 Inbox、提交顺序或已发送记录；当前版本尚未自动用平台 Event 重建丢失的 Redis 对话历史，启用方必须把这项恢复复杂度纳入取舍。Knowledge 与 Artifact 不进入主事务：event 提交后创建派生任务，异步更新向量索引或对象元数据。
 
 后端迁移采用 `dual write -> snapshot/backfill -> verify -> cutover -> rollback window`。先发布带 `migration_target` 的配置版本，新 Bundle 从主库读取并同步双写目标；再通过 Admin API 创建租户/App/domain 任务。多个 Migration Worker 使用 PostgreSQL claim lease 和 `SKIP LOCKED` 分批处理，checkpoint 可恢复。任务完成后，下一次配置发布才能把目标提升为主路由。copier 覆盖 PostgreSQL Session/Summary/Memory/Artifact、PostgreSQL ↔ S3 Artifact 和 PGVector ↔ Qdrant Knowledge；Artifact/Knowledge 通过安全目录和 checksum 校验，任何冲突都阻止 cutover。
 
