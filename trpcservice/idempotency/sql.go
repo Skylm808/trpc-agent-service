@@ -269,7 +269,8 @@ func (store *SQLStore) SaveExecution(ctx context.Context, claim Claim, execution
 	if execution.Stage == ExecutionNone || execution.Reply == "" || execution.EventID == "" {
 		return errors.New("idempotency: execution stage, reply, and event ID are required")
 	}
-	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET execution_stage=$6,execution_reply=$7,execution_event_id=$8 WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing' AND lease_until>NOW() AND CASE execution_stage WHEN 'outbox_committed' THEN 3 WHEN 'derived_committed' THEN 2 WHEN 'runner_committed' THEN 1 ELSE 0 END <= CASE $6 WHEN 'outbox_committed' THEN 3 WHEN 'derived_committed' THEN 2 WHEN 'runner_committed' THEN 1 ELSE 0 END`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, execution.Stage, execution.Reply, execution.EventID)
+	now := store.now().UTC()
+	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET execution_stage=$6,execution_reply=$7,execution_event_id=$8 WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing' AND lease_until>$9 AND CASE execution_stage WHEN 'outbox_committed' THEN 3 WHEN 'derived_committed' THEN 2 WHEN 'runner_committed' THEN 1 ELSE 0 END <= CASE $6 WHEN 'outbox_committed' THEN 3 WHEN 'derived_committed' THEN 2 WHEN 'runner_committed' THEN 1 ELSE 0 END`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, execution.Stage, execution.Reply, execution.EventID, now)
 	return exactClaimResult(result, err)
 }
 

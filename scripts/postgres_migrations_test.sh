@@ -80,7 +80,11 @@ for file in \
   000007_storage_migrations.up.sql \
   000007_storage_migrations.down.sql \
   000008_pr23_migration_catalog.up.sql \
-  000008_pr23_migration_catalog.down.sql; do
+  000008_pr23_migration_catalog.down.sql \
+  000009_audit_versions.up.sql \
+  000009_audit_versions.down.sql \
+  000010_execution_recovery.up.sql \
+  000010_execution_recovery.down.sql; do
   docker cp "$ROOT/migrations/$file" "$CONTAINER:/tmp/$file" >/dev/null
 done
 
@@ -97,9 +101,13 @@ up() {
   psql_file 000006_cluster_control.up.sql
   psql_file 000007_storage_migrations.up.sql
   psql_file 000008_pr23_migration_catalog.up.sql
+  psql_file 000009_audit_versions.up.sql
+  psql_file 000010_execution_recovery.up.sql
 }
 
 down() {
+  psql_file 000010_execution_recovery.down.sql
+  psql_file 000009_audit_versions.down.sql
   psql_file 000008_pr23_migration_catalog.down.sql
   psql_file 000007_storage_migrations.down.sql
   psql_file 000006_cluster_control.down.sql
@@ -121,11 +129,19 @@ if [[ "$actual_tables" != "$expected_tables" ]]; then
   exit 1
 fi
 
-expected_indexes=$'idx_derived_jobs_ready\nidx_inbox_recovery_ready\nidx_migration_jobs_claim\nidx_migration_jobs_config_domain\nidx_outbox_delivery_ready\nidx_run_statuses_binding_updated\nidx_runtime_artifact_catalog_scope\nidx_worker_nodes_live\nuq_inbox_session_seq\nuq_inbox_tenant_id\nuq_message_events_tenant_inbox'
-actual_indexes="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname IN ('uq_message_events_tenant_inbox','uq_inbox_tenant_id','uq_inbox_session_seq','idx_derived_jobs_ready','idx_inbox_recovery_ready','idx_outbox_delivery_ready','idx_run_statuses_binding_updated','idx_worker_nodes_live','idx_migration_jobs_claim','idx_migration_jobs_config_domain','idx_runtime_artifact_catalog_scope') ORDER BY indexname")"
+expected_indexes=$'idx_audit_config_version\nidx_derived_jobs_ready\nidx_inbox_execution_stage\nidx_inbox_recovery_ready\nidx_migration_jobs_claim\nidx_migration_jobs_config_domain\nidx_outbox_delivery_ready\nidx_run_statuses_binding_updated\nidx_runtime_artifact_catalog_scope\nidx_worker_nodes_live\nuq_inbox_session_seq\nuq_inbox_tenant_id\nuq_message_events_tenant_inbox'
+actual_indexes="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname IN ('uq_message_events_tenant_inbox','uq_inbox_tenant_id','uq_inbox_session_seq','idx_derived_jobs_ready','idx_inbox_recovery_ready','idx_inbox_execution_stage','idx_outbox_delivery_ready','idx_run_statuses_binding_updated','idx_worker_nodes_live','idx_migration_jobs_claim','idx_migration_jobs_config_domain','idx_runtime_artifact_catalog_scope','idx_audit_config_version') ORDER BY indexname")"
 if [[ "$actual_indexes" != "$expected_indexes" ]]; then
   echo "missing PostgreSQL migration indexes:" >&2
   echo "$actual_indexes" >&2
+  exit 1
+fi
+
+expected_columns=$'audit_logs.config_version\naudit_logs.policy_version\ninbox_messages.execution_event_id\ninbox_messages.execution_reply\ninbox_messages.execution_stage'
+actual_columns="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT table_name || '.' || column_name FROM information_schema.columns WHERE table_schema='public' AND ((table_name='audit_logs' AND column_name IN ('config_version','policy_version')) OR (table_name='inbox_messages' AND column_name IN ('execution_stage','execution_reply','execution_event_id'))) ORDER BY table_name,column_name")"
+if [[ "$actual_columns" != "$expected_columns" ]]; then
+  echo "missing PostgreSQL migration columns:" >&2
+  echo "$actual_columns" >&2
   exit 1
 fi
 
