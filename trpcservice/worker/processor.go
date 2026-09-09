@@ -457,6 +457,16 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 			return fmt.Errorf("worker: persist derived execution state: %w", saveErr)
 		}
 	}
+	if auditEnabled && processor.Audit != nil {
+		if auditErr := processor.appendAudit(request, tenantRedactor, governanceDecision, "", map[string]any{"cost_basis": "reserved_estimate"}, time.Since(started), projection.lastTool, projection.costMicros); auditErr != nil {
+			processor.Telemetry.Request(ctx, servicemetrics.Labels{TenantID: request.TenantID, AppID: request.AppID, Channel: request.BindingID, Operation: "audit", Status: "failed"}, 0, 0, 0)
+			if auditFailClosed {
+				return fmt.Errorf("worker: audit persistence failed: %w", auditErr)
+			}
+		} else {
+			auditAppended = true
+		}
+	}
 	outboxCtx, outboxSpan := processor.Telemetry.Start(ctx, "outbox.write", processor.spanFields(request))
 	outbound := gateway.OutboundMessage{TenantID: request.TenantID, AppID: request.AppID, BindingID: request.BindingID, ConfigVersion: request.ConfigVersion, OutboxID: "outbox:" + request.InboxID, DedupeKey: "reply:" + request.InboxID, UserID: request.UserID, SessionID: request.SessionID, ExternalUserID: request.ExternalUserID, ConversationID: request.ConversationID, Text: reply, ReplyFormat: replyFormat(snapshot, request.BindingID), TraceID: request.TraceID, TraceContext: processor.Telemetry.Inject(outboxCtx), SourceInboxID: request.InboxID, SourceEventID: eventID}
 	outboxStarted := time.Now()
@@ -470,16 +480,6 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	if executionStore != nil {
 		if saveErr := executionStore.SaveExecution(ctx, claim, idempotency.ExecutionRecord{Stage: idempotency.ExecutionOutboxCommitted, Reply: reply, EventID: eventID}); saveErr != nil {
 			return fmt.Errorf("worker: persist outbox execution state: %w", saveErr)
-		}
-	}
-	if auditEnabled && processor.Audit != nil {
-		if auditErr := processor.appendAudit(request, tenantRedactor, governanceDecision, "", map[string]any{"cost_basis": "reserved_estimate"}, time.Since(started), projection.lastTool, projection.costMicros); auditErr != nil {
-			processor.Telemetry.Request(ctx, servicemetrics.Labels{TenantID: request.TenantID, AppID: request.AppID, Channel: request.BindingID, Operation: "audit", Status: "failed"}, 0, 0, 0)
-			if auditFailClosed {
-				return fmt.Errorf("worker: audit persistence failed: %w", auditErr)
-			}
-		} else {
-			auditAppended = true
 		}
 	}
 	if err := processor.Inbox.Complete(ctx, claim); err != nil {
