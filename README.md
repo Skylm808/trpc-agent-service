@@ -46,26 +46,29 @@ flowchart TB
         direction LR
         IM[企业微信 / 飞书] --> CHANNEL[Channel Adapter]
         CHANNEL --> GATEWAY[Agent Gateway]
-        GATEWAY --> INBOX[(Inbox / Redis Streams)]
+        GATEWAY --> INBOX[(PostgreSQL Inbox)]
+        INBOX --> QUEUE[(Redis Streams)]
     end
 
     subgraph EXECUTION["无状态执行面（水平扩展）"]
         direction LR
         WORKERS[Agent Worker × N] --> RUNNER[tRPC-Agent-Go Runner]
         RUNNER --> GOVERNANCE[Plugin / Guardrail]
-        RUNNER --> TOOLS[Tool / MCP / 外部系统]
+        GOVERNANCE --> TOOLS[Tool / MCP / 外部系统]
     end
 
     subgraph DATA["共享数据面"]
         direction LR
-        STORAGE[Storage Adapter] --> PG[(PostgreSQL<br/>Event / Audit / Fencing)]
+        STORAGE[Storage Adapter] --> PG[(PostgreSQL<br/>Session / Event / Memory / Audit)]
+        STORAGE --> REDIS[(Redis<br/>Runner Session（可选）)]
         STORAGE --> VECTOR[(PGVector / Qdrant<br/>Knowledge)]
         STORAGE --> OBJECT[(S3-compatible<br/>Artifact)]
+        STORAGE --> EXT_MEMORY[外部 Memory Service]
     end
 
     subgraph DELIVERY["异步回复"]
         direction LR
-        OUTBOX[(Outbox)] --> SENDER[Channel Sender]
+        OUTBOX[(PostgreSQL Outbox)] --> SENDER[Channel Sender]
     end
 
     subgraph OBSERVABILITY["可观测性"]
@@ -74,7 +77,7 @@ flowchart TB
         COLLECTOR --> BACKEND[Tempo / Prometheus / Grafana]
     end
 
-    INBOX --> WORKERS
+    QUEUE --> WORKERS
     RUNNER --> STORAGE
     WORKERS --> OUTBOX
     SENDER --> IM_REPLY[企业微信 / 飞书 Reply API]
@@ -87,6 +90,8 @@ flowchart TB
 ```
 
 Gateway 只接收和规范化请求，Worker 执行 Runner；节点不保存会话亲和状态。租户、binding、identity、session 和 message_id 共同确定隔离边界，共享 PostgreSQL/Redis 保证任意 Worker 可继续处理，因此不需要 sticky session。
+
+完整组件职责及“企业微信回调 → Runner → Tool → Session / Memory → Outbox 回复”的 `trace_id` 贯通时序见[架构设计](docs/architecture.md#4-消息执行链路)。
 
 ## 当前能力
 
@@ -154,20 +159,19 @@ InMemory 只用于测试和离线 Demo；生产模式会拒绝关键数据域使
 
 Admin API 是平台控制面，用于租户配置的预览、发布、回滚，以及存储迁移、节点和队列状态管理；它不承载 IM 消息处理。写操作需要管理令牌并带审计记录，接口说明见[部署指南](docs/deployment.md#配置发布)。
 
-## 文档
+## 交付物与文档
 
-- [架构设计](docs/architecture.md)：组件职责、路由、隔离、一致性与容量设计
-- [需求验收矩阵](docs/acceptance-matrix.md)：题目要求对应的代码、测试与验收证据
-- [双 IM 可复现验收](scripts/dual_im_contract_acceptance.sh)：合成加密回调到模拟平台回复
-- [容量测试与估算](docs/capacity.md)：负载探针、容量模型与准入指标
-- [部署指南](docs/deployment.md)：Compose、生产参数和运维操作
-- [数据模型](docs/data-model.md)：核心表和租户键
-- [数据同步与幂等](docs/message-runtime.md)：顺序、幂等、lease 与 fencing
-- [多后端与迁移](docs/storage-migrations.md)：适配、双写、校验和 cutover
-- [企业微信接入](docs/wecom.md) / [飞书接入](docs/feishu.md)
-- [治理与安全](docs/governance.md) / [可观测性](docs/observability.md)
-- [风险清单](docs/risks.md)：生产风险与缓解措施
-- [Kubernetes Demo](deploy/kubernetes/README.md)
+| 交付物 | 位置 | 内容 |
+| --- | --- | --- |
+| 架构设计、系统架构图、核心时序图 | [架构设计](docs/architecture.md) | 组件职责、跨节点路由、租户隔离、完整消息链路与框架复用边界 |
+| 数据模型 | [数据模型](docs/data-model.md)、[`migrations/`](migrations/) | Tenant、Agent App、Session、Event、Memory、Summary、Channel Binding、Audit 等核心模型 |
+| 数据同步与幂等策略 | [消息运行时](docs/message-runtime.md)、[恢复控制面](docs/message-recovery.md) | 顺序提交、lease/fencing、Inbox/Outbox、重复投递和崩溃恢复 |
+| 多后端适配与迁移 | [多后端与迁移](docs/storage-migrations.md)、[Knowledge/Artifact](docs/knowledge.md) | Redis/PostgreSQL、PGVector/Qdrant、S3-compatible、外部 Memory 的路由与迁移 |
+| IM 接入设计 | [企业微信](docs/wecom.md)、[飞书](docs/feishu.md)、[媒体与卡片](docs/media.md) | 验签、身份/会话映射、异步回复、重试、限流及媒体边界 |
+| 治理、安全与可观测性 | [治理与安全](docs/governance.md)、[可观测性](docs/observability.md) | Plugin/Guardrail、审计、密钥、指标、Trace 和告警 |
+| 生产风险清单 | [风险清单](docs/risks.md) | 18 项生产风险、缓解措施及演练建议 |
+| 部署、容量与验收 | [部署指南](docs/deployment.md)、[容量评估](docs/capacity.md)、[Kubernetes Demo](deploy/kubernetes/README.md) | Compose/Kubernetes、扩缩容、灰度回滚和生产门禁 |
+| 需求覆盖证据 | [验收矩阵](docs/acceptance-matrix.md)、[双 IM 验收](scripts/dual_im_contract_acceptance.sh) | 需求到代码、测试和目标环境复验项的逐项映射 |
 
 ## 开发验证
 
