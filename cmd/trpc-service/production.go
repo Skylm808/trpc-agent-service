@@ -255,6 +255,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 		return secret.Resolve(ctx, ref)
 	})
 	toolRegistry.SetScopedResolver(scopedSecrets.Resolve)
+	toolRegistry.SetExecutionStore(&servicetool.SQLExecutionStore{DB: db})
 	if err := preflightPublishedTools(connectCtx, db, toolRegistry); err != nil {
 		return nil, err
 	}

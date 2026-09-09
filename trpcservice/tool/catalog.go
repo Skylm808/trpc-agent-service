@@ -37,6 +37,7 @@ type mcpFactory func(tenant.MCPServer, map[string]string) mcpToolSet
 type CatalogRegistry struct {
 	resolve       SecretResolver
 	resolveScoped ScopedSecretResolver
+	executions    ExecutionStore
 	mcpFactory    mcpFactory
 	httpClient    *http.Client
 }
@@ -46,6 +47,12 @@ type CatalogRegistry struct {
 func (registry *CatalogRegistry) SetScopedResolver(resolve ScopedSecretResolver) {
 	if registry != nil {
 		registry.resolveScoped = resolve
+	}
+}
+
+func (registry *CatalogRegistry) SetExecutionStore(store ExecutionStore) {
+	if registry != nil {
+		registry.executions = store
 	}
 }
 
@@ -133,7 +140,7 @@ func (registry *CatalogRegistry) build(ctx context.Context, tenantID, appID stri
 			if _, exists := catalog.tools[exposed]; exists {
 				return nil, fmt.Errorf("tool catalog: duplicate exposed tool %q", exposed)
 			}
-			catalog.tools[exposed] = &safeRemoteTool{delegate: callable, declaration: renamedDeclaration(candidate.Declaration(), exposed), redactor: redactor, callGate: serverCallGate}
+			catalog.tools[exposed] = registry.wrapExecution(exposed, &safeRemoteTool{delegate: callable, declaration: renamedDeclaration(candidate.Declaration(), exposed), redactor: redactor, callGate: serverCallGate})
 		}
 	}
 	for _, configured := range app.BusinessTools {
@@ -147,10 +154,75 @@ func (registry *CatalogRegistry) build(ctx context.Context, tenantID, appID stri
 		if _, exists := catalog.tools[configured.Name]; exists {
 			return nil, fmt.Errorf("tool catalog: duplicate exposed tool %q", configured.Name)
 		}
-		catalog.tools[configured.Name] = &HTTPJSONTool{config: configured, credential: credential, client: registry.httpClient, redactor: servicelog.NewRedactor(nil, []string{credential})}
+		catalog.tools[configured.Name] = registry.wrapExecution(configured.Name, &HTTPJSONTool{config: configured, credential: credential, client: registry.httpClient, redactor: servicelog.NewRedactor(nil, []string{credential})})
 	}
 	failed = false
 	return catalog, nil
+}
+
+func (registry *CatalogRegistry) wrapExecution(name string, delegate trpctool.Tool) trpctool.Tool {
+	if registry == nil || registry.executions == nil {
+		return delegate
+	}
+	return &executionLedgerTool{name: name, delegate: delegate, store: registry.executions}
+}
+
+type executionLedgerTool struct {
+	name     string
+	delegate trpctool.Tool
+	store    ExecutionStore
+}
+
+func (tool *executionLedgerTool) Declaration() *trpctool.Declaration {
+	if tool == nil || tool.delegate == nil {
+		return nil
+	}
+	return tool.delegate.Declaration()
+}
+
+func (tool *executionLedgerTool) ToolMetadata() trpctool.ToolMetadata {
+	if tool == nil || tool.delegate == nil {
+		return trpctool.ToolMetadata{}
+	}
+	return trpctool.MetadataOf(tool.delegate)
+}
+
+func (tool *executionLedgerTool) Call(ctx context.Context, args []byte) (any, error) {
+	if tool == nil || tool.delegate == nil || tool.store == nil {
+		return nil, errors.New("tool: execution ledger is unavailable")
+	}
+	request, ok := policy.FromContext(ctx)
+	if !ok || request.Request.RequestID == "" || request.Request.TenantID == "" {
+		return nil, policy.ErrToolDenied
+	}
+	ordinal := request.Invocations.Next()
+	if ordinal == 0 {
+		ordinal = 1
+	}
+	callID := executionCallID(tool.name, ordinal)
+	requestCtx := policy.WithInvocation(ctx, ordinal)
+	record := ExecutionRecord{TenantID: request.Request.TenantID, RequestID: request.Request.RequestID, ToolCallID: callID, ToolName: tool.name, ArgumentsHash: hashBytes(args), IdempotencyKey: request.Request.RequestID + ":" + tool.name + ":" + fmt.Sprint(ordinal), TraceID: "", Status: ExecutionRunning}
+	if err := tool.store.Begin(requestCtx, record); err != nil {
+		return nil, errors.New("tool: execution ledger unavailable")
+	}
+	callable, ok := tool.delegate.(trpctool.CallableTool)
+	if !ok {
+		_ = tool.store.Fail(context.Background(), record.TenantID, record.RequestID, record.ToolCallID, "tool_not_callable", ExecutionFailed)
+		return nil, errors.New("tool: execution target is not callable")
+	}
+	result, err := callable.Call(requestCtx, args)
+	if err != nil {
+		status := ExecutionFailed
+		if requestCtx.Err() != nil {
+			status = ExecutionOutcomeUnknown
+		}
+		_ = tool.store.Fail(context.Background(), record.TenantID, record.RequestID, record.ToolCallID, "tool_call_failed", status)
+		return nil, err
+	}
+	if completeErr := tool.store.Complete(context.Background(), record.TenantID, record.RequestID, record.ToolCallID, hashBytes([]byte(fmt.Sprint(result)))); completeErr != nil {
+		return result, errors.New("tool: execution ledger completion failed")
+	}
+	return result, nil
 }
 
 func (registry *CatalogRegistry) resolveRef(ctx context.Context, tenantID, appID string, ref tenant.SecretRef) (string, error) {

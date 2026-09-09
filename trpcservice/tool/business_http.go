@@ -69,7 +69,10 @@ func (tool *HTTPJSONTool) Call(ctx context.Context, args []byte) (any, error) {
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "trpc-agent-service-business-tool/1")
-	invocation := requestPolicy.Invocations.Next()
+	invocation := policy.InvocationFromContext(timeoutCtx)
+	if invocation == 0 {
+		invocation = requestPolicy.Invocations.Next()
+	}
 	if invocation == 0 {
 		invocation = 1
 	}

@@ -77,6 +77,7 @@ type Engine struct {
 }
 
 type requestContextKey struct{}
+type invocationContextKey struct{}
 type ContextRequest struct {
 	Engine      *Engine
 	Request     Request
@@ -107,6 +108,15 @@ func WithRequest(ctx context.Context, engine *Engine, request Request) context.C
 func FromContext(ctx context.Context) (ContextRequest, bool) {
 	value, ok := ctx.Value(requestContextKey{}).(ContextRequest)
 	return value, ok
+}
+
+func WithInvocation(ctx context.Context, ordinal uint64) context.Context {
+	return context.WithValue(ctx, invocationContextKey{}, ordinal)
+}
+
+func InvocationFromContext(ctx context.Context) uint64 {
+	value, _ := ctx.Value(invocationContextKey{}).(uint64)
+	return value
 }
 
 // Evaluate applies identity and budget before creating all three upstream tool controls.
