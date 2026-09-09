@@ -4,6 +4,7 @@ package admin
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -357,9 +358,7 @@ func (service *Service) recordDecision(ctx context.Context, tenantID, action str
 		errorType = fmt.Sprintf("%T", callErr)
 	}
 	traceID := TraceFrom(ctx)
-	if traceID == "" {
-		traceID = "admin:" + action
-	}
+	operationID := newOperationID()
 	details := map[string]any{
 		"actor":       ActorFrom(ctx),
 		"action":      action,
@@ -373,7 +372,7 @@ func (service *Service) recordDecision(ctx context.Context, tenantID, action str
 	defer cancel()
 	_ = service.audit.Append(auditCtx, audit.Record{
 		TenantID: tenantID, AgentName: action, Decision: decision, Latency: service.now().Sub(started),
-		ErrorType: errorType, ConfigVersion: newVersion, PolicyVersion: newVersion, TraceID: traceID, RequestID: traceID, Details: details,
+		ErrorType: errorType, ConfigVersion: newVersion, PolicyVersion: newVersion, TraceID: traceID, RequestID: operationID, Details: details,
 	})
 }
 
@@ -387,9 +386,7 @@ func (service *Service) recordRecoveryDecision(ctx context.Context, tenantID, ac
 		errorType = fmt.Sprintf("%T", callErr)
 	}
 	traceID := TraceFrom(ctx)
-	if traceID == "" {
-		traceID = "admin:" + action
-	}
+	operationID := newOperationID()
 	reasonDigest := sha256.Sum256([]byte(reason))
 	details := map[string]any{"actor": ActorFrom(ctx), "action": action, "message_id": id, "old_status": oldStatus, "new_status": newStatus, "reason_hash": hex.EncodeToString(reasonDigest[:])}
 	if callErr != nil {
@@ -397,5 +394,13 @@ func (service *Service) recordRecoveryDecision(ctx context.Context, tenantID, ac
 	}
 	auditCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = service.audit.Append(auditCtx, audit.Record{TenantID: tenantID, AgentName: action, Decision: decision, Latency: service.now().Sub(started), ErrorType: errorType, TraceID: traceID, RequestID: traceID, Details: details})
+	_ = service.audit.Append(auditCtx, audit.Record{TenantID: tenantID, AgentName: action, Decision: decision, Latency: service.now().Sub(started), ErrorType: errorType, TraceID: traceID, RequestID: operationID, Details: details})
+}
+
+func newOperationID() string {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return fmt.Sprintf("operation:%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("operation:%x", value[:])
 }
