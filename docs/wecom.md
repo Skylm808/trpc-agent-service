@@ -31,7 +31,7 @@ sequenceDiagram
     A->>I: tenant-scoped claim(MsgId)
     A-->>W: 200 success
     I->>R: RunRequest
-    R->>R: LLMAgent / Tool / Session / Memory
+    R->>R: Tenant Agent workflow / Tool / Session / Memory
     R->>O: durable reply
     O->>S: claim pending delivery
     S->>W: message/send 或 appchat/send
@@ -60,8 +60,8 @@ channels:
 ```
 
 `Token`、`EncodingAESKey`、应用 Secret 和 access token 的实际值不进入配置快照正文、日志、
-trace 或错误信息。开发组合器支持 `env` 和挂载的 `file` SecretRef；Vault / KMS 应由
-生产 Secret Resolver 注入。
+trace 或错误信息。组合器支持 `env`、挂载的 `file`、Vault KV v2-compatible HTTPS 和
+KMS-compatible HTTPS SecretRef；外部 Provider 未配置或解析失败时 fail-closed。
 
 ## 身份与会话
 

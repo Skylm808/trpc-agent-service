@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -20,6 +21,12 @@ type Route struct {
 type RouteResolver interface {
 	Keys() []BindingKey
 	Resolve(gateway.OutboundMessage) (channels.TextSender, error)
+}
+
+// ContextRouteResolver is implemented by production route tables whose
+// control-plane lookup must be cancellable during shutdown or DB incidents.
+type ContextRouteResolver interface {
+	ResolveContext(context.Context, gateway.OutboundMessage) (channels.TextSender, error)
 }
 
 // Router resolves only explicitly registered tenant bindings.
@@ -57,8 +64,16 @@ func (router *Router) Keys() []BindingKey {
 
 // Resolve selects a sender without trusting payload-owned tenant scope.
 func (router *Router) Resolve(message gateway.OutboundMessage) (channels.TextSender, error) {
+	return router.ResolveContext(context.Background(), message)
+}
+
+// ResolveContext selects a sender while honoring the caller's deadline.
+func (router *Router) ResolveContext(ctx context.Context, message gateway.OutboundMessage) (channels.TextSender, error) {
 	if router == nil {
 		return nil, errors.New("delivery: nil router")
+	}
+	if ctx == nil {
+		return nil, errors.New("delivery: nil context")
 	}
 	sender := router.senders[BindingKey{TenantID: message.TenantID, BindingID: message.BindingID}]
 	if sender == nil {
@@ -68,3 +83,4 @@ func (router *Router) Resolve(message gateway.OutboundMessage) (channels.TextSen
 }
 
 var _ RouteResolver = (*Router)(nil)
+var _ ContextRouteResolver = (*Router)(nil)

@@ -12,12 +12,13 @@
 | 验收要求 | 状态 | 实现与验证证据 |
 | --- | --- | --- |
 | 租户、应用、模型、工具、IM、后端和审计策略 | 已实现 | `trpcservice/tenant/model.go`；`TestLoadValidConfiguration`、`TestRuntimeSnapshotReturnsDefensiveCopies` |
+| LLM、Chain、Parallel、Cycle、Graph 编排 | 已实现 | 声明式、版本固定 Runtime；`TestWorkflowValidation`、`TestBuildAgentSupportsPublishedWorkflowTypes` |
 | Gateway、Worker、Channel、Storage、Admin、Telemetry 协作 | 已实现 | `docs/architecture.md`、`cmd/trpc-service/production.go`；`TestTwoTenantTwoWorkerEndToEndToolMemoryOutboxAndTrace` |
 | Gateway/Worker 水平扩展 | 已实现 | Redis Streams、PostgreSQL Inbox、Worker Registry；`TestRedisStreamDistributesWorkAcrossNodes`、`scripts/multinode_acceptance.sh` |
 | 正确租户和 session 路由 | 已实现 | 服务端 Channel Binding 与 canonical user/session；`TestClientCannotChooseSessionOrTenant` |
 | 不依赖 sticky session | 已实现 | 共享 Session/Memory、session lease/fence；`TestRedisCoordinatorMonotonicFenceAndCompareRelease` |
 | 配置、数据、工具和身份隔离 | 已实现 | 租户前缀主键、版本化 Bundle、Tool Filter、IM ACL；`TestBundlesIsolateSameUserAndSessionAcrossTenants` |
-| Secret 与日志脱敏 | 已实现 | env/file 与可插拔 Vault/KMS Resolver；Secret、Metrics、Channel 泄漏测试 |
+| Secret 与日志脱敏 | 已实现 | env/file/Vault KV v2-compatible/KMS-compatible HTTPS Resolver、Runner GovernancePlugin；`TestHTTPProviderResolvesVaultWithoutLeakingMetadata`、`TestGovernancePluginRedactsRunnerEventContent` 及泄漏测试 |
 
 ## 数据同步与多后端
 
@@ -25,7 +26,7 @@
 | --- | --- | --- |
 | Session、Memory、Summary、Artifact、Knowledge、Audit 分域抽象 | 已实现 | `trpcservice/storage`、`trpcservice/audit`、`docs/data-model.md` |
 | 多节点并发写同一 session | 已实现 | lease、单调 fencing token、事务提交；`TestSQLFenceGuardTurnOrderAndStaleCommit` |
-| Event → state → summary/memory 顺序 | 已实现 | 原子写入和派生幂等键；`TestAtomicIdempotencySummaryAndMemory` |
+| Event → state → summary/memory 顺序与崩溃恢复 | 已实现 | Inbox `runner/derived/outbox` durable stage、原子写入和派生幂等键；`TestProcessorRecoversRunnerResultWithoutSecondModelCall`、`TestAtomicIdempotencySummaryAndMemory` |
 | Memory 跨节点可见 | 已实现 | PostgreSQL 或外部 Memory；双租户双 Worker E2E 和 External Memory 测试 |
 | 后端迁移 | 已实现最小闭环 | checkpoint、lease、checksum、双写、verify、cutover；Migration Worker 测试 |
 | Redis ↔ PostgreSQL Session、PGVector ↔ Qdrant、S3 ↔ PostgreSQL | 已实现最小闭环 | Admin Migration Job、迁移 catalog；临时 PG/Redis 双向集成测试 |
@@ -52,6 +53,8 @@
 | 验收要求 | 状态 | 实现与验证证据 |
 | --- | --- | --- |
 | 工具白名单、ACL、预算、危险工具确认 | 已实现 | Policy Engine、Tool wrappers、共享 Budget/Approval Store；Policy/Tool 测试 |
+| 租户级审计 fail-open/fail-closed | 已实现 | 稳定 audit ID、complete 前同步审计、失败重试恢复；`TestProcessorFailClosedAuditRetriesWithoutSecondModelCall`、`TestRoutedStoreFailsClosedAfterPrimaryCommit` |
+| Gateway 跨节点入口限流与 HTTP 边界 | 已实现 | Redis `(tenant,binding)` 限流、429、生产 timeout/header 上限；`TestRedisAdmissionLimiter`、`TestServerAppliesProductionTimeoutDefaults` |
 | 请求、模型、工具、投递、成本和存储指标 | 已实现 | OpenTelemetry Metrics；Metrics/Storage observer 测试 |
 | Callback 到 Outbox 完整 Trace | 已实现 | W3C trace context 经 Inbox/Streams 传播；双租户双 Worker E2E |
 | 完整审计字段 | 已实现 | `audit_logs` 包含成本、配置/策略版本和 trace；Audit 测试 |
@@ -82,6 +85,8 @@
 
 ## 后置能力
 
-原生绑定具体厂商的 Vault/KMS SDK、队列自定义指标 HPA、租户级 Audit fail-closed、复杂 PDF/OCR、更多微信产品接入和真实生产规模压测属于后续增强。当前 Kubernetes 结论是“可复现最小 Demo 通过”，不是云上生产集群认证。
+具体云厂商 SDK（当前提供 Vault KV v2/KMS-compatible HTTPS 协议适配）、队列自定义指标 HPA、复杂 PDF/OCR、更多微信产品接入和真实生产规模压测属于后续增强。当前 Kubernetes 结论是“可复现最小 Demo 通过”，不是云上生产集群认证。
+
+平台事件、Memory、Outbox 和 Audit 通过稳定业务键幂等；`runner_committed` 之后的接管不会重复模型或 Tool。模型/Tool 成功但该阶段尚未落库的极窄窗口仍是 at-least-once，因此 MCP 发布要求 `idempotent: true`，副作用业务工具必须接受稳定 `X-Idempotency-Key`。这项责任边界不是未完成项，而是跨外部系统无法共享数据库事务时必须显式满足的生产契约。
 
 本轮脱敏实跑结果见 `docs/acceptance/` 下的双 IM、覆盖率、容量、多节点、Kubernetes 和可观测性报告。

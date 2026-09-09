@@ -18,6 +18,7 @@ type SQLWriteStore struct {
 }
 
 var _ WriteStore = (*SQLWriteStore)(nil)
+var _ CommittedTurnReader = (*SQLWriteStore)(nil)
 var _ FenceValidator = (*SQLWriteStore)(nil)
 
 func (store *SQLWriteStore) AdvanceFence(ctx context.Context, key gateway.SessionKey, token uint64) error {
@@ -149,6 +150,25 @@ func (store *SQLWriteStore) CommitTurn(ctx context.Context, write TurnWrite) (ui
 		return 0, err
 	}
 	return write.InboxSeq, nil
+}
+
+func (store *SQLWriteStore) CommittedTurn(ctx context.Context, key gateway.SessionKey, inboxID string) (Event, bool, error) {
+	if err := store.valid(key); err != nil {
+		return Event{}, false, err
+	}
+	if inboxID == "" {
+		return Event{}, false, errors.New("sessioncoord: inbox ID is required")
+	}
+	var committed Event
+	err := store.DB.QueryRowContext(ctx, `SELECT event_id,event_seq,event_type,payload_json,COALESCE(trace_id,''),created_at FROM message_events WHERE tenant_id=$1 AND app_id=$2 AND user_id=$3 AND session_id=$4 AND inbox_id=$5`, key.TenantID, key.AppID, key.UserID, key.SessionID, inboxID).Scan(&committed.EventID, &committed.Seq, &committed.Type, &committed.Payload, &committed.TraceID, &committed.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Event{}, false, nil
+	}
+	if err != nil {
+		return Event{}, false, err
+	}
+	committed.InboxID = inboxID
+	return committed, true, nil
 }
 
 func (store *SQLWriteStore) PublishSummary(ctx context.Context, key gateway.SessionKey, fence uint64, summary Summary) error {

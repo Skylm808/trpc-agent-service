@@ -49,6 +49,13 @@ type TurnWrite struct {
 	StateDelta                                    map[string]string
 }
 
+// CommittedTurnReader lets a retry recover a previously committed assistant
+// event before invoking the model again. Implementations return (false,nil)
+// when no event exists for the inbox ID.
+type CommittedTurnReader interface {
+	CommittedTurn(context.Context, gateway.SessionKey, string) (Event, bool, error)
+}
+
 // WriteStore is the platform persistence contract required for multi-node safety.
 type WriteStore interface {
 	FenceAdvancer
@@ -175,6 +182,20 @@ func (store *MemoryWriteStore) CommitTurn(_ context.Context, write TurnWrite) (u
 	data.head.State = newState
 	data.committedInbox[write.InboxID] = seq
 	return seq, nil
+}
+
+func (store *MemoryWriteStore) CommittedTurn(_ context.Context, key gateway.SessionKey, inboxID string) (Event, bool, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if inboxID == "" {
+		return Event{}, false, errors.New("sessioncoord: inbox ID is required")
+	}
+	data := store.data(key)
+	seq, ok := data.committedInbox[inboxID]
+	if !ok || seq == 0 || int(seq) > len(data.events) {
+		return Event{}, false, nil
+	}
+	return data.events[seq-1], true, nil
 }
 
 // PublishOutbox persists the reply only after the turn and derived writes succeed.

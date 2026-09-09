@@ -168,10 +168,14 @@ func execute(parent context.Context, config options) error {
 		}
 	}
 	elapsed := time.Since(started)
+	rps := 0.0
+	if elapsed > 0 {
+		rps = float64(len(latencies)) / elapsed.Seconds()
+	}
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	report := summary{
 		Scenario: config.Scenario, Requests: len(latencies), Succeeded: succeeded, Failed: failed,
-		DurationMS: milliseconds(elapsed), RPS: float64(len(latencies)) / elapsed.Seconds(),
+		DurationMS: milliseconds(elapsed), RPS: rps,
 		P50MS: milliseconds(percentile(latencies, 0.50)), P95MS: milliseconds(percentile(latencies, 0.95)),
 		P99MS: milliseconds(percentile(latencies, 0.99)), StatusCounts: statusCounts,
 	}

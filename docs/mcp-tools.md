@@ -36,6 +36,8 @@ mcp_servers:
     credential_scheme: Bearer
     allowed_tools:
       - lookup_customer
+    # MCP 无法与平台数据库组成事务；服务端必须按调用语义保证幂等。
+    idempotent: true
     timeout_seconds: 10
     enabled: true
 
@@ -51,6 +53,8 @@ business_tools:
 ```
 
 业务工具向固定 endpoint 发送 `POST application/json`，模型参数只能成为 JSON body。服务自动添加 Bearer credential 和 `X-Idempotency-Key: <request_id>:<tool_name>`，请求和响应上限均为 64 KiB，响应必须是 JSON object。非 2xx、超时、重定向、非 JSON 或超限响应都会变成不包含上游正文的通用错误。
+
+启用的 MCP server 必须声明 `idempotent: true`，表示远端对重复调用具备幂等语义。平台不能把 MCP 网络副作用与 Inbox 事务做成原子提交；不能满足该契约的写操作必须使用 Business HTTP adapter，并由远端按稳定 `X-Idempotency-Key` 去重。
 
 ## 发布、切换与故障行为
 

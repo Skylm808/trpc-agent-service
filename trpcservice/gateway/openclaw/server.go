@@ -6,15 +6,21 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Server adapts the gateway handler to the root App component lifecycle.
 type Server struct {
-	Address  string
-	Handler  http.Handler
-	mu       sync.Mutex
-	server   *http.Server
-	listener net.Listener
+	Address           string
+	Handler           http.Handler
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+	MaxHeaderBytes    int
+	mu                sync.Mutex
+	server            *http.Server
+	listener          net.Listener
 }
 
 // Start binds before returning, so lifecycle startup failures are observable.
@@ -28,11 +34,32 @@ func (component *Server) Start(_ context.Context) error {
 	}
 	component.mu.Lock()
 	component.listener = listener
-	component.server = &http.Server{Handler: component.Handler}
+	component.server = &http.Server{
+		Handler:           component.Handler,
+		ReadHeaderTimeout: defaultDuration(component.ReadHeaderTimeout, 10*time.Second),
+		ReadTimeout:       defaultDuration(component.ReadTimeout, 30*time.Second),
+		WriteTimeout:      defaultDuration(component.WriteTimeout, 60*time.Second),
+		IdleTimeout:       defaultDuration(component.IdleTimeout, 120*time.Second),
+		MaxHeaderBytes:    defaultInt(component.MaxHeaderBytes, 1<<20),
+	}
 	server := component.server
 	component.mu.Unlock()
 	go func() { _ = server.Serve(listener) }()
 	return nil
+}
+
+func defaultDuration(value, fallback time.Duration) time.Duration {
+	if value > 0 {
+		return value
+	}
+	return fallback
+}
+
+func defaultInt(value, fallback int) int {
+	if value > 0 {
+		return value
+	}
+	return fallback
 }
 
 // Close gracefully drains HTTP callbacks and streams.

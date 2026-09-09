@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	serviceagent "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/policy"
@@ -27,6 +28,31 @@ import (
 
 func runtimeSnapshot(t *testing.T, tenantID string, version int) config.RuntimeSnapshot {
 	return runtimeSnapshotWithTools(t, tenantID, version, "[echo, calculator]")
+}
+
+func TestBuildAgentSupportsPublishedWorkflowTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		workflow tenant.WorkflowConfig
+	}{
+		{name: "llm", workflow: tenant.WorkflowConfig{Type: tenant.WorkflowLLM}},
+		{name: "chain", workflow: tenant.WorkflowConfig{Type: tenant.WorkflowChain, Nodes: []tenant.WorkflowNode{{ID: "first", Instruction: "First."}, {ID: "second", Instruction: "Second."}}}},
+		{name: "parallel", workflow: tenant.WorkflowConfig{Type: tenant.WorkflowParallel, Nodes: []tenant.WorkflowNode{{ID: "left", Instruction: "Left."}, {ID: "right", Instruction: "Right."}}, Aggregator: &tenant.WorkflowNode{ID: "merge", Instruction: "Merge."}}},
+		{name: "cycle", workflow: tenant.WorkflowConfig{Type: tenant.WorkflowCycle, Nodes: []tenant.WorkflowNode{{ID: "review", Instruction: "Review."}}, MaxIterations: 2}},
+		{name: "graph", workflow: tenant.WorkflowConfig{Type: tenant.WorkflowGraph, Nodes: []tenant.WorkflowNode{{ID: "start", Instruction: "Start."}, {ID: "finish", Instruction: "Finish."}}, Edges: []tenant.WorkflowEdge{{From: "start", To: "finish"}}, Entry: "start", Finish: "finish", MaxConcurrency: 2}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app := tenant.AgentApp{Name: "root", Config: tenant.AppConfig{Instruction: "Answer."}, Workflow: test.workflow}
+			root, err := buildAgent(app, serviceagent.MockModel{}, nil, model.GenerationConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if root == nil {
+				t.Fatal("workflow root agent is nil")
+			}
+		})
+	}
 }
 
 func TestUserMessageBuildsMultimodalImageAndExtractedDocument(t *testing.T) {

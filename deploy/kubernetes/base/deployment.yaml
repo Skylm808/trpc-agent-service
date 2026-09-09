@@ -61,6 +61,8 @@ spec:
                   fieldPath: metadata.uid
             - name: TRPC_AGENT_SHUTDOWN_TIMEOUT
               value: 100s
+            - name: TRPC_AGENT_GATEWAY_RATE_LIMIT
+              value: "100"
             - name: TRPC_AGENT_POSTGRES_DSN
               valueFrom:
                 secretKeyRef:
@@ -81,6 +83,18 @@ spec:
                 secretKeyRef:
                   name: trpc-agent-secrets
                   key: admin-tokens
+            - name: TRPC_AGENT_VAULT_ENDPOINT
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: vault-endpoint, optional: true}
+            - name: TRPC_AGENT_VAULT_TOKEN
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: vault-token, optional: true}
+            - name: TRPC_AGENT_KMS_ENDPOINT
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: kms-endpoint, optional: true}
+            - name: TRPC_AGENT_KMS_TOKEN
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: kms-token, optional: true}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: http://otel-collector.observability.svc.cluster.local:4317
             - name: OTEL_EXPORTER_OTLP_PROTOCOL
@@ -205,6 +219,18 @@ spec:
                 secretKeyRef:
                   name: trpc-agent-secrets
                   key: deepseek-api-key
+            - name: TRPC_AGENT_VAULT_ENDPOINT
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: vault-endpoint, optional: true}
+            - name: TRPC_AGENT_VAULT_TOKEN
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: vault-token, optional: true}
+            - name: TRPC_AGENT_KMS_ENDPOINT
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: kms-endpoint, optional: true}
+            - name: TRPC_AGENT_KMS_TOKEN
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: kms-token, optional: true}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: http://otel-collector.observability.svc.cluster.local:4317
             - name: OTEL_EXPORTER_OTLP_PROTOCOL

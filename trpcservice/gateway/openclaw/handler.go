@@ -36,6 +36,7 @@ type Handler struct {
 	ClaimTTL   time.Duration
 	Telemetry  *servicemetrics.Telemetry
 	Readiness  func(context.Context) error
+	Admission  AdmissionLimiter
 }
 
 var _ gateway.InboundAcceptor = (*Handler)(nil)
@@ -58,6 +59,11 @@ func (handler *Handler) AcceptInbound(ctx context.Context, inbound gateway.Inbou
 	}
 	if inbound.ReceivedAt.IsZero() {
 		inbound.ReceivedAt = time.Now().UTC()
+	}
+	if handler.Admission != nil {
+		if err := handler.Admission.Allow(ctx, inbound); err != nil {
+			return gateway.AcceptedMessage{}, err
+		}
 	}
 	callbackCtx, callbackSpan := handler.Telemetry.Start(ctx, "channel.callback", servicemetrics.SpanFields{TenantID: inbound.TenantID, AppID: inbound.AppID, Channel: inbound.BindingID, RequestID: inbound.ExternalMessageID, TraceID: inbound.TraceID})
 	defer callbackSpan.End()
@@ -307,6 +313,14 @@ func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe 
 		traceID = newID()
 	}
 	inbound := gateway.InboundMessage{TenantID: route.TenantID, AppID: route.AppID, BindingID: route.BindingID, ExternalMessageID: input.MessageID, ExternalUserID: externalUserID, ConversationID: input.ConversationID, UserID: userID, SessionID: sessionID, Text: text, TraceID: traceID, ConfigVersion: route.ConfigVersion, ReceivedAt: time.Now().UTC(), TraceContext: handler.Telemetry.Inject(request.Context())}
+	if handler.Admission != nil {
+		if err := handler.Admission.Allow(request.Context(), inbound); err != nil {
+			if errors.Is(err, ErrAdmissionLimited) {
+				return MessageResponse{}, nil, http.StatusTooManyRequests, err
+			}
+			return MessageResponse{}, nil, http.StatusServiceUnavailable, err
+		}
+	}
 	claimCtx, claimSpan := handler.Telemetry.Start(request.Context(), "inbox.claim", servicemetrics.SpanFields{TenantID: route.TenantID, AppID: route.AppID, Channel: string(route.ChannelType), RequestID: input.MessageID, TraceID: traceID})
 	claim, won, err := handler.Inbox.Claim(claimCtx, inbound, handler.ClaimOwner, handler.claimTTL())
 	claimSpan.End()

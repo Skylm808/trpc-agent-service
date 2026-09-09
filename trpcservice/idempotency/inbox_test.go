@@ -223,3 +223,26 @@ func TestClaimReadyMovesExhaustedWorkToDLQ(t *testing.T) {
 		t.Fatalf("duplicate=%+v won=%v err=%v", duplicate, won, err)
 	}
 }
+
+func TestExecutionStateSurvivesClaimRecovery(t *testing.T) {
+	store := NewMemoryStore()
+	message := testMessage("tenant-a")
+	first, won, err := store.Claim(context.Background(), message, "worker-a", time.Minute)
+	if err != nil || !won {
+		t.Fatalf("first claim=%+v won=%v err=%v", first, won, err)
+	}
+	if err := store.SaveExecution(context.Background(), first, ExecutionRecord{Stage: ExecutionRunnerCommitted, Reply: "answer", EventID: "agent:" + first.InboxID}); err != nil {
+		t.Fatal(err)
+	}
+	store.now = func() time.Time { return time.Now().Add(2 * time.Minute) }
+	second, won, err := store.Claim(context.Background(), message, "worker-b", time.Minute)
+	if err != nil || !won {
+		t.Fatalf("reclaimed claim=%+v won=%v err=%v", second, won, err)
+	}
+	// A new claim token is required after takeover; the durable execution
+	// record itself remains available to the new owner.
+	execution, err := store.GetExecution(context.Background(), second)
+	if err != nil || execution.Stage != ExecutionRunnerCommitted || execution.Reply != "answer" {
+		t.Fatalf("execution=%+v err=%v", execution, err)
+	}
+}

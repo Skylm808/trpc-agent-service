@@ -114,7 +114,7 @@ func RuntimeFactoryWithServicesAndTools(writes PlatformStore, servicesFactory Se
 			externalTools = catalog.Tools()
 			closeTools = catalog.Close
 		}
-		bundle, err := serviceruntime.NewBundleWithServicesAndTools(snapshot, services, externalTools, closeTools)
+		bundle, err := serviceruntime.NewBundleWithServicesAndTools(snapshot, services, externalTools, closeTools, serviceruntime.NewGovernancePlugin(snapshot.Audit().RedactFields))
 		if err != nil {
 			if catalog != nil {
 				_ = catalog.Close()
@@ -139,7 +139,8 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	var projection *eventProjection
 	governanceDecision := "allow"
 	redact := processor.redact
-	auditEnabled, auditStoreContent := false, false
+	auditEnabled, auditStoreContent, auditFailClosed := false, false, false
+	auditAppended := false
 	tenantRedactor := servicelog.NewRedactor(nil, nil)
 	defer func() {
 		decision, errorType := governanceDecision, ""
@@ -170,15 +171,8 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 			}
 		}
 		processor.Telemetry.Request(ctx, servicemetrics.Labels{TenantID: request.TenantID, AppID: request.AppID, Channel: request.BindingID, Operation: "runner", Status: decision}, time.Since(started), tokens, costMicros)
-		if auditEnabled && processor.Audit != nil {
-			record := audit.Record{TenantID: request.TenantID, Channel: request.BindingID, UserID: request.UserID, SessionID: request.SessionID, AgentName: request.AppID, ToolName: toolName, Decision: decision, Latency: time.Since(started), ErrorType: errorType, CostMicros: costMicros, ConfigVersion: request.ConfigVersion, PolicyVersion: request.ConfigVersion, TraceID: request.TraceID, RequestID: request.InboxID, Details: details}
-			record.Channel = tenantRedactor.RedactField("channel", record.Channel)
-			record.UserID = tenantRedactor.RedactField("user_id", record.UserID)
-			record.SessionID = tenantRedactor.RedactField("session_id", record.SessionID)
-			record.ToolName = tenantRedactor.RedactField("tool_name", record.ToolName)
-			auditCtx, cancelAudit := context.WithTimeout(context.Background(), 2*time.Second)
-			auditErr := processor.Audit.Append(auditCtx, record)
-			cancelAudit()
+		if auditEnabled && processor.Audit != nil && !auditAppended {
+			auditErr := processor.appendAudit(request, tenantRedactor, decision, errorType, details, time.Since(started), toolName, costMicros)
 			if auditErr != nil {
 				processor.Telemetry.Request(ctx, servicemetrics.Labels{TenantID: request.TenantID, AppID: request.AppID, Channel: request.BindingID, Operation: "audit", Status: "failed"}, 0, 0, 0)
 			}
@@ -285,7 +279,10 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 		return err
 	}
 	auditPolicy := snapshot.Audit()
-	auditEnabled, auditStoreContent = auditPolicy.Enabled, auditPolicy.StoreContent
+	auditEnabled, auditStoreContent, auditFailClosed = auditPolicy.Enabled, auditPolicy.StoreContent, auditPolicy.FailClosed
+	if auditEnabled && auditFailClosed && processor.Audit == nil {
+		return errors.New("worker: fail-closed audit store is unavailable")
+	}
 	tenantRedactor = servicelog.NewRedactor(auditPolicy.RedactFields, nil)
 	redact = func(value string) string { return tenantRedactor.RedactString(processor.redact(value)) }
 	estimatedTokens := int64(len(request.Text)/4 + 1)
@@ -335,6 +332,30 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	runCtx = servicelog.WithRedactor(runCtx, tenantRedactor)
 	runCtx = servicemetrics.WithTelemetry(runCtx, processor.Telemetry, processor.spanFields(request))
 	projection = &eventProjection{publisher: processor.Publisher, request: request, workerID: processor.WorkerID, redact: redact, costMicros: estimatedCost, pricingVersion: app.Model.Pricing.Version}
+	executionStore, _ := processor.Inbox.(idempotency.ExecutionStore)
+	recovered := false
+	if executionStore != nil {
+		execution, readErr := executionStore.GetExecution(ctx, claim)
+		if readErr != nil {
+			return fmt.Errorf("worker: recover execution state: %w", readErr)
+		}
+		if execution.Stage != idempotency.ExecutionNone && execution.Reply != "" {
+			projection.reply = execution.Reply
+			recovered = true
+		}
+	}
+	if !recovered {
+		if reader, ok := processor.Writes.(sessioncoord.CommittedTurnReader); ok {
+			committed, found, readErr := reader.CommittedTurn(ctx, request.Key(), request.InboxID)
+			if readErr != nil {
+				return fmt.Errorf("worker: recover committed turn: %w", readErr)
+			}
+			if found {
+				projection.reply = committed.Payload
+				recovered = true
+			}
+		}
+	}
 	projection.onUsage = func(promptTokens, completionTokens int64) error {
 		actualTokens := promptTokens + completionTokens
 		actualCost := policy.EstimateModelCost(app.Model.Pricing, promptTokens, completionTokens)
@@ -348,23 +369,32 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	renewDone := make(chan struct{})
 	renewFailure := make(chan error, 1)
 	go processor.renew(runCtx, cancelRun, request, lease, claim, permit, renewDone, renewFailure)
-	runnerCtx, runnerSpan := processor.Telemetry.Start(sessioncoord.WithLease(runCtx, lease), "runner.execute", processor.spanFields(request))
-	runInput := serviceruntime.RunInput{RequestID: request.InboxID, UserID: request.UserID, SessionID: request.SessionID, Text: request.Text, Attachments: request.Attachments, Observer: projection.Observe, ToolFilter: controls.Visibility, ToolExecutionFilter: controls.Execution, ToolPermissionPolicy: controls.Permission}
-	_, err = runtimeLease.Runtime.Run(runnerCtx, runInput)
-	if err == nil && projection.pendingTool != "" {
-		processor.publish(request, gateway.RunEvent{Type: "run.approval_required", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Stage: "approval_required", ToolName: projection.pendingTool, ToolCallID: projection.pendingCall})
-		if approvalErr := processor.Policy.WaitApproval(runnerCtx, policyRequest, projection.pendingTool); approvalErr != nil {
-			err = approvalErr
-		} else if resumer, ok := runtimeLease.Runtime.(serviceruntime.ToolResumer); !ok {
-			err = errors.New("worker: runtime does not support approved tool resume")
-		} else {
-			_, err = resumer.ResumeTool(runnerCtx, serviceruntime.ToolResume{Input: runInput, ToolName: projection.pendingTool, ToolCallID: projection.pendingCall, Arguments: projection.pendingArgs})
+	if !recovered {
+		runnerCtx, runnerSpan := processor.Telemetry.Start(sessioncoord.WithLease(runCtx, lease), "runner.execute", processor.spanFields(request))
+		runInput := serviceruntime.RunInput{RequestID: request.InboxID, UserID: request.UserID, SessionID: request.SessionID, Text: request.Text, Attachments: request.Attachments, Observer: projection.Observe, ToolFilter: controls.Visibility, ToolExecutionFilter: controls.Execution, ToolPermissionPolicy: controls.Permission}
+		_, err = runtimeLease.Runtime.Run(runnerCtx, runInput)
+		if err == nil && projection.pendingTool != "" {
+			processor.publish(request, gateway.RunEvent{Type: "run.approval_required", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Stage: "approval_required", ToolName: projection.pendingTool, ToolCallID: projection.pendingCall})
+			if approvalErr := processor.Policy.WaitApproval(runnerCtx, policyRequest, projection.pendingTool); approvalErr != nil {
+				err = approvalErr
+			} else if resumer, ok := runtimeLease.Runtime.(serviceruntime.ToolResumer); !ok {
+				err = errors.New("worker: runtime does not support approved tool resume")
+			} else {
+				_, err = resumer.ResumeTool(runnerCtx, serviceruntime.ToolResume{Input: runInput, ToolName: projection.pendingTool, ToolCallID: projection.pendingCall, Arguments: projection.pendingArgs})
+			}
 		}
+		if projection.policyErr != nil {
+			err = errors.Join(err, projection.policyErr)
+		}
+		if err == nil && executionStore != nil && projection.reply != "" {
+			if saveErr := executionStore.SaveExecution(ctx, claim, idempotency.ExecutionRecord{Stage: idempotency.ExecutionRunnerCommitted, Reply: projection.reply, EventID: "agent:" + request.InboxID}); saveErr != nil {
+				err = fmt.Errorf("worker: persist runner result: %w", saveErr)
+			}
+		}
+		runnerSpan.End()
+	} else {
+		processor.publish(request, gateway.RunEvent{Type: "run.recovered", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID})
 	}
-	if projection.policyErr != nil {
-		err = errors.Join(err, projection.policyErr)
-	}
-	runnerSpan.End()
 	cancelRun()
 	<-renewDone
 	select {
@@ -421,6 +451,11 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	}
 	derivedSpan.End()
 	processor.observeOperation(derivedCtx, request, "memory_summary", derivedStarted, nil)
+	if executionStore != nil {
+		if saveErr := executionStore.SaveExecution(ctx, claim, idempotency.ExecutionRecord{Stage: idempotency.ExecutionDerivedCommitted, Reply: reply, EventID: eventID}); saveErr != nil {
+			return fmt.Errorf("worker: persist derived execution state: %w", saveErr)
+		}
+	}
 	outboxCtx, outboxSpan := processor.Telemetry.Start(ctx, "outbox.write", processor.spanFields(request))
 	outbound := gateway.OutboundMessage{TenantID: request.TenantID, AppID: request.AppID, BindingID: request.BindingID, ConfigVersion: request.ConfigVersion, OutboxID: "outbox:" + request.InboxID, DedupeKey: "reply:" + request.InboxID, UserID: request.UserID, SessionID: request.SessionID, ExternalUserID: request.ExternalUserID, ConversationID: request.ConversationID, Text: reply, ReplyFormat: replyFormat(snapshot, request.BindingID), TraceID: request.TraceID, TraceContext: processor.Telemetry.Inject(outboxCtx), SourceInboxID: request.InboxID, SourceEventID: eventID}
 	outboxStarted := time.Now()
@@ -431,12 +466,43 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	}
 	outboxSpan.End()
 	processor.observeOperation(outboxCtx, request, "outbox_write", outboxStarted, nil)
+	if executionStore != nil {
+		if saveErr := executionStore.SaveExecution(ctx, claim, idempotency.ExecutionRecord{Stage: idempotency.ExecutionOutboxCommitted, Reply: reply, EventID: eventID}); saveErr != nil {
+			return fmt.Errorf("worker: persist outbox execution state: %w", saveErr)
+		}
+	}
+	if auditEnabled && processor.Audit != nil {
+		if auditErr := processor.appendAudit(request, tenantRedactor, governanceDecision, "", map[string]any{"cost_basis": "reserved_estimate"}, time.Since(started), projection.lastTool, projection.costMicros); auditErr != nil {
+			processor.Telemetry.Request(ctx, servicemetrics.Labels{TenantID: request.TenantID, AppID: request.AppID, Channel: request.BindingID, Operation: "audit", Status: "failed"}, 0, 0, 0)
+			if auditFailClosed {
+				return fmt.Errorf("worker: audit persistence failed: %w", auditErr)
+			}
+		} else {
+			auditAppended = true
+		}
+	}
 	if err := processor.Inbox.Complete(ctx, claim); err != nil {
 		return err
 	}
 	completed = true
 	processor.publish(request, gateway.RunEvent{Type: "run.completed", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID, Message: reply, Terminal: true})
 	return nil
+}
+
+func (processor *Processor) appendAudit(request gateway.RunRequest, redactor *servicelog.Redactor, decision, errorType string, details map[string]any, latency time.Duration, toolName string, costMicros int64) error {
+	if processor == nil || processor.Audit == nil {
+		return errors.New("worker: audit store is unavailable")
+	}
+	record := audit.Record{TenantID: request.TenantID, Channel: request.BindingID, UserID: request.UserID, SessionID: request.SessionID, AgentName: request.AppID, ToolName: toolName, Decision: decision, Latency: latency, ErrorType: errorType, CostMicros: costMicros, ConfigVersion: request.ConfigVersion, PolicyVersion: request.ConfigVersion, TraceID: request.TraceID, RequestID: request.InboxID, Details: details}
+	if redactor != nil {
+		record.Channel = redactor.RedactField("channel", record.Channel)
+		record.UserID = redactor.RedactField("user_id", record.UserID)
+		record.SessionID = redactor.RedactField("session_id", record.SessionID)
+		record.ToolName = redactor.RedactField("tool_name", record.ToolName)
+	}
+	auditCtx, cancelAudit := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelAudit()
+	return processor.Audit.Append(auditCtx, record)
 }
 
 func isGovernanceDenial(err error) bool {

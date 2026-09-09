@@ -20,8 +20,13 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/chainagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/cycleagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/graphagent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/parallelagent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/graph"
 	knowledgetool "trpc.group/trpc-go/trpc-agent-go/knowledge/tool"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
@@ -159,9 +164,62 @@ func NewBundleWithServicesAndTools(snapshot config.RuntimeSnapshot, services *st
 		maxTokens := app.Model.MaxTokens
 		generation.MaxTokens = &maxTokens
 	}
-	agent := llmagent.New(app.Name, llmagent.WithModel(runtimeModel), llmagent.WithInstruction(app.Config.Instruction), llmagent.WithTools(tools), llmagent.WithGenerationConfig(generation))
-	run := runner.NewRunner(appName, agent, runner.WithSessionService(services.Session), runner.WithMemoryService(services.Memory), runner.WithArtifactService(services.Artifact), runner.WithPlugins(plugins...))
+	rootAgent, err := buildAgent(app, runtimeModel, tools, generation)
+	if err != nil {
+		return nil, err
+	}
+	run := runner.NewRunner(appName, rootAgent, runner.WithSessionService(services.Session), runner.WithMemoryService(services.Memory), runner.WithArtifactService(services.Artifact), runner.WithPlugins(plugins...))
 	return &Bundle{tenantID: snapshot.TenantID(), appID: snapshot.AppID(), appName: appName, version: snapshot.Version(), toolNames: append([]string(nil), toolNames...), toolPolicy: app.Tools, tools: callableTools, runner: run, services: services, externalToolsClose: closeTools, drainTimeout: time.Second, multimodal: app.Model.Multimodal}, nil
+}
+
+func buildAgent(app tenant.AgentApp, runtimeModel model.Model, tools []tool.Tool, generation model.GenerationConfig) (trpcagent.Agent, error) {
+	leaf := func(name, instruction string) trpcagent.Agent {
+		return llmagent.New(name, llmagent.WithModel(runtimeModel), llmagent.WithInstruction(instruction), llmagent.WithTools(tools), llmagent.WithGenerationConfig(generation))
+	}
+	kind := app.Workflow.Type
+	if kind == "" || kind == tenant.WorkflowLLM {
+		return leaf(app.Name, app.Config.Instruction), nil
+	}
+	subAgents := make([]trpcagent.Agent, 0, len(app.Workflow.Nodes))
+	for _, node := range app.Workflow.Nodes {
+		subAgents = append(subAgents, leaf(node.ID, node.Instruction))
+	}
+	switch kind {
+	case tenant.WorkflowChain:
+		return chainagent.New(app.Name, chainagent.WithSubAgents(subAgents)), nil
+	case tenant.WorkflowParallel:
+		parallel := parallelagent.New(app.Name+"-branches", parallelagent.WithSubAgents(subAgents))
+		aggregator := app.Workflow.Aggregator
+		if aggregator == nil {
+			return nil, errors.New("runtime: parallel workflow aggregator is required")
+		}
+		return chainagent.New(app.Name, chainagent.WithSubAgents([]trpcagent.Agent{parallel, leaf(aggregator.ID, aggregator.Instruction)})), nil
+	case tenant.WorkflowCycle:
+		return cycleagent.New(app.Name, cycleagent.WithSubAgents(subAgents), cycleagent.WithMaxIterations(app.Workflow.MaxIterations)), nil
+	case tenant.WorkflowGraph:
+		builder := graph.NewStateGraph(graph.MessagesStateSchema())
+		for _, node := range app.Workflow.Nodes {
+			builder.AddAgentNode(node.ID)
+		}
+		for _, edge := range app.Workflow.Edges {
+			builder.AddEdge(edge.From, edge.To)
+		}
+		compiled, err := builder.SetEntryPoint(app.Workflow.Entry).SetFinishPoint(app.Workflow.Finish).Compile()
+		if err != nil {
+			return nil, fmt.Errorf("runtime: compile agent workflow: %w", err)
+		}
+		options := []graphagent.Option{graphagent.WithSubAgents(subAgents)}
+		if app.Workflow.MaxConcurrency > 0 {
+			options = append(options, graphagent.WithMaxConcurrency(app.Workflow.MaxConcurrency))
+		}
+		root, err := graphagent.New(app.Name, compiled, options...)
+		if err != nil {
+			return nil, fmt.Errorf("runtime: build graph agent: %w", err)
+		}
+		return root, nil
+	default:
+		return nil, fmt.Errorf("runtime: unsupported workflow type %q", kind)
+	}
 }
 
 // Scope returns the immutable bundle identity.

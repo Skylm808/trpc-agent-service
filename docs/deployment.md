@@ -57,12 +57,15 @@ Admin API 与 Gateway 共用 HTTP 端口，所有 `/v1/tenants/{tenant_id}/confi
 - `TRPC_AGENT_REDIS_URL`：Redis URL；
 - `TRPC_AGENT_NODE_ID`：节点唯一标识；未设置时使用 hostname，Kubernetes 推荐注入 Pod UID；
 - `TRPC_AGENT_WORKER_CONCURRENCY`：每节点 Worker 并发，默认 8，生产合法范围 1–256；非法值启动失败；
+- `TRPC_AGENT_GATEWAY_RATE_LIMIT`：每个 `(tenant_id, binding_id)` 的 Redis 共享固定窗口入口限流，默认 100 req/s；超限返回 429，Redis 异常时 fail-closed；
 - `TRPC_AGENT_SHUTDOWN_TIMEOUT`：收到 SIGTERM 后排空组件的总上限，默认 10 秒、合法范围 1 秒到 10 分钟；Kubernetes 基线设置 100 秒并保留 preStop/退出余量；
 - `DEEPSEEK_API_KEY`：DeepSeek API Key，由模型配置中的 SecretRef 引用；
 - `TRPC_AGENT_GATEWAY_TOKEN_<BINDING_ID>`：HTTP Channel token；
 - `TRPC_AGENT_ADMIN_TOKENS`：Admin API 管理员凭据（`名称=令牌:租户列表`，`;` 分隔，`*` 表示全部租户）；未配置时 Admin API 拒绝一切请求；
 - `OTEL_EXPORTER_OTLP_ENDPOINT`：OTLP/gRPC Collector 地址；Compose 固定为内部 `otel-collector:4317`；
 - `TRPC_AGENT_TRACE_SAMPLE_RATIO`：0 到 1 的 parent-based trace 采样率，Compose 默认 0.1；
+- `TRPC_AGENT_VAULT_ENDPOINT` / `TRPC_AGENT_VAULT_TOKEN`：可选 Vault KV v2-compatible HTTPS endpoint 与 bootstrap token；配置使用 `provider: vault` 时必须提供；
+- `TRPC_AGENT_KMS_ENDPOINT` / `TRPC_AGENT_KMS_TOKEN`：可选 KMS-compatible HTTPS 解密服务与 bootstrap token；配置使用 `provider: kms` 时必须提供；
 - 企业微信启用后，还需要配置文件所引用的 `WECOM_CALLBACK_TOKEN`、`WECOM_APP_SECRET`
   和 `WECOM_ENCODING_AES_KEY`。Delivery Worker 会自动使用应用 Secret 获取 access token。
 - 飞书启用后，还需要配置文件所引用的 `FEISHU_VERIFICATION_TOKEN`、`FEISHU_APP_SECRET`
@@ -71,6 +74,8 @@ Admin API 与 Gateway 共用 HTTP 端口，所有 `/v1/tenants/{tenant_id}/confi
   [飞书 Channel Adapter](feishu.md)。
 
 Compose 中的默认数据库密码和 HTTP token 只供本地使用。共享环境应通过 `.env`、Docker Secret 或外部密钥系统覆盖，不能提交真实值。
+
+HTTP Server 默认启用 `ReadHeaderTimeout=10s`、`ReadTimeout=30s`、`WriteTimeout=60s`、`IdleTimeout=120s` 和 `MaxHeaderBytes=1MiB`。反向代理的 header/body/idle timeout 应与这些边界协调，不能无限放宽；流式请求需要在 60 秒写超时内持续产出，长任务应使用异步状态/Outbox 链路。
 
 Prometheus 位于 `http://127.0.0.1:9090`，Tempo 位于 `http://127.0.0.1:3200`，Grafana 位于 `http://127.0.0.1:3000`。Compose 的 Grafana 仅开放匿名 Viewer，仍只适合本机；共享或公网部署必须在反向代理层增加身份认证。指标、trace 和保留策略见[生产可观测性](observability.md)。
 

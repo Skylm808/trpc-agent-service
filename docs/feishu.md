@@ -36,7 +36,7 @@ sequenceDiagram
     A->>I: tenant-scoped claim(event_id)
     A-->>F: 200 {"code":0}
     I->>R: RunRequest
-    R->>R: LLMAgent / Tool / Session / Memory
+    R->>R: Tenant Agent workflow / Tool / Session / Memory
     R->>O: durable reply（钉住入口 config_version）
     O->>S: claim pending delivery
     S->>F: im/v1/messages（tenant_access_token）

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +91,9 @@ func TestExampleConfigurationPassesPersistentProfileGate(t *testing.T) {
 }
 
 func TestRunExitsCleanlyOnInterrupt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Interrupt delivery is not supported on Windows")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

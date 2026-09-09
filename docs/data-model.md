@@ -36,7 +36,7 @@ worker_node
 | `message_events` | `tenant_id`, `app_id`, `user_id`, `session_id`, `event_id`, `inbox_id`, `event_seq`, `event_type`, `payload_json`, `state_delta_json`, `trace_id` | PK 以 session 和 `event_seq` 组成；`event_id`、`inbox_id` 在租户内唯一 |
 | `session_summaries` | `tenant_id`, `app_id`, `user_id`, `session_id`, `summary_version`, `cutoff_event_seq`, `content`, `metadata_json`, `status` | version 与 cutoff 分别唯一，用于摘要 CAS |
 | `memory_entries` | `tenant_id`, `app_id`, `user_id`, `memory_id`, `source_session_id`, `source_event_id`, `source_event_seq`, `version`, `content`, `metadata_json`, `status` | 稳定 memory ID；source event 在用户/App 作用域内唯一 |
-| `inbox_messages` | `tenant_id`, `binding_id`, `external_message_id`, `inbox_id`, `inbox_seq`, `session_id`, `config_version`, `status`, `attempts`, `next_attempt_at`, `trace_id` | 外部消息唯一键吸收 IM 重投；session seq 唯一 |
+| `inbox_messages` | `tenant_id`, `binding_id`, `external_message_id`, `inbox_id`, `inbox_seq`, `session_id`, `config_version`, `status`, `attempts`, `next_attempt_at`, `trace_id`, `execution_stage`, `execution_reply`, `execution_event_id` | 外部消息唯一键吸收 IM 重投；session seq 唯一；保存 Runner/派生/Outbox 可恢复进度 |
 | `outbox_messages` | `tenant_id`, `outbox_id`, `dedupe_key`, `binding_id`, `session_id`, `source_inbox_id`, `source_event_id`, `status`, `attempts`, `retry_at`, `payload_json` | PK `(tenant_id, outbox_id)`；UNIQUE `(tenant_id, dedupe_key)`；trace 通过来源事件和 payload 关联 |
 | `audit_logs` | `tenant_id`, `audit_id`, `channel`, `user_id`, `session_id`, `agent_name`, `tool_name`, `decision`, `latency_ms`, `error_type`, `cost_micros`, `config_version`, `policy_version`, `trace_id` | PK `(tenant_id, audit_id)`；按 tenant/trace/time 查询；成本和治理决定可追溯到不可变配置/策略版本 |
 | `migration_jobs` | `tenant_id`, `job_id`, `app_id`, `config_version`, `domain`, `source_backend`, `target_backend`, `source_route_hash`, `status`, `checkpoint_json`, `source_rows`, `copied_rows`, `attempts`, `lease_owner`, `claim_token`, `lease_until`, `last_error_type` | PK `(tenant_id, job_id)`；同配置/App/domain 唯一；claim 与 checkpoint 支持跨节点断点续传 |
@@ -57,9 +57,11 @@ Summary、Memory、Knowledge 和 Artifact 是从已提交 event 派生的投影�
 
 Inbox 和 Outbox 分别处理入站与出站幂等。Inbox 唯一键是 `(tenant_id, binding_id, external_message_id)`；Outbox 唯一键是 `(tenant_id, dedupe_key)`。发送结果不确定时记录为 `uncertain`，不能把未知结果当作普通失败立即重发。
 
+`inbox_messages.execution_stage` 只能单调推进 `none -> runner_committed -> derived_committed -> outbox_committed`，同时保存已脱敏的最终 `execution_reply` 和稳定平台 `execution_event_id`。claim owner/token 与未过期 lease 是推进阶段的前置条件；接管后的新 claim 可以读取旧阶段并继续执行。阶段字段由 `000010_execution_recovery` 增加，不替代 status：前者描述处理内部 checkpoint，后者描述 Inbox 生命周期。
+
 ## tRPC-Agent-Go 运行时表
 
-`000003_persistent_runtime` 固定 tRPC-Agent-Go PostgreSQL Session/Memory Adapter 的表契约，并增加 `runtime_artifacts` 与 `runtime_knowledge_documents`。`000007_storage_migrations` 扩充迁移状态并创建目标端 ledger，`000008_pr23_migration_catalog` 增加不含正文的 S3 Artifact 版本目录。平台表负责 Inbox、fencing、审计和可恢复执行；`runtime_session_*`、`runtime_memories` 保存 Runner 使用的具体状态。两组表职责不同，但都使用 canonical `app_name` 或显式 tenant/app 字段保持租户作用域。
+`000003_persistent_runtime` 固定 tRPC-Agent-Go PostgreSQL Session/Memory Adapter 的表契约，并增加 `runtime_artifacts` 与 `runtime_knowledge_documents`。`000007_storage_migrations` 扩充迁移状态并创建目标端 ledger，`000008_pr23_migration_catalog` 增加不含正文的 S3 Artifact 版本目录，`000010_execution_recovery` 增加 durable Runner checkpoint。平台表负责 Inbox、fencing、审计和可恢复执行；`runtime_session_*`、`runtime_memories` 保存 Runner 使用的具体状态。两组表职责不同，但都使用 canonical `app_name` 或显式 tenant/app 字段保持租户作用域。
 
 Artifact revision 的主键是 `(tenant_id, app_id, user_id, session_id, filename, revision)`；S3 使用相同逻辑 key/revision，并由共享 PostgreSQL advisory lock 协调分配。Knowledge 通过 PGVector/Qdrant 保存 chunk、embedding 与 metadata，Runtime 只在显式允许 `knowledge_search` 时暴露检索工具；`runtime_knowledge_documents` 保存 Admin ingest 的原始文档与版本，是跨向量后端重建的租户级事实源。
 

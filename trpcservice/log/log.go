@@ -17,6 +17,7 @@ var credentialPattern = regexp.MustCompile(`(?i)((?:"?(?:authorization|api[_-]?k
 type Redactor struct {
 	fields  map[string]struct{}
 	secrets []string
+	custom  *regexp.Regexp
 }
 
 func (redactor *Redactor) RedactField(field, value string) string {
@@ -40,6 +41,15 @@ func NewRedactor(fields, secrets []string) *Redactor {
 			result.secrets = append(result.secrets, secret)
 		}
 	}
+	customFields := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if trimmed := strings.TrimSpace(field); trimmed != "" {
+			customFields = append(customFields, regexp.QuoteMeta(trimmed))
+		}
+	}
+	if len(customFields) > 0 {
+		result.custom = regexp.MustCompile(`(?i)((?:"?(?:` + strings.Join(customFields, "|") + `)"?)\s*[:=]\s*(?:"?bearer\s+)?["']?)[^\s,;}"']+`)
+	}
 	return result
 }
 func (redactor *Redactor) RedactString(value string) string {
@@ -49,12 +59,18 @@ func (redactor *Redactor) RedactString(value string) string {
 	for _, secret := range redactor.secrets {
 		value = strings.ReplaceAll(value, secret, "[REDACTED]")
 	}
-	return credentialPattern.ReplaceAllStringFunc(value, func(match string) string {
-		if index := strings.IndexAny(match, "=:"); index >= 0 {
-			return match[:index+1] + " [REDACTED]"
-		}
-		return "[REDACTED]"
-	})
+	value = credentialPattern.ReplaceAllStringFunc(value, redactAssignment)
+	if redactor.custom != nil {
+		value = redactor.custom.ReplaceAllStringFunc(value, redactAssignment)
+	}
+	return value
+}
+
+func redactAssignment(match string) string {
+	if index := strings.IndexAny(match, "=:"); index >= 0 {
+		return match[:index+1] + " [REDACTED]"
+	}
+	return "[REDACTED]"
 }
 func (redactor *Redactor) RedactMap(value map[string]any) map[string]any {
 	if redactor == nil {

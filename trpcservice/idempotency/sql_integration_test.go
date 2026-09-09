@@ -47,6 +47,9 @@ func TestSQLClaimReadyRecoveryConcurrencyOrderAndDLQ(t *testing.T) {
 		if err != nil || !won {
 			t.Fatalf("claim=%+v won=%v err=%v", stale, won, err)
 		}
+		if err := store.SaveExecution(ctx, stale, idempotency.ExecutionRecord{Stage: idempotency.ExecutionRunnerCommitted, Reply: "answer", EventID: "event"}); err != nil {
+			t.Fatal(err)
+		}
 		now = now.Add(2 * time.Second)
 		var wg sync.WaitGroup
 		results := make(chan []idempotency.Claim, 2)
@@ -74,6 +77,10 @@ func TestSQLClaimReadyRecoveryConcurrencyOrderAndDLQ(t *testing.T) {
 		}
 		if len(recovered) != 1 || recovered[0].Attempt != 2 {
 			t.Fatalf("recovered=%+v", recovered)
+		}
+		execution, err := store.GetExecution(ctx, recovered[0])
+		if err != nil || execution.Stage != idempotency.ExecutionRunnerCommitted || execution.Reply != "answer" {
+			t.Fatalf("execution=%+v err=%v", execution, err)
 		}
 		if err := store.Complete(ctx, stale); !errors.Is(err, idempotency.ErrClaimOwner) {
 			t.Fatalf("stale completion error=%v", err)

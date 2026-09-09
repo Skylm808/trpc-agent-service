@@ -6,7 +6,7 @@
 
 平台面向多租户、多 IM 入口和可扩缩 Worker，解决数据隔离、节点重启、IM 重投及配置发布时的重复执行和状态倒退问题。
 
-平台以 tRPC-Agent-Go 为执行内核，复用 `runner.Runner`、LLMAgent、Tool、Session、Memory、Artifact、Knowledge、Plugin 和 OpenTelemetry 接口。租户管理、消息幂等、节点调度、fencing、配置版本、后端路由、IM 账号绑定、审计与成本治理由平台层实现。
+平台以 tRPC-Agent-Go 为执行内核，复用 `runner.Runner`、LLMAgent、Chain/Parallel/Cycle/Graph Agent、Tool、Session、Memory、Artifact、Knowledge、Plugin 和 OpenTelemetry 接口。租户管理、声明式工作流、消息幂等、节点调度、fencing、配置版本、后端路由、IM 账号绑定、审计与成本治理由平台层实现。
 
 ## 2. 系统拓扑
 
@@ -25,7 +25,7 @@ flowchart TB
         direction LR
         WCA[WeCom Adapter<br/>验签/解密/规范化]
         FSA[飞书 Adapter<br/>事件订阅/验签/身份映射]
-        GW[Agent Gateway<br/>认证/租户路由/Inbox Claim]
+        GW[Agent Gateway<br/>认证/租户路由/共享限流/Inbox Claim]
     end
 
     subgraph CONTROL["控制面：不经过消息同步链路"]
@@ -33,7 +33,7 @@ flowchart TB
         ADMIN[Admin API]
         CFG[配置校验/发布/回滚]
         CONFIG[(PostgreSQL<br/>不可变配置版本)]
-        SECRET[环境变量 / 挂载 Secret]
+        SECRET[env / file / Vault / KMS]
     end
 
     subgraph DURABLE["3. 持久接入与调度"]
@@ -46,7 +46,7 @@ flowchart TB
         direction LR
         WK1[Agent Worker]
         WK2[Agent Worker]
-        RB[Runtime Bundle<br/>Runner + LLMAgent]
+        RB[Runtime Bundle<br/>Runner + LLM/Chain/Parallel/Cycle/Graph]
         GOV[Plugin / Guardrail<br/>权限/预算/审批/脱敏]
         TC[版本固定 Tool Catalog<br/>MCP + HTTPS 业务工具]
     end
@@ -122,7 +122,9 @@ Agent Gateway 和 Worker 都是无状态节点，不要求负载均衡器提供 
 
 `tenant_id` 是最高隔离边界。一个租户可以有多个 Agent App，每个 App 保存模型配置、系统指令、工具策略、IM 绑定、存储路由和审计策略。配置发布后不可修改；`config_versions` 保存完整的 canonical 配置和内容摘要，`tenants.current_config_version` 是发布头。并发发布使用 expected version 做 CAS，回滚会创建一个新版本，而不是覆盖旧记录。
 
-隔离规则落实在接口和数据模型中：Repository 的每个方法都显式接收 `tenant_id`；SQL 的主键、唯一键、外键和索引以租户字段开头；Runtime Bundle 的键是 `(tenant_id, app_id, config_version)`；工具在展示和执行两个阶段都经过租户策略；模型密钥、IM token 和数据库凭据只保存 `SecretRef`。运行时内置解析环境变量和挂载文件，并提供可注册的 Vault/KMS Provider 边界；未注册的外部 Provider 会 fail-closed，参考部署仍可使用 External Secrets、Sidecar 或 CSI。日志与 trace 禁止记录 secret value，消息内容是否进入审计由租户的 `AuditPolicy` 决定。
+隔离规则落实在接口和数据模型中：Repository 的每个方法都显式接收 `tenant_id`；SQL 的主键、唯一键、外键和索引以租户字段开头；Runtime Bundle 的键是 `(tenant_id, app_id, config_version)`；工具在展示和执行两个阶段都经过租户策略；模型密钥、IM token 和数据库凭据只保存 `SecretRef`。运行时内置 env/file Resolver，并可通过 HTTPS 接入 Vault KV v2 或 KMS-compatible 内部服务；Provider 未配置或解析失败时 fail-closed。Vault/KMS bootstrap token 只从部署环境注入，也不能进入发布配置、日志或 trace。日志与 trace 禁止记录 secret value，消息内容是否进入审计由租户的 `AuditPolicy` 决定。
+
+每个 App 可选择单 `llm` 或 `chain`、`parallel`、`cycle`、`graph` 工作流。组合节点、边、Aggregator、循环次数和并发上限都属于不可变配置版本；Parallel 强制最终 Aggregator，Cycle 强制有限迭代，Graph 在发布前校验 entry/finish 和边引用。所有形态仍通过同一 Runner、Session 和治理管线执行。
 
 用户身份和会话身份分别生成：`user_id = {channel_type}/{binding_id}/{external_user_id}`，企业微信的 `channel_type` 是 `wecom`；单聊 `session_id` 为 `dm/{binding_id}/{external_user_id}`，群聊为 `group/{binding_id}/{conversation_id}`，thread/topic 再追加 `/thread/{thread_id}`。`tenant_id` 和 `app_id` 来自服务端绑定，客户端不能自定义 `session_id`。因此同一人在不同群、绑定或租户中不会共享会话作用域。
 
@@ -179,7 +181,9 @@ Worker 节点竞争消费。Stream 只负责即时调度，PostgreSQL Inbox 才�
 由 lease 到期和 `SKIP LOCKED` 生成新 claim。请求状态和取消意图写入 PostgreSQL，Redis
 command bus 只做低延迟通知。预算和工具审批同样使用 PostgreSQL 原子 Store，不依赖进程内状态。
 
-提交顺序固定为：`message event + state` 原子提交，随后更新 Summary/Memory，接着创建 Outbox，最后把 Inbox 标记为 completed。Summary 使用 `(version, cutoff_event_seq)` CAS；Memory 以 source event 做幂等；Outbox 以 `(tenant_id, dedupe_key)` 去重。中间失败保留可重试状态，重跑不会多写 event、memory 或 IM 回复。详细约束见 [多节点消息运行时](message-runtime.md) 和 [数据模型](data-model.md)。
+提交顺序固定为：Runner 完成后保存 `runner_committed` 回复，`message event + state` 原子提交，随后更新 Summary/Memory 并保存 `derived_committed`，接着创建 Outbox 并保存 `outbox_committed`，最后在审计策略允许时把 Inbox 标记为 completed。Summary 使用 `(version, cutoff_event_seq)` CAS；Memory 以 source event 做幂等；Outbox 以 `(tenant_id, dedupe_key)` 去重。节点在这些持久阶段之间崩溃时从已保存回复恢复，不再次调用 Runner。
+
+这不是对所有外部副作用的绝对 exactly-once 承诺：如果模型或 Tool 已成功、但进程在首次保存 `runner_committed` 前退出，重试仍可能再次执行该调用。tRPC 同一运行内按 Event ID 去重，但重跑会产生新的 Invocation/Event ID，不能仅按共享的 `RequestID` 丢弃一整轮中的合法多事件。因此生产 MCP 发布必须声明幂等，带副作用的 HTTPS 业务工具必须接受稳定 `X-Idempotency-Key`；平台 event、memory 和 outbox 则按稳定 Inbox/source key 保证幂等。详细约束见 [多节点消息运行时](message-runtime.md) 和 [数据模型](data-model.md)。
 
 ### 4.1 企业微信与飞书的接入差异
 
@@ -211,7 +215,7 @@ command bus 只做低延迟通知。预算和工具审批同样使用 PostgreSQL
 | `message_events` | `tenant_id`, `session_id`, `event_id`, `inbox_id`, `event_seq`, `payload_json`, `trace_id` | 追加式事件流；event、Inbox 和序号均租户内唯一 |
 | `session_summaries` | `tenant_id`, `session_id`, `summary_version`, `cutoff_event_seq`, `content` | 仅允许以更新的 cutoff/version 替换摘要 |
 | `memory_entries` | `tenant_id`, `app_id`, `user_id`, `memory_id`, `source_event_id`, `version`, `content` | 稳定 memory ID；按来源 event 幂等写入 |
-| `inbox_messages` | `tenant_id`, `binding_id`, `external_message_id`, `inbox_seq`, `status`, `attempts` | 吸收 IM 重投并保存恢复状态 |
+| `inbox_messages` | `tenant_id`, `binding_id`, `external_message_id`, `inbox_seq`, `status`, `attempts`, `execution_stage`, `execution_reply`, `execution_event_id` | 吸收 IM 重投并保存 Runner/派生/Outbox 恢复状态 |
 | `outbox_messages` | `tenant_id`, `outbox_id`, `dedupe_key`, `binding_id`, `status`, `retry_at` | 回复可靠投递、去重、重试和 DLQ |
 | `audit_logs` | `tenant_id`, `channel`, `user_id`, `session_id`, `agent_name`, `tool_name`, `decision`, `latency_ms`, `error_type`, `cost_micros`, `config_version`, `policy_version`, `trace_id` | 记录治理决定、调用结果、成本和版本链路 |
 | `run_statuses` / `worker_nodes` | request 状态、cancel intent、worker、heartbeat、draining | 跨节点控制与节点失联观测 |
@@ -256,7 +260,7 @@ Adapter 可以替换实现，但不能削弱这些语义。某个后端无法提
 
 ## 7. 治理、可观测性与故障处理
 
-Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行时再次应用白名单、危险工具审批和权限校验，最终回复经过脱敏后才能写 Outbox。审计记录 tenant、channel、user、session、agent、tool、decision、latency、error type、cost 和 trace ID。审计后端超时时，当前策略固定为业务 fail-open 并产生失败指标；尚未提供租户级 fail-closed 开关，强监管场景需要补充该配置后才能使用。
+Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行时再次应用白名单、危险工具审批和权限校验，Runner `GovernancePlugin` 与最终输出层都会脱敏。审计记录 tenant、channel、user、session、agent、tool、decision、latency、error type、cost 和 trace ID。租户可选择 `audit.fail_closed`：关闭时审计失败只产生指标；开启时成功回复必须先完成幂等审计 append，失败会保留 Inbox 重试且不会重复已提交 Runner/Outbox 阶段。
 
 监控覆盖请求量与错误率、模型首 token/总耗时、Tool 调用耗时、IM 回调与投递成功率、token 用量、Session/Memory 后端延迟、Inbox/Outbox/DLQ 积压和 Worker/数据库健康。`agent.cost.micros` 按配置版本中固定的输入/输出价格和 provider usage 计算，并与月度预算核销；`agent.model.usage_missing` 监测无法精确核销的模型响应。Metrics 只使用 tenant、app、channel、operation、status 等受控标签；user、session 和 message 不进入遥测，request/correlation ID 在 trace 中只记录不可逆短 hash，避免时序库基数失控和调用者借标识注入正文或 Secret。原始关联仅保留在受权限保护、按租户隔离的业务表和 audit 中。指标与审计字段见[治理、审计与可观测性](governance.md)。
 
@@ -287,13 +291,13 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 
 | 能力 | 直接复用 tRPC-Agent-Go | 平台负责 |
 | --- | --- | --- |
-| Agent 执行 | Runner、LLMAgent、Event stream、Tool/MCP | Runtime Bundle、版本固定、节点调度和取消转发 |
+| Agent 执行 | Runner、LLMAgent、Chain/Parallel/Cycle/Graph Agent、Event stream、Tool/MCP | 声明式工作流配置、Runtime Bundle、版本固定、节点调度和取消转发 |
 | 状态能力 | Session、Memory、Artifact、Knowledge 接口 | 租户后端路由、fencing、迁移任务和数据隔离 |
 | 治理 | Plugin、Guardrail、Tool Filter/Permission | 租户策略、预算账本、审批存储和审计规则 |
 | 服务协议 | OpenClaw 与服务化接口 | IM 验签、账号绑定、Inbox/Outbox 和身份映射 |
 | 可观测性 | OpenTelemetry hook | 跨节点传播、低基数指标、token 统计、版本化成本和日志脱敏 |
 
-当前仓库已经实现配置版本、控制面数据模型、Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、Inbox 崩溃恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Redis 跨节点限流、租户 Runner 动态并发配额、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复双向迁移 Worker、外部 Memory、外置 Audit/WORM、治理审计与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换、Gateway/Worker 角色拆分、生产 MCP Registry、HTTPS JSON 业务工具，以及企业微信和飞书两个 Channel Adapter/Sender。复杂格式文档解析、投递异常 Web 运维页、Delivery/maintenance 独立角色和队列自定义指标 HPA 属于后续增强，不是本次基础验收的必要项。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
+当前仓库已经实现配置版本、控制面数据模型、LLM/Chain/Parallel/Cycle/Graph Runtime Bundle、PostgreSQL + Redis 组合器、Inbox/fencing/Outbox、三阶段执行恢复与 DLQ、Outbox Delivery Worker、Redis Streams 跨节点调度、共享 cancel/status/预算/审批、节点心跳、Gateway Redis 跨节点入口限流、租户 Runner 动态并发配额、多 PostgreSQL Storage Router、S3 Artifact、PGVector/Qdrant Knowledge/RAG、可恢复双向迁移 Worker、外部 Memory、外置 Audit/WORM、租户级 Audit fail-closed、Vault/KMS-compatible HTTPS Secret Provider、治理 Plugin 与自动保留期清理、OpenTelemetry SDK/Collector、Prometheus/Grafana、生产 Admin 控制面与动态 Bundle 切换、Gateway/Worker 角色拆分、生产 MCP Registry、HTTPS JSON 业务工具，以及企业微信和飞书两个 Channel Adapter/Sender。复杂格式文档解析、投递异常 Web 运维页、Delivery/maintenance 独立角色和队列自定义指标 HPA 属于后续增强，不是本次基础验收的必要项。`skill`、`web`、`workspace` 目录目前不是已交付能力，不纳入完成项。
 
 ## 10. 验收目标与当前状态
 

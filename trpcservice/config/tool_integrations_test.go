@@ -15,7 +15,7 @@ func TestValidateTenantToolIntegrations(t *testing.T) {
 	app := &file.Tenants[0].Apps[0]
 	app.Tools.Allow = append(app.Tools.Allow, "mcp__crm__lookup_customer", "create_ticket")
 	app.MCPServers = []tenant.MCPServer{{
-		ID: "crm", Endpoint: "https://mcp.example.com/mcp", Enabled: true,
+		ID: "crm", Endpoint: "https://mcp.example.com/mcp", Enabled: true, Idempotent: true,
 		Credential:   tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "CRM_MCP_TOKEN"},
 		AllowedTools: []string{"lookup_customer"},
 	}}
@@ -44,15 +44,19 @@ func TestValidateRejectsUnsafeTenantToolIntegrations(t *testing.T) {
 	}{
 		{"insecure MCP endpoint", func(app *tenant.AgentApp) {
 			app.Tools.Allow = append(app.Tools.Allow, "mcp__crm__lookup")
-			app.MCPServers = []tenant.MCPServer{{ID: "crm", Endpoint: "http://mcp.example.com", Enabled: true, AllowedTools: []string{"lookup"}}}
+			app.MCPServers = []tenant.MCPServer{{ID: "crm", Endpoint: "http://mcp.example.com", Enabled: true, Idempotent: true, AllowedTools: []string{"lookup"}}}
 		}, "HTTPS URL"},
 		{"MCP tool absent from allowlist", func(app *tenant.AgentApp) {
-			app.MCPServers = []tenant.MCPServer{{ID: "crm", Endpoint: "https://mcp.example.com", Enabled: true, AllowedTools: []string{"lookup"}}}
+			app.MCPServers = []tenant.MCPServer{{ID: "crm", Endpoint: "https://mcp.example.com", Enabled: true, Idempotent: true, AllowedTools: []string{"lookup"}}}
 		}, `must include "mcp__crm__lookup"`},
 		{"invalid MCP auth header", func(app *tenant.AgentApp) {
 			app.Tools.Allow = append(app.Tools.Allow, "mcp__crm__lookup")
-			app.MCPServers = []tenant.MCPServer{{ID: "crm", Endpoint: "https://mcp.example.com", Enabled: true, AllowedTools: []string{"lookup"}, CredentialHeader: "Cookie", Credential: tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "MCP_TOKEN"}}}
+			app.MCPServers = []tenant.MCPServer{{ID: "crm", Endpoint: "https://mcp.example.com", Enabled: true, Idempotent: true, AllowedTools: []string{"lookup"}, CredentialHeader: "Cookie", Credential: tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "MCP_TOKEN"}}}
 		}, "credential_header"},
+		{"non-idempotent MCP server", func(app *tenant.AgentApp) {
+			app.Tools.Allow = append(app.Tools.Allow, "mcp__crm__lookup")
+			app.MCPServers = []tenant.MCPServer{{ID: "crm", Endpoint: "https://mcp.example.com", Enabled: true, AllowedTools: []string{"lookup"}}}
+		}, "idempotent must be true"},
 		{"business tool has no secret reference", func(app *tenant.AgentApp) {
 			app.Tools.Allow = append(app.Tools.Allow, "tickets")
 			app.BusinessTools = []tenant.HTTPBusinessTool{{Name: "tickets", Description: "Lookup tickets", Endpoint: "https://tools.example.com", Enabled: true}}

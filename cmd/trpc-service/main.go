@@ -49,6 +49,10 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "initialize service: %v\n", err)
 		return 2
 	}
+	if err := configureExternalSecretProviders(); err != nil {
+		fmt.Fprintf(os.Stderr, "initialize service: %v\n", err)
+		return 1
+	}
 
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
@@ -92,6 +96,29 @@ func run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func configureExternalSecretProviders() error {
+	for _, configured := range []struct {
+		provider tenant.SecretProvider
+		mode     secret.HTTPProviderMode
+		endpoint string
+		token    string
+	}{
+		{tenant.SecretProviderVault, secret.HTTPProviderVault, os.Getenv("TRPC_AGENT_VAULT_ENDPOINT"), os.Getenv("TRPC_AGENT_VAULT_TOKEN")},
+		{tenant.SecretProviderKMS, secret.HTTPProviderKMS, os.Getenv("TRPC_AGENT_KMS_ENDPOINT"), os.Getenv("TRPC_AGENT_KMS_TOKEN")},
+	} {
+		if configured.endpoint == "" && configured.token == "" {
+			continue
+		}
+		if configured.endpoint == "" || configured.token == "" {
+			return errors.New("external secret provider endpoint and token must be configured together")
+		}
+		if err := secret.RegisterProvider(configured.provider, &secret.HTTPProvider{Endpoint: configured.endpoint, Token: configured.token, Mode: configured.mode}); err != nil {
+			return errors.New("external secret provider registration failed")
+		}
+	}
+	return nil
 }
 
 // gatewayComponent seeds the control plane from the startup file and wires the

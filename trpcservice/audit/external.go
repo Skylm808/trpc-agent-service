@@ -50,7 +50,7 @@ func (store *HTTPArchive) Append(ctx context.Context, record Record) error {
 	}
 	request.Header.Set("Authorization", "Bearer "+store.Token)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Idempotency-Key", auditID(record, record.CreatedAt))
+	request.Header.Set("Idempotency-Key", auditID(record))
 	client := store.Client
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}

@@ -46,6 +46,7 @@ const (
 	redisURLEnv          = "TRPC_AGENT_REDIS_URL"
 	adminTokensEnv       = "TRPC_AGENT_ADMIN_TOKENS"
 	workerConcurrencyEnv = "TRPC_AGENT_WORKER_CONCURRENCY"
+	gatewayRateLimitEnv  = "TRPC_AGENT_GATEWAY_RATE_LIMIT"
 	shutdownTimeoutEnv   = "TRPC_AGENT_SHUTDOWN_TIMEOUT"
 	bindingLookupQL      = `SELECT cb.tenant_id, cb.app_id, t.current_config_version
 		FROM channel_bindings cb
@@ -268,6 +269,10 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	if err != nil {
 		return nil, err
 	}
+	gatewayRateLimit, err := positiveEnvInt(gatewayRateLimitEnv, 100, 100000)
+	if err != nil {
+		return nil, err
+	}
 	telemetryProviders, err := servicemetrics.ConfigureOTLP(connectCtx, "trpc-agent-service", workerID)
 	if err != nil {
 		return nil, err
@@ -332,6 +337,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 		ControlBackend:    redisBackend,
 		Cancellations:     statusStore,
 		RunLimiter:        &worker.RedisRunLimiter{Redis: redisBackend},
+		Admission:         &openclaw.RedisAdmissionLimiter{Redis: redisBackend, Limit: gatewayRateLimit, Window: time.Second},
 		Policy:            policyEngine,
 		WorkerID:          workerID,
 		WorkerConcurrency: workerConcurrency,
@@ -470,12 +476,21 @@ func (routes *publishedDeliveryRoutes) Keys() []delivery.BindingKey {
 }
 
 func (routes *publishedDeliveryRoutes) Resolve(message gateway.OutboundMessage) (channels.TextSender, error) {
+	return routes.ResolveContext(context.Background(), message)
+}
+
+func (routes *publishedDeliveryRoutes) ResolveContext(ctx context.Context, message gateway.OutboundMessage) (channels.TextSender, error) {
 	if routes == nil || routes.published == nil || message.TenantID == "" || message.AppID == "" || message.BindingID == "" {
 		return nil, errors.New("delivery: incomplete published route")
 	}
+	if ctx == nil {
+		return nil, errors.New("delivery: nil context")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	version := message.ConfigVersion
 	if version == 0 {
-		record, err := routes.published.Current(context.Background(), message.TenantID)
+		record, err := routes.published.Current(ctx, message.TenantID)
 		if err != nil || len(record.Tenants) != 1 {
 			return nil, errors.New("delivery: current published route is unavailable")
 		}
@@ -489,7 +504,7 @@ func (routes *publishedDeliveryRoutes) Resolve(message gateway.OutboundMessage) 
 	}
 	routes.mu.Unlock()
 
-	file, err := routes.published.Version(context.Background(), message.TenantID, version)
+	file, err := routes.published.Version(ctx, message.TenantID, version)
 	if err != nil {
 		return nil, errors.New("delivery: published route version is unavailable")
 	}

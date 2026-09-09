@@ -49,6 +49,7 @@ func TestSQLFenceGuardTurnOrderAndStaleCommit(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
+		_, _ = db.ExecContext(cleanupCtx, `DELETE FROM runtime_session_events WHERE app_name=$1`, "tenant/"+tenantID+"/app/app")
 		_, _ = db.ExecContext(cleanupCtx, `DELETE FROM message_events WHERE tenant_id=$1`, tenantID)
 		_, _ = db.ExecContext(cleanupCtx, `DELETE FROM session_heads WHERE tenant_id=$1`, tenantID)
 		_, _ = db.ExecContext(cleanupCtx, `DELETE FROM agent_apps WHERE tenant_id=$1`, tenantID)
@@ -70,6 +71,11 @@ func TestSQLFenceGuardTurnOrderAndStaleCommit(t *testing.T) {
 	guardDone := make(chan error, 1)
 	go func() {
 		guardDone <- store.WithFence(ctx, key, 1, func(context.Context) error {
+			// This write deliberately uses the pool rather than the fencing tx,
+			// matching the upstream PostgreSQL Session service connection model.
+			if _, err := db.ExecContext(ctx, `INSERT INTO runtime_session_events(app_name,user_id,session_id,event) VALUES($1,$2,$3,'{}'::jsonb)`, "tenant/"+tenantID+"/app/app", key.UserID, key.SessionID); err != nil {
+				return err
+			}
 			close(started)
 			<-release
 			return nil

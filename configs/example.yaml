@@ -6,6 +6,9 @@ tenants:
     config_version: 1
     audit:
       enabled: true
+      # Regulated tenants can set true: Inbox completion then waits for the
+      # idempotent audit append and retries if the sink is unavailable.
+      fail_closed: false
       retention_days: 30
       store_content: false
       redact_fields:
@@ -21,6 +24,15 @@ tenants:
         enabled: true
         config:
           instruction: You are a helpful assistant for the demo tenant.
+        # Omit workflow (or set type: llm) for one LLMAgent. A composed
+        # application can publish, for example:
+        # workflow:
+        #   type: chain
+        #   nodes:
+        #     - {id: research, instruction: Gather the relevant facts.}
+        #     - {id: answer, instruction: Produce the final concise answer.}
+        # Other validated types are parallel (requires aggregator), cycle
+        # (requires max_iterations 1..32), and graph (entry/finish/edges).
         model:
           provider: deepseek
           name: deepseek-v4-flash
@@ -52,6 +64,7 @@ tenants:
         #     endpoint: https://mcp.example.com/mcp
         #     credential: {provider: env, key: CRM_MCP_TOKEN}
         #     allowed_tools: [lookup_customer]
+        #     idempotent: true
         #     timeout_seconds: 10
         #     enabled: true
         # business_tools:

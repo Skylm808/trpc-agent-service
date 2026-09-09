@@ -71,6 +71,7 @@ type AgentApp struct {
 	Name          string             `json:"name" yaml:"name"`
 	Enabled       bool               `json:"enabled" yaml:"enabled"`
 	Config        AppConfig          `json:"config" yaml:"config"`
+	Workflow      WorkflowConfig     `json:"workflow,omitempty" yaml:"workflow,omitempty"`
 	Model         ModelProfile       `json:"model" yaml:"model"`
 	Tools         ToolPolicy         `json:"tools" yaml:"tools"`
 	MCPServers    []MCPServer        `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
@@ -78,6 +79,39 @@ type AgentApp struct {
 	Channels      []ChannelBinding   `json:"channels" yaml:"channels"`
 	Storage       StorageProfile     `json:"storage" yaml:"storage"`
 	Knowledge     KnowledgePolicy    `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
+}
+
+type WorkflowType string
+
+const (
+	WorkflowLLM      WorkflowType = "llm"
+	WorkflowChain    WorkflowType = "chain"
+	WorkflowParallel WorkflowType = "parallel"
+	WorkflowCycle    WorkflowType = "cycle"
+	WorkflowGraph    WorkflowType = "graph"
+)
+
+// WorkflowConfig declares a bounded tRPC-Agent-Go composition. An empty type
+// preserves the historical single LLMAgent runtime.
+type WorkflowConfig struct {
+	Type           WorkflowType   `json:"type,omitempty" yaml:"type,omitempty"`
+	Nodes          []WorkflowNode `json:"nodes,omitempty" yaml:"nodes,omitempty"`
+	Edges          []WorkflowEdge `json:"edges,omitempty" yaml:"edges,omitempty"`
+	Entry          string         `json:"entry,omitempty" yaml:"entry,omitempty"`
+	Finish         string         `json:"finish,omitempty" yaml:"finish,omitempty"`
+	Aggregator     *WorkflowNode  `json:"aggregator,omitempty" yaml:"aggregator,omitempty"`
+	MaxIterations  int            `json:"max_iterations,omitempty" yaml:"max_iterations,omitempty"`
+	MaxConcurrency int            `json:"max_concurrency,omitempty" yaml:"max_concurrency,omitempty"`
+}
+
+type WorkflowNode struct {
+	ID          string `json:"id" yaml:"id"`
+	Instruction string `json:"instruction" yaml:"instruction"`
+}
+
+type WorkflowEdge struct {
+	From string `json:"from" yaml:"from"`
+	To   string `json:"to" yaml:"to"`
 }
 
 // KnowledgePolicy configures the optional tenant-scoped RAG tool. The API key
@@ -144,6 +178,7 @@ type MCPServer struct {
 	CredentialHeader string    `json:"credential_header,omitempty" yaml:"credential_header,omitempty"`
 	CredentialScheme string    `json:"credential_scheme,omitempty" yaml:"credential_scheme,omitempty"`
 	AllowedTools     []string  `json:"allowed_tools" yaml:"allowed_tools"`
+	Idempotent       bool      `json:"idempotent" yaml:"idempotent"`
 	TimeoutSeconds   int       `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
 	Enabled          bool      `json:"enabled" yaml:"enabled"`
 }
@@ -251,7 +286,10 @@ type StorageProfile struct {
 
 // AuditPolicy controls tenant audit retention and content handling.
 type AuditPolicy struct {
-	Enabled       bool     `json:"enabled" yaml:"enabled"`
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// FailClosed rejects completion when an enabled audit sink cannot persist
+	// the record. Keep false for non-regulated tenants that prefer availability.
+	FailClosed    bool     `json:"fail_closed" yaml:"fail_closed"`
 	RetentionDays int      `json:"retention_days" yaml:"retention_days"`
 	StoreContent  bool     `json:"store_content" yaml:"store_content"`
 	RedactFields  []string `json:"redact_fields,omitempty" yaml:"redact_fields,omitempty"`
@@ -271,6 +309,12 @@ func (value Tenant) Clone() Tenant {
 // Clone returns a deep copy safe for mutation by the caller.
 func (value AgentApp) Clone() AgentApp {
 	cloned := value
+	cloned.Workflow.Nodes = append([]WorkflowNode(nil), value.Workflow.Nodes...)
+	cloned.Workflow.Edges = append([]WorkflowEdge(nil), value.Workflow.Edges...)
+	if value.Workflow.Aggregator != nil {
+		aggregator := *value.Workflow.Aggregator
+		cloned.Workflow.Aggregator = &aggregator
+	}
 	if value.Model.Temperature != nil {
 		temperature := *value.Model.Temperature
 		cloned.Model.Temperature = &temperature

@@ -66,6 +66,7 @@ type ComponentDependencies struct {
 	ControlBackend    cluster.PubSubBackend
 	Cancellations     worker.CancellationStore
 	RunLimiter        worker.RunLimiter
+	Admission         AdmissionLimiter
 	Policy            *policy.Engine
 	WorkerID          string
 	WorkerConcurrency int
@@ -232,7 +233,7 @@ func NewComponentForMode(parent context.Context, address string, file *config.Fi
 		}
 	}
 	if mode.gatewayEnabled() {
-		core := &Handler{Routes: routes, Inbox: dependencies.Inbox, Submitter: submitter, Hub: bus, Status: status, Canceler: canceler, Approver: policyEngine, ClaimOwner: dependencies.WorkerID + ":gateway", Telemetry: telemetry, Readiness: dependencies.Readiness}
+		core := &Handler{Routes: routes, Inbox: dependencies.Inbox, Submitter: submitter, Hub: bus, Status: status, Canceler: canceler, Approver: policyEngine, ClaimOwner: dependencies.WorkerID + ":gateway", Telemetry: telemetry, Readiness: dependencies.Readiness, Admission: dependencies.Admission}
 		var handler http.Handler = core.RoutesHandler()
 		for _, decorate := range decorators {
 			if decorate == nil {

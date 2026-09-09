@@ -144,7 +144,13 @@ func (worker *Worker) deliver(parent context.Context, claim Claim) {
 		return <-renewDone
 	}
 
-	sender, err := worker.router.Resolve(message)
+	var sender channels.TextSender
+	var err error
+	if contextual, ok := worker.router.(ContextRouteResolver); ok {
+		sender, err = contextual.ResolveContext(sendCtx, message)
+	} else {
+		sender, err = worker.router.Resolve(message)
+	}
 	if err == nil {
 		if aware, ok := sender.(channels.RateLimitAware); ok {
 			aware.SetDeliveryLimiter(worker.limiter)

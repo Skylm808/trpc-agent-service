@@ -13,6 +13,10 @@
 - `deepseek-api-key`
 - `admin-tokens`
 
+发布配置使用 `provider: vault` 或 `provider: kms` 时，再成对提供可选的
+`vault-endpoint` / `vault-token` 或 `kms-endpoint` / `kms-token`。未使用外部 Provider 时
+这些 key 可以不存在；只提供 endpoint 或 token 之一会使进程 fail-closed，避免静默回退。
+
 禁止提交渲染后的 Secret。示例 HTTP binding 默认关闭；首次接入生产流量前，应使用经过审核的租户配置和明确的 Channel SecretRef 替换 bootstrap ConfigMap。租户一旦存在已发布配置版本，PostgreSQL 就是唯一事实源，配置文件只作为初始种子。
 
 ## 有序发布

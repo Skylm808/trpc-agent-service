@@ -18,10 +18,12 @@ OpenClaw/IM callback
   -> Redis Streams consumer group（即时竞争调度）
   -> Inbox poller reclaims retry/expired claims with SKIP LOCKED
   -> Redis lease (INCR fencing token)
-  -> Runtime Manager -> LLMAgent -> Tool -> Runner events
+  -> Runtime Manager -> LLM/Chain/Parallel/Cycle/Graph -> Tool -> Runner events
+  -> Inbox runner_committed（保存最终回复）
   -> fenced event/state
-  -> fenced Summary/Memory projection
-  -> fenced Outbox
+  -> fenced Summary/Memory projection -> Inbox derived_committed
+  -> fenced Outbox -> Inbox outbox_committed
+  -> tenant audit policy
   -> Inbox completed
 ```
 
@@ -29,8 +31,10 @@ OpenClaw/IM callback
 生产部署必须使用 `SQLStore` 的 PostgreSQL claim、`RedisCoordinator`，以及
 `SQLWriteStore`（或等价的 `WriteStore + FenceValidator` 强一致后端）。平台 Event/state、
 Summary/Memory 投影和 Outbox 始终在当前 fence 下写 PostgreSQL。Runner 自身的对话 Session
-可按租户选择 PostgreSQL 或 Redis；`FencedSessionService` 在 PostgreSQL 行锁持有期间调用
-具体 Adapter，阻止新 owner 推进 fence。Redis Session 使用同步写和 tenant/App 物理前缀，
+可按租户选择 PostgreSQL 或 Redis；`FencedSessionService` 先对 `session_heads` 执行
+`SELECT ... FOR UPDATE`，并在持有该行锁期间调用具体 Adapter。接管方的 `AdvanceFence`
+更新同一行，只能发生在旧 mutation 之前或之后，不能在 mutation 中间完成。两次写不共享
+数据库连接或事务，但共享 session head 行锁这一所有权屏障。Redis Session 使用同步写和 tenant/App 物理前缀，
 不把一次无锁远端预检查当作事务隔离。
 
 ## 顺序和故障语义
@@ -43,10 +47,13 @@ Summary/Memory 投影和 Outbox 始终在当前 fence 下写 PostgreSQL。Runner
 3. Redis 使用独立持久化计数器 `INCR` 生成 fencing token。lease 续期和释放都比较
    `owner|token`；旧 Worker 即使在 GC pause 或网络恢复后继续执行，也不能写 event、
    state、summary、memory 或 outbox。
-4. Worker 的提交顺序固定为 event/state → summary/memory → outbox → Inbox completed。
-   Outbox 用 `(tenant_id, dedupe_key)` 幂等，Memory 用 source event 幂等，Summary 用
-   version/cutoff CAS。任何阶段失败都会保留可重试 Inbox；已提交步骤重复执行不会产生
-   第二条消息或第二份 Memory。
+4. Worker 的 durable 阶段固定为 Runner → `runner_committed` → event/state →
+   summary/memory → `derived_committed` → outbox → `outbox_committed` → audit →
+   Inbox completed。阶段和最终回复保存在 `inbox_messages`；新 owner 优先恢复该回复，若阶段
+   落库失败但平台 turn 已提交，还可按 Inbox ID 从 `message_events` 恢复。Outbox 用
+   `(tenant_id, dedupe_key)` 幂等，Memory 用 source event 幂等，Summary 用 version/cutoff
+   CAS，审计用稳定 audit ID 幂等。任何提交阶段失败都会保留可重试 Inbox；已落库步骤重复
+   执行不会产生第二条平台 event、Memory、审计或 IM Outbox。
 5. Runtime 请求固定携带 ingress 时的 `config_version`。旧版本 Bundle 在已有请求释放
    lease 前不会关闭；新请求只进入新版本。固定版本已经被清除时请求失败并重试/进入
    DLQ，禁止悄悄使用当前版本。
@@ -70,6 +77,22 @@ Summary/Memory 投影和 Outbox 始终在当前 fence 下写 PostgreSQL。Runner
    继续执行，不依赖异步投影做 read-your-writes。外部 Memory 服务或向量索引允许最终一致，
    派生任务记录 source event 和 checkpoint；新节点只有在索引水位达到所需 event 后才把该
    版本视为已同步，超时则降级为读取 PostgreSQL 事实或暂不召回。
+11. Gateway 在 Inbox claim 前通过 Redis 对 `(tenant_id, binding_id)` 做共享固定窗口限流；
+    默认 100 req/s，超限返回 429，Redis 不可用时 fail-closed。它保护回调入口和数据库，
+    Worker 的租户并发配额则独立限制昂贵 Runner 执行，二者不能互相替代。
+
+## Exactly-once 边界
+
+平台对 Inbox、平台 turn、Summary/Memory、Outbox 和 Audit 使用稳定业务键，目标是“至少一次调度、
+幂等提交、至多一个待投递回复”。`runner_committed` 之后的崩溃可以直接恢复最终回复，不重跑模型
+或工具。但无法把任意外部模型/Tool 调用与 PostgreSQL Inbox 放进同一事务：若调用已经产生结果或
+副作用，进程却在保存 `runner_committed` 前退出，重试仍可能再次调用。
+
+tRPC Event 的 `RequestID` 已固定为 Inbox ID，但一轮内用户、工具和模型事件合法共享同一个
+`RequestID`，而重跑生成新的 Invocation/Event ID，因此不能按 RequestID 全量过滤而不破坏事件
+历史。生产发布门禁要求 MCP server 显式 `idempotent: true`；这代表服务端承诺同一稳定业务请求
+可安全重试。平台 HTTPS 业务工具传递稳定 `X-Idempotency-Key`。不具备幂等能力的副作用工具不得
+作为自动重试 MCP 发布，应改造成支持幂等键的业务适配器，或进入人工补偿流程。
 
 ## OpenClaw 兼容 HTTP
 

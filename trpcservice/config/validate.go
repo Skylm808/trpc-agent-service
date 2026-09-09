@@ -126,6 +126,9 @@ func validateApp(
 	if strings.TrimSpace(app.Config.Instruction) == "" {
 		return fmt.Errorf("config: %s.config.instruction is required", path)
 	}
+	if err := validateWorkflow(path+".workflow", app.Workflow); err != nil {
+		return err
+	}
 	if err := validateModel(path+".model", app.Model); err != nil {
 		return err
 	}
@@ -197,6 +200,84 @@ func validateApp(
 	return validateBackend(path+".storage.audit", app.Storage.Audit, auditBackends)
 }
 
+func validateWorkflow(path string, workflow tenant.WorkflowConfig) error {
+	kind := workflow.Type
+	if kind == "" || kind == tenant.WorkflowLLM {
+		if len(workflow.Nodes) != 0 || len(workflow.Edges) != 0 || workflow.Aggregator != nil || workflow.Entry != "" || workflow.Finish != "" || workflow.MaxIterations != 0 || workflow.MaxConcurrency != 0 {
+			return fmt.Errorf("config: %s single llm workflow must not declare composed fields", path)
+		}
+		return nil
+	}
+	if kind != tenant.WorkflowChain && kind != tenant.WorkflowParallel && kind != tenant.WorkflowCycle && kind != tenant.WorkflowGraph {
+		return fmt.Errorf("config: %s.type is unsupported", path)
+	}
+	if len(workflow.Nodes) == 0 || len(workflow.Nodes) > 32 {
+		return fmt.Errorf("config: %s.nodes must contain between 1 and 32 nodes", path)
+	}
+	nodes := make(map[string]struct{}, len(workflow.Nodes))
+	for index, node := range workflow.Nodes {
+		nodePath := fmt.Sprintf("%s.nodes[%d]", path, index)
+		if err := validateID(nodePath+".id", node.ID); err != nil {
+			return err
+		}
+		if strings.TrimSpace(node.Instruction) == "" {
+			return fmt.Errorf("config: %s.instruction is required", nodePath)
+		}
+		if _, exists := nodes[node.ID]; exists {
+			return fmt.Errorf("config: duplicate workflow node %q", node.ID)
+		}
+		nodes[node.ID] = struct{}{}
+	}
+	if workflow.MaxConcurrency < 0 || workflow.MaxConcurrency > 32 {
+		return fmt.Errorf("config: %s.max_concurrency must be between 1 and 32 when set", path)
+	}
+	switch kind {
+	case tenant.WorkflowParallel:
+		if len(workflow.Edges) != 0 || workflow.Entry != "" || workflow.Finish != "" || workflow.MaxIterations != 0 || workflow.MaxConcurrency != 0 {
+			return fmt.Errorf("config: %s contains fields not valid for parallel", path)
+		}
+		if workflow.Aggregator == nil || strings.TrimSpace(workflow.Aggregator.ID) == "" || strings.TrimSpace(workflow.Aggregator.Instruction) == "" {
+			return fmt.Errorf("config: %s parallel workflow requires an aggregator", path)
+		}
+		if _, exists := nodes[workflow.Aggregator.ID]; exists {
+			return fmt.Errorf("config: %s aggregator ID conflicts with a branch node", path)
+		}
+	case tenant.WorkflowCycle:
+		if len(workflow.Edges) != 0 || workflow.Aggregator != nil || workflow.Entry != "" || workflow.Finish != "" || workflow.MaxConcurrency != 0 {
+			return fmt.Errorf("config: %s contains fields not valid for cycle", path)
+		}
+		if workflow.MaxIterations <= 0 || workflow.MaxIterations > 32 {
+			return fmt.Errorf("config: %s.max_iterations must be between 1 and 32", path)
+		}
+	case tenant.WorkflowGraph:
+		if _, ok := nodes[workflow.Entry]; !ok {
+			return fmt.Errorf("config: %s.entry must name a workflow node", path)
+		}
+		if _, ok := nodes[workflow.Finish]; !ok {
+			return fmt.Errorf("config: %s.finish must name a workflow node", path)
+		}
+		if len(workflow.Edges) == 0 {
+			return fmt.Errorf("config: %s.edges must not be empty", path)
+		}
+		for index, edge := range workflow.Edges {
+			if _, ok := nodes[edge.From]; !ok {
+				return fmt.Errorf("config: %s.edges[%d].from is unknown", path, index)
+			}
+			if _, ok := nodes[edge.To]; !ok {
+				return fmt.Errorf("config: %s.edges[%d].to is unknown", path, index)
+			}
+			if edge.From == edge.To {
+				return fmt.Errorf("config: %s.edges[%d] self-cycle is not allowed", path, index)
+			}
+		}
+	default:
+		if len(workflow.Edges) != 0 || workflow.Aggregator != nil || workflow.Entry != "" || workflow.Finish != "" || workflow.MaxIterations != 0 {
+			return fmt.Errorf("config: %s contains fields not valid for %s", path, kind)
+		}
+	}
+	return nil
+}
+
 func validateToolIntegrations(path string, app *tenant.AgentApp) error {
 	if len(app.MCPServers) > 16 {
 		return fmt.Errorf("config: %s.mcp_servers exceeds 16 entries", path)
@@ -248,6 +329,9 @@ func validateToolIntegrations(path string, app *tenant.AgentApp) error {
 		}
 		if !server.Enabled {
 			continue
+		}
+		if !server.Idempotent {
+			return fmt.Errorf("config: %s.idempotent must be true; non-idempotent remote tools must use the business HTTP adapter", serverPath)
 		}
 		if err := validateHTTPSURL(serverPath+".endpoint", server.Endpoint); err != nil {
 			return err

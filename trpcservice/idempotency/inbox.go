@@ -27,6 +27,24 @@ const (
 	StatusDLQ        Status = "dlq"
 )
 
+// ExecutionStage records durable progress after a claim has entered Runner.
+// It allows a reclaimed claim to resume derived writes without invoking the
+// model or side-effecting tools a second time.
+type ExecutionStage string
+
+const (
+	ExecutionNone             ExecutionStage = "none"
+	ExecutionRunnerCommitted  ExecutionStage = "runner_committed"
+	ExecutionDerivedCommitted ExecutionStage = "derived_committed"
+	ExecutionOutboxCommitted  ExecutionStage = "outbox_committed"
+)
+
+type ExecutionRecord struct {
+	Stage   ExecutionStage
+	Reply   string
+	EventID string
+}
+
 // Claim is one Inbox ownership attempt.
 type Claim struct {
 	InboxID, Owner, ClaimToken string
@@ -63,6 +81,13 @@ type Store interface {
 	Defer(context.Context, Claim, time.Time) error
 }
 
+// ExecutionStore is an optional durable extension implemented by production
+// SQL and the deterministic memory store.
+type ExecutionStore interface {
+	GetExecution(context.Context, Claim) (ExecutionRecord, error)
+	SaveExecution(context.Context, Claim, ExecutionRecord) error
+}
+
 // ReadyStore atomically reclaims retryable or lease-expired Inbox work for a
 // background Worker. Implementations must not return later work from a session
 // while an earlier inbox_seq remains non-terminal.
@@ -75,7 +100,7 @@ func (store *MemoryStore) Reject(_ context.Context, claim Claim) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	item := store.records[claim.InboxID]
-	if item == nil || item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing {
+	if item == nil || item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing || !store.now().UTC().Before(item.claim.LeaseUntil) {
 		return ErrClaimOwner
 	}
 	item.claim.Status = StatusRejected
@@ -134,6 +159,7 @@ type record struct {
 	claim       Claim
 	nextAttempt time.Time
 	lastError   string
+	execution   ExecutionRecord
 }
 
 // MemoryStore is a concurrency-safe reference Inbox implementation.
@@ -279,6 +305,46 @@ func (store *MemoryStore) Complete(_ context.Context, claim Claim) error {
 	}
 	item.claim.Status = StatusCompleted
 	return nil
+}
+
+func (store *MemoryStore) GetExecution(_ context.Context, claim Claim) (ExecutionRecord, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	item := store.records[claim.InboxID]
+	if item == nil || item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken {
+		return ExecutionRecord{}, ErrClaimOwner
+	}
+	return item.execution, nil
+}
+
+func (store *MemoryStore) SaveExecution(_ context.Context, claim Claim, execution ExecutionRecord) error {
+	if execution.Stage == ExecutionNone || execution.Reply == "" || execution.EventID == "" {
+		return errors.New("idempotency: execution stage, reply, and event ID are required")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	item := store.records[claim.InboxID]
+	if item == nil || item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing || !store.now().UTC().Before(item.claim.LeaseUntil) {
+		return ErrClaimOwner
+	}
+	if stageRank(execution.Stage) < stageRank(item.execution.Stage) {
+		return nil
+	}
+	item.execution = execution
+	return nil
+}
+
+func stageRank(stage ExecutionStage) int {
+	switch stage {
+	case ExecutionRunnerCommitted:
+		return 1
+	case ExecutionDerivedCommitted:
+		return 2
+	case ExecutionOutboxCommitted:
+		return 3
+	default:
+		return 0
+	}
 }
 
 // Fail schedules a retry only for the current owner.

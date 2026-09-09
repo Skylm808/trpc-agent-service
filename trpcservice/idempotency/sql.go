@@ -23,6 +23,7 @@ type SQLStore struct {
 
 var _ Store = (*SQLStore)(nil)
 var _ ReadyStore = (*SQLStore)(nil)
+var _ ExecutionStore = (*SQLStore)(nil)
 
 // Cancel marks an exact active SQL claim terminal.
 func (store *SQLStore) Cancel(ctx context.Context, claim Claim) error {
@@ -242,6 +243,33 @@ func (store *SQLStore) Complete(ctx context.Context, claim Claim) error {
 	}
 	now := store.now().UTC()
 	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='completed', completed_at=$7 WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing' AND lease_until>$6`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, now, now)
+	return exactClaimResult(result, err)
+}
+
+func (store *SQLStore) GetExecution(ctx context.Context, claim Claim) (ExecutionRecord, error) {
+	if err := validateSQLClaim(store, claim); err != nil {
+		return ExecutionRecord{}, err
+	}
+	var stage ExecutionStage
+	var reply, eventID sql.NullString
+	err := store.DB.QueryRowContext(ctx, `SELECT COALESCE(execution_stage,'none'),execution_reply,execution_event_id FROM inbox_messages WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken).Scan(&stage, &reply, &eventID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ExecutionRecord{}, ErrClaimOwner
+	}
+	if err != nil {
+		return ExecutionRecord{}, err
+	}
+	return ExecutionRecord{Stage: stage, Reply: reply.String, EventID: eventID.String}, nil
+}
+
+func (store *SQLStore) SaveExecution(ctx context.Context, claim Claim, execution ExecutionRecord) error {
+	if err := validateSQLClaim(store, claim); err != nil {
+		return err
+	}
+	if execution.Stage == ExecutionNone || execution.Reply == "" || execution.EventID == "" {
+		return errors.New("idempotency: execution stage, reply, and event ID are required")
+	}
+	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET execution_stage=$6,execution_reply=$7,execution_event_id=$8 WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing' AND lease_until>NOW() AND CASE execution_stage WHEN 'outbox_committed' THEN 3 WHEN 'derived_committed' THEN 2 WHEN 'runner_committed' THEN 1 ELSE 0 END <= CASE $6 WHEN 'outbox_committed' THEN 3 WHEN 'derived_committed' THEN 2 WHEN 'runner_committed' THEN 1 ELSE 0 END`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, execution.Stage, execution.Reply, execution.EventID)
 	return exactClaimResult(result, err)
 }
 

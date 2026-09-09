@@ -4,7 +4,9 @@
 幂等 claim、binding 级用户/群聊 ACL、身份/预算校验、工具可见性、工具执行与审批、输出脱敏、租户审计。
 `Processor.Policy` 是必需依赖；缺失时请求 fail closed。工具同时受 tRPC-Agent-Go 的
 `WithToolFilter`、`WithToolExecutionFilter`、`WithToolPermissionPolicy` 和最终
-`Guarded.Call` 保护，直接调用不能绕开 tenant/request scope。
+`Guarded.Call` 保护，直接调用不能绕开 tenant/request scope。每个 Runtime Bundle 还安装
+租户 `GovernancePlugin`，在 Runner 事件进入持久化或观察者前递归脱敏；Worker 最终输出层
+再次脱敏，避免组合 Agent 或第三方 Tool 的事件旁路治理。
 
 MCP 与 HTTPS 业务工具也进入同一条链路。配置发布只把显式命名且列入
 `tools.allow` 的工具放进版本固定 Catalog；远端 metadata 在安全包装后继续保留，所有
@@ -14,16 +16,24 @@ MCP 与 HTTPS 业务工具也进入同一条链路。配置发布只把显式命
 `require_approval` 工具不会自动执行。Worker 发布 `run.approval_required`，审批方使用
 认证后的 `POST /v1/gateway/approve` 提交 `request_id` 与 `tool_name`；共享审批存储唤醒
 持有请求的 Worker，Worker 调用 guarded tool，并用 `model.NewToolMessage` 在原 session
-续跑模型。本地 `MemoryApprovals` 仅供测试；多节点生产环境必须实现共享、原子、带过期
-时间和审批人审计的 ApprovalStore。
+续跑模型。本地 `MemoryApprovals` 仅供测试；生产组合使用 PostgreSQL 共享 ApprovalStore，
+以 tenant/request/tool 为复合键，支持多节点原子审批、过期和审计。
 
 预算先按输入估算和 `max_tokens` 原子预留，再按模型 usage reconciliation；request token 超限会取消 Runner。月度成本预算启用时，模型配置必须包含价格版本以及每百万输入/输出 token 的微成本。Worker 收到 provider usage 后分项核销，并把实际 `cost_micros` 写入 Metrics 和 Audit；provider 未返回 usage 时保留保守预留值并标记 `reserved_estimate`。
 
 审计遵循 tenant `AuditPolicy`：`enabled=false` 不写；`store_content=false` 不保存错误
 正文；`redact_fields` 在结构化字段写入前生效；`RetentionDays` 由定时任务调用
 `audit.RetentionWorker` 自动执行 `audit.PruneTenant`，多节点使用 PostgreSQL advisory lock
-串行化每轮清理。审计写使用两秒 deadline，当前选择 fail-open 并记录低基数
-`operation=audit,status=failed` 指标，避免审计后端拖死消息处理。
+串行化每轮清理。审计写使用两秒 deadline，稳定 audit ID 使 PostgreSQL和外置 WORM
+重复 append 幂等。`audit.fail_closed=false` 时失败只记录低基数
+`operation=audit,status=failed` 指标；`true` 时成功请求必须在 Inbox complete 前完成审计，
+失败会进入 Inbox retry，并利用 durable execution stage 恢复而不重复已保存的 Runner 结果。
+
+发布配置只保存 `SecretRef`。env/file 由本地 Resolver 读取；`vault` 使用 Vault KV v2-compatible
+HTTPS GET，`kms` 使用内部 KMS-compatible HTTPS POST。Endpoint 与 bootstrap token 分别由
+`TRPC_AGENT_VAULT_*`、`TRPC_AGENT_KMS_*` 注入，客户端固定五秒 timeout、限制 1 MiB 响应，且所有
+错误均为不含 endpoint、key、token 和响应正文的通用错误。未配置 Provider 或非 HTTPS endpoint
+一律 fail-closed。
 
 生产入口由 `otelhttp` 从 HTTP `traceparent` 提取并传播到队列，覆盖 callback、Inbox、
 lease、Runner、model stream、Tool、Session、Summary/Memory 和 Outbox。metrics 标签只允许

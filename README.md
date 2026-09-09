@@ -67,9 +67,10 @@ Gateway 只接收和规范化请求，Worker 执行 Runner；节点不保存会�
 | 范围 | 已实现 |
 | --- | --- |
 | 多租户 | 版本化租户/应用配置，模型、工具、IM、后端、审计策略按租户解析；数据键和查询强制带 `tenant_id` |
-| 多节点 | Gateway/Worker/all 三种角色；Redis Streams 调度；Inbox lease、fencing token、崩溃接管、优雅 drain |
+| 多节点 | Gateway/Worker/all 三种角色；Redis Streams 调度；Inbox lease、fencing token、`runner/derived/outbox` 可恢复阶段、崩溃接管、优雅 drain |
 | IM | 企业微信和飞书文本链路、回调验签/解密、去重、身份映射、媒体受控下载、基础文本文件提取、飞书卡片回复 |
-| 治理安全 | 用户/群 ACL、工具白名单、token/版本化成本预算、并发配额、危险工具确认、可插拔 SecretRef Resolver、日志/trace/验收输出脱敏 |
+| Agent 编排 | 单 LLMAgent，以及 Chain、Parallel + Aggregator、有限 Cycle、声明式 Graph；均按租户配置版本构建不可变 Runtime Bundle |
+| 治理安全 | 用户/群 ACL、工具白名单、token/版本化成本预算、并发配额、Gateway 跨节点限流、危险工具确认、租户级 Audit fail-closed、env/file/Vault/KMS SecretRef、Runner Plugin 脱敏 |
 | 数据 | Session、Event、Memory、Summary、Artifact、Knowledge、Audit 的统一租户路由；迁移 checkpoint、checksum、双写与 cutover |
 | 可观测性 | Prometheus 指标、OTLP Trace、Tempo、Grafana，以及错误率、DLQ、积压、无 Worker、数据库异常告警 |
 | 部署运维 | 单机 Compose、多 Worker Compose、最小 Kubernetes Demo；探针、PDB、HPA、滚动升级和回滚验收 |
@@ -121,6 +122,8 @@ Kubernetes 脚本会创建本地 kind 集群并走通部署、扩缩容、Pod �
 
 InMemory 只用于测试和离线 Demo；生产模式会拒绝关键数据域使用内存后端。Redis Runner Session 必须配置独立 `namespace`，平台事件顺序、fencing、Inbox 和 Outbox 仍由 PostgreSQL 强一致保存。Runner Session/State/Event/Track/Summary 已支持 Redis ↔ PostgreSQL 分批迁移；迁移由 Admin API 创建、推进并 cutover，checkpoint、checksum、配置版本及租户边界都持久化在 PostgreSQL。
 
+平台提交链按稳定 Inbox ID 恢复：Runner 结果、派生写和 Outbox 分别记录 durable stage，节点接管后从最近阶段继续，不重复已保存的模型结果。必须注意，模型或工具已经执行、但进程在保存 Runner 结果前崩溃时仍属于 at-least-once 边界；因此生产 MCP 只允许声明为幂等的服务，带副作用的 HTTPS 业务工具会传递稳定 `X-Idempotency-Key`。详见[数据同步与幂等](docs/message-runtime.md)。
+
 ## Admin API
 
 Admin API 是平台控制面，用于租户配置的预览、发布、回滚，以及存储迁移、节点和队列状态管理；它不承载 IM 消息处理。写操作需要管理令牌并带审计记录，接口说明见[部署指南](docs/deployment.md#配置发布)。
@@ -151,6 +154,8 @@ go test -tags=integration ./internal/storage/...
 ```
 
 涉及真实企业微信、飞书、模型、数据库或对象存储的测试必须显式提供环境变量；默认测试不会读取真实凭据。仓库禁止提交 `.env`、`configs/local.yaml`、Secret、下载 URL、媒体 key 或用户消息正文。
+
+生产入口默认限制每个 `(tenant_id, binding_id)` 每秒 100 个回调，可用 `TRPC_AGENT_GATEWAY_RATE_LIMIT` 调整。Vault/KMS-compatible HTTPS Secret Provider 的 bootstrap 参数及其他生产环境变量见 [`.env.example`](.env.example) 和[部署指南](docs/deployment.md)。
 
 ## 许可证
 
