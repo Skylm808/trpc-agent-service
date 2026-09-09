@@ -33,13 +33,13 @@ func (router *Router) ImportSessionSummaries(ctx context.Context, tenantID, appI
 	route.MigrationTarget = nil
 	switch route.Type {
 	case tenant.BackendPostgres:
-		target, err := router.Resolve(ctx, route)
+		target, err := router.ResolveForScope(ctx, tenantID, appID, route)
 		if err != nil {
 			return errors.New("storage: PostgreSQL summary target unavailable")
 		}
 		return importPostgresSummaries(ctx, target.DB, key, normalized)
 	case tenant.BackendRedis:
-		rawURL, prefix, err := router.resolveRedisSessionRoute(tenantID, appID, route)
+		rawURL, prefix, err := router.resolveRedisSessionRoute(ctx, tenantID, appID, route)
 		if err != nil {
 			return errors.New("storage: Redis summary target unavailable")
 		}

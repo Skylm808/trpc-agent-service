@@ -26,7 +26,22 @@ func New(profile tenant.ModelProfile) (model.Model, error) {
 	return newOpenAICompatible(profile, nil)
 }
 
+// NewScoped constructs a production model only after enforcing the immutable
+// tenant/application secret namespace.
+func NewScoped(profile tenant.ModelProfile, tenantID, appID string) (model.Model, error) {
+	return newOpenAICompatibleWithResolver(profile, nil, func(ctx context.Context, ref tenant.SecretRef) (string, error) {
+		if err := secret.ValidateScope(tenantID, appID, ref); err != nil {
+			return "", err
+		}
+		return secret.Resolve(ctx, ref)
+	})
+}
+
 func newOpenAICompatible(profile tenant.ModelProfile, transport http.RoundTripper) (model.Model, error) {
+	return newOpenAICompatibleWithResolver(profile, transport, nil)
+}
+
+func newOpenAICompatibleWithResolver(profile tenant.ModelProfile, transport http.RoundTripper, resolve func(context.Context, tenant.SecretRef) (string, error)) (model.Model, error) {
 	provider := strings.ToLower(strings.TrimSpace(profile.Provider))
 	if provider != ProviderDeepSeek && provider != ProviderOpenAI && provider != ProviderOpenAICompatible {
 		return nil, fmt.Errorf("model provider: unsupported provider %q", profile.Provider)
@@ -34,7 +49,10 @@ func newOpenAICompatible(profile tenant.ModelProfile, transport http.RoundTrippe
 	if strings.TrimSpace(profile.Name) == "" {
 		return nil, errors.New("model provider: model name is required")
 	}
-	apiKey, err := secret.Resolve(context.Background(), profile.APIKey)
+	if resolve == nil {
+		resolve = secret.Resolve
+	}
+	apiKey, err := resolve(context.Background(), profile.APIKey)
 	if err != nil {
 		return nil, errors.New("model provider: resolve API credential failed")
 	}

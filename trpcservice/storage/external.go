@@ -27,7 +27,7 @@ import (
 func (router *Router) memoryService(ctx context.Context, tenantID, appID string, route tenant.BackendConfig) (memory.Service, error) {
 	switch route.Type {
 	case tenant.BackendPostgres:
-		target, err := router.Resolve(ctx, route)
+		target, err := router.ResolveForScope(ctx, tenantID, appID, route)
 		if err != nil {
 			return nil, err
 		}
@@ -36,7 +36,7 @@ func (router *Router) memoryService(ctx context.Context, tenantID, appID string,
 		if tenantID == "" || appID == "" || route.Endpoint == "" || route.Credential.IsZero() {
 			return nil, errors.New("storage: external memory endpoint, scope, and credential are required")
 		}
-		token, err := router.resolve(route.Credential)
+		token, err := router.resolveRef(ctx, tenantID, appID, route.Credential)
 		if err != nil || token == "" {
 			return nil, errors.New("storage: resolve external memory credential failed")
 		}
@@ -54,10 +54,10 @@ type s3Credential struct {
 	PathStyle       bool   `json:"path_style"`
 }
 
-func (router *Router) artifactService(ctx context.Context, route tenant.BackendConfig) (artifact.Service, error) {
+func (router *Router) artifactService(ctx context.Context, tenantID, appID string, route tenant.BackendConfig) (artifact.Service, error) {
 	switch route.Type {
 	case tenant.BackendPostgres:
-		target, err := router.Resolve(ctx, route)
+		target, err := router.ResolveForScope(ctx, tenantID, appID, route)
 		if err != nil {
 			return nil, err
 		}
@@ -66,7 +66,7 @@ func (router *Router) artifactService(ctx context.Context, route tenant.BackendC
 		if route.Endpoint == "" || route.Namespace == "" || route.Credential.IsZero() {
 			return nil, errors.New("storage: S3 endpoint, bucket namespace, and credential SecretRef are required")
 		}
-		secretValue, err := router.resolve(route.Credential)
+		secretValue, err := router.resolveRef(ctx, tenantID, appID, route.Credential)
 		if err != nil {
 			return nil, errors.New("storage: resolve S3 credential failed")
 		}
@@ -93,7 +93,7 @@ func (router *Router) knowledgeService(ctx context.Context, tenantID, appID stri
 	if !policy.Enabled {
 		return nil, nil
 	}
-	apiKey, err := router.resolve(policy.Embedding.APIKey)
+	apiKey, err := router.resolveRef(ctx, tenantID, appID, policy.Embedding.APIKey)
 	if err != nil {
 		return nil, errors.New("storage: resolve embedding credential failed")
 	}
@@ -103,7 +103,7 @@ func (router *Router) knowledgeService(ctx context.Context, tenantID, appID stri
 	secretValues := []string{apiKey}
 	switch route.Type {
 	case tenant.BackendPostgres:
-		target, resolveErr := router.Resolve(ctx, route)
+		target, resolveErr := router.ResolveForScope(ctx, tenantID, appID, route)
 		if resolveErr != nil {
 			return nil, errors.New("storage: resolve PGVector backend failed")
 		}
@@ -115,7 +115,7 @@ func (router *Router) knowledgeService(ctx context.Context, tenantID, appID stri
 		}
 		options := []vectorqdrant.Option{vectorqdrant.WithHost(host), vectorqdrant.WithPort(port), vectorqdrant.WithTLS(tls), vectorqdrant.WithCollectionName(physicalNamespace(route.Namespace, tenantID, appID)), vectorqdrant.WithDimension(policy.Embedding.Dimensions)}
 		if !route.Credential.IsZero() {
-			key, resolveErr := router.resolve(route.Credential)
+			key, resolveErr := router.resolveRef(ctx, tenantID, appID, route.Credential)
 			if resolveErr != nil {
 				return nil, errors.New("storage: resolve Qdrant credential failed")
 			}

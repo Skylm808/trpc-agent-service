@@ -57,6 +57,30 @@ func TestRouterFailClosedAndDefaultResolution(t *testing.T) {
 	}
 }
 
+func TestRouterUsesScopedResolverForTenantRoutes(t *testing.T) {
+	router, err := NewRouter("synthetic-dsn", &sql.DB{}, func(tenant.SecretRef) (string, error) {
+		return "", errors.New("unscoped resolver must not run")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	router.SetScopedResolver(func(_ context.Context, tenantID, appID string, _ tenant.SecretRef) (string, error) {
+		called = true
+		if tenantID != "tenant-a" || appID != "app-a" {
+			t.Fatalf("scope = %q/%q", tenantID, appID)
+		}
+		return "", errors.New("scope rejected")
+	})
+	_, err = router.ResolveForScope(context.Background(), "tenant-a", "app-a", tenant.BackendConfig{
+		Type:       tenant.BackendPostgres,
+		Credential: tenant.SecretRef{Provider: tenant.SecretProviderVault, Key: "tenant-a/app-a/postgres"},
+	})
+	if err == nil || !called {
+		t.Fatalf("scoped resolver error = %v", err)
+	}
+}
+
 func TestRoutedProfileValidationCoversMigrationBoundaries(t *testing.T) {
 	postgres := tenant.BackendConfig{Type: tenant.BackendPostgres}
 	valid := tenant.StorageProfile{Session: postgres, Memory: postgres, Summary: postgres, Artifact: postgres, Knowledge: postgres, Audit: postgres}

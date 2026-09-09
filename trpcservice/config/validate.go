@@ -124,6 +124,7 @@ func (file *File) ValidateProduction() error {
 	}
 	for ti := range file.Tenants {
 		for ai := range file.Tenants[ti].Apps {
+			configuredTenant := file.Tenants[ti]
 			app := file.Tenants[ti].Apps[ai]
 			check := func(path string, ref tenant.SecretRef) error {
 				if ref.IsZero() {
@@ -131,6 +132,19 @@ func (file *File) ValidateProduction() error {
 				}
 				if ref.Provider == tenant.SecretProviderEnv || ref.Provider == tenant.SecretProviderFile {
 					return fmt.Errorf("config: %s must use vault or kms in production", path)
+				}
+				expectedPrefix := configuredTenant.ID + "/" + app.ID + "/"
+				if !strings.HasPrefix(ref.Key, expectedPrefix) {
+					return fmt.Errorf("config: %s must use the tenant/app secret namespace", path)
+				}
+				remainder := strings.TrimPrefix(ref.Key, expectedPrefix)
+				if remainder == "" || strings.Contains(remainder, "\\") || strings.Contains(remainder, "//") {
+					return fmt.Errorf("config: %s has an invalid secret namespace", path)
+				}
+				for _, segment := range strings.Split(remainder, "/") {
+					if segment == "" || segment == "." || segment == ".." {
+						return fmt.Errorf("config: %s has an invalid secret namespace", path)
+					}
 				}
 				return nil
 			}
@@ -151,6 +165,24 @@ func (file *File) ValidateProduction() error {
 			for _, item := range refs {
 				if err := check(item.path, item.ref); err != nil {
 					return err
+				}
+			}
+			storageRoutes := []struct {
+				path  string
+				route tenant.BackendConfig
+			}{
+				{base + ".storage.session", app.Storage.Session},
+				{base + ".storage.memory", app.Storage.Memory},
+				{base + ".storage.summary", app.Storage.Summary},
+				{base + ".storage.artifact", app.Storage.Artifact},
+				{base + ".storage.knowledge", app.Storage.Knowledge},
+				{base + ".storage.audit", app.Storage.Audit},
+			}
+			for _, item := range storageRoutes {
+				if item.route.MigrationTarget != nil {
+					if err := check(item.path+".migration_target.credential", item.route.MigrationTarget.Credential); err != nil {
+						return err
+					}
 				}
 			}
 			for i, binding := range app.Channels {

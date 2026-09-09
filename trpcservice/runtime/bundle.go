@@ -118,7 +118,7 @@ func NewBundleWithServicesAndTools(snapshot config.RuntimeSnapshot, services *st
 	if app.Model.Provider == "mock" {
 		runtimeModel = serviceagent.MockModel{}
 	} else {
-		resolved, err := modelprovider.New(app.Model)
+		resolved, err := modelprovider.NewScoped(app.Model, snapshot.TenantID(), snapshot.AppID())
 		if err != nil {
 			return nil, err
 		}

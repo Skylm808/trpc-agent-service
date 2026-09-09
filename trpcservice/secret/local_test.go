@@ -56,15 +56,20 @@ func TestResolveLocalErrorDoesNotRevealReferenceKey(t *testing.T) {
 	}
 }
 
-func TestScopedResolverRejectsCrossTenantReferenceReuse(t *testing.T) {
+func TestScopedResolverRequiresServerOwnedNamespace(t *testing.T) {
 	resolver := NewScopedResolver(func(_ context.Context, ref tenant.SecretRef) (string, error) {
 		return ref.Key, nil
 	})
-	ref := tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "SHARED_SECRET"}
+	ref := tenant.SecretRef{Provider: tenant.SecretProviderVault, Key: "tenant-a/app/model-key"}
 	if value, err := resolver.Resolve(context.Background(), "tenant-a", "app", ref); err != nil || value != ref.Key {
-		t.Fatalf("first scoped resolve value=%q err=%v", value, err)
+		t.Fatalf("scoped resolve value=%q err=%v", value, err)
 	}
 	if _, err := resolver.Resolve(context.Background(), "tenant-b", "app", ref); err == nil {
-		t.Fatal("cross-tenant secret reference reuse succeeded")
+		t.Fatal("cross-tenant secret namespace succeeded")
+	}
+	for _, key := range []string{"tenant-a/app", "tenant-a/app/../other", "tenant-a/app/path//key", `tenant-a/app/path\key`} {
+		if _, err := resolver.Resolve(context.Background(), "tenant-a", "app", tenant.SecretRef{Provider: tenant.SecretProviderVault, Key: key}); err == nil {
+			t.Fatalf("invalid namespace %q succeeded", key)
+		}
 	}
 }

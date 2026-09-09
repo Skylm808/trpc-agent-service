@@ -20,6 +20,7 @@ import (
 
 // SecretResolver resolves a SecretRef without exposing its value to callers.
 type SecretResolver func(tenant.SecretRef) (string, error)
+type ScopedSecretResolver func(context.Context, string, string, tenant.SecretRef) (string, error)
 
 // PostgresTarget is a resolved route. DSN is intentionally never formatted.
 type PostgresTarget struct {
@@ -29,7 +30,13 @@ type PostgresTarget struct {
 
 // ArtifactForRoute constructs a migration-owned artifact service.
 func (router *Router) ArtifactForRoute(ctx context.Context, route tenant.BackendConfig) (artifact.Service, error) {
-	return router.artifactService(ctx, route)
+	return router.artifactService(ctx, "", "", route)
+}
+
+// ArtifactForScope constructs a migration-owned artifact service while
+// enforcing the immutable tenant/application secret namespace.
+func (router *Router) ArtifactForScope(ctx context.Context, tenantID, appID string, route tenant.BackendConfig) (artifact.Service, error) {
+	return router.artifactService(ctx, tenantID, appID, route)
 }
 
 // MemoryForRoute constructs a migration-owned tenant/app memory service.
@@ -60,10 +67,19 @@ func (router *Router) MigrationLedgerDB() *sql.DB {
 type Router struct {
 	defaultTarget PostgresTarget
 	resolve       SecretResolver
+	resolveScoped ScopedSecretResolver
 	mu            sync.Mutex
 	targets       map[[32]byte]PostgresTarget
 	closed        bool
 	observe       OperationObserver
+}
+
+// SetScopedResolver installs the production tenant/application authorization
+// boundary before any Runtime Bundle or migration worker is started.
+func (router *Router) SetScopedResolver(resolve ScopedSecretResolver) {
+	if router != nil {
+		router.resolveScoped = resolve
+	}
 }
 
 // SetOperationObserver installs the process telemetry sink before Runtime
@@ -138,7 +154,7 @@ func (router *Router) services(ctx context.Context, tenantID, appID string, prof
 	if err := ValidateRoutedProfile(profile); err != nil {
 		return nil, err
 	}
-	artifactService, err := router.artifactService(ctx, profile.Artifact)
+	artifactService, err := router.artifactService(ctx, tenantID, appID, profile.Artifact)
 	if err != nil {
 		return nil, fmt.Errorf("storage: resolve artifact backend: %w", err)
 	}
@@ -180,7 +196,7 @@ func (router *Router) services(ctx context.Context, tenantID, appID string, prof
 		services.Memory = &MirroredMemory{Primary: services.Memory, Target: shadow}
 	}
 	if profile.Artifact.MigrationTarget != nil {
-		target, resolveErr := router.artifactService(ctx, *profile.Artifact.MigrationTarget)
+		target, resolveErr := router.artifactService(ctx, tenantID, appID, *profile.Artifact.MigrationTarget)
 		if resolveErr != nil {
 			_ = services.Close()
 			return nil, fmt.Errorf("storage: resolve artifact migration target: %w", resolveErr)
@@ -200,13 +216,13 @@ func (router *Router) services(ctx context.Context, tenantID, appID string, prof
 func (router *Router) sessionService(ctx context.Context, tenantID, appID string, route tenant.BackendConfig) (session.Service, error) {
 	switch route.Type {
 	case tenant.BackendPostgres:
-		target, err := router.Resolve(ctx, route)
+		target, err := router.ResolveForScope(ctx, tenantID, appID, route)
 		if err != nil {
 			return nil, err
 		}
 		return newPostgresSession(target.DSN)
 	case tenant.BackendRedis:
-		rawURL, keyPrefix, err := router.resolveRedisSessionRoute(tenantID, appID, route)
+		rawURL, keyPrefix, err := router.resolveRedisSessionRoute(ctx, tenantID, appID, route)
 		if err != nil {
 			return nil, err
 		}
@@ -216,13 +232,13 @@ func (router *Router) sessionService(ctx context.Context, tenantID, appID string
 	}
 }
 
-func (router *Router) resolveRedisSessionRoute(tenantID, appID string, route tenant.BackendConfig) (string, string, error) {
+func (router *Router) resolveRedisSessionRoute(ctx context.Context, tenantID, appID string, route tenant.BackendConfig) (string, string, error) {
 	if tenantID == "" || appID == "" || strings.TrimSpace(route.Namespace) == "" || route.MigrationTarget != nil || ((route.Endpoint == "") == route.Credential.IsZero()) {
 		return "", "", errors.New("storage: Redis session scope, namespace, and direct route are required")
 	}
 	rawURL := strings.TrimSpace(route.Endpoint)
 	if !route.Credential.IsZero() {
-		resolved, err := router.resolve(route.Credential)
+		resolved, err := router.resolveRef(ctx, tenantID, appID, route.Credential)
 		if err != nil || strings.TrimSpace(resolved) == "" {
 			return "", "", errors.New("storage: resolve Redis session credential failed")
 		}
@@ -246,13 +262,19 @@ func validRedisEndpoint(value string) bool {
 
 // Resolve returns the concrete PostgreSQL target for a backend route.
 func (router *Router) Resolve(ctx context.Context, route tenant.BackendConfig) (PostgresTarget, error) {
+	return router.ResolveForScope(ctx, "", "", route)
+}
+
+// ResolveForScope returns a concrete PostgreSQL target after tenant/app secret
+// authorization. Credential-free routes still use the platform pool.
+func (router *Router) ResolveForScope(ctx context.Context, tenantID, appID string, route tenant.BackendConfig) (PostgresTarget, error) {
 	if router == nil || ctx == nil || route.Type != tenant.BackendPostgres {
 		return PostgresTarget{}, errors.New("storage: only routed PostgreSQL backends are currently available")
 	}
 	if route.Credential.IsZero() {
 		return router.defaultTarget, nil
 	}
-	dsn, err := router.resolve(route.Credential)
+	dsn, err := router.resolveRef(ctx, tenantID, appID, route.Credential)
 	if err != nil {
 		return PostgresTarget{}, errors.New("storage: resolve PostgreSQL credential failed")
 	}
@@ -289,6 +311,13 @@ func (router *Router) Resolve(ctx context.Context, route tenant.BackendConfig) (
 	router.targets[identity] = target
 	router.mu.Unlock()
 	return target, nil
+}
+
+func (router *Router) resolveRef(ctx context.Context, tenantID, appID string, ref tenant.SecretRef) (string, error) {
+	if router.resolveScoped != nil && tenantID != "" && appID != "" {
+		return router.resolveScoped(ctx, tenantID, appID, ref)
+	}
+	return router.resolve(ref)
 }
 
 // Close releases only pools opened for external routes; the caller owns defaultDB.
@@ -388,14 +417,18 @@ func ValidateRoutedProfile(profile tenant.StorageProfile) error {
 // Preflight resolves every active runtime route and verifies the target schema
 // before a configuration may become runnable.
 func (router *Router) Preflight(ctx context.Context, profile tenant.StorageProfile) error {
+	return router.preflight(ctx, "", "", profile)
+}
+
+func (router *Router) preflight(ctx context.Context, tenantID, appID string, profile tenant.StorageProfile) error {
 	if err := ValidateRoutedProfile(profile); err != nil {
 		return err
 	}
-	if err := router.preflightSessionRoute(ctx, "session", profile.Session); err != nil {
+	if err := router.preflightSessionRoute(ctx, tenantID, appID, "session", profile.Session); err != nil {
 		return err
 	}
 	if profile.Session.MigrationTarget != nil {
-		if err := router.preflightSessionRoute(ctx, "session migration target", *profile.Session.MigrationTarget); err != nil {
+		if err := router.preflightSessionRoute(ctx, tenantID, appID, "session migration target", *profile.Session.MigrationTarget); err != nil {
 			return err
 		}
 	}
@@ -429,7 +462,7 @@ func (router *Router) Preflight(ctx context.Context, profile tenant.StorageProfi
 		}{"artifact migration target", *profile.Artifact.MigrationTarget, []string{"runtime_artifacts", "storage_migration_items"}})
 	}
 	for _, entry := range routes {
-		target, err := router.Resolve(ctx, entry.route)
+		target, err := router.ResolveForScope(ctx, tenantID, appID, entry.route)
 		if err != nil {
 			return fmt.Errorf("storage: %s route preflight failed", entry.name)
 		}
@@ -437,7 +470,7 @@ func (router *Router) Preflight(ctx context.Context, profile tenant.StorageProfi
 			return fmt.Errorf("storage: %s route schema is unavailable", entry.name)
 		}
 		if entry.route.MigrationTarget != nil {
-			shadow, err := router.Resolve(ctx, *entry.route.MigrationTarget)
+			shadow, err := router.ResolveForScope(ctx, tenantID, appID, *entry.route.MigrationTarget)
 			if err != nil {
 				return fmt.Errorf("storage: %s migration target preflight failed", entry.name)
 			}
@@ -453,17 +486,23 @@ func (router *Router) Preflight(ctx context.Context, profile tenant.StorageProfi
 	return nil
 }
 
-func (router *Router) preflightSessionRoute(ctx context.Context, name string, route tenant.BackendConfig) error {
+func (router *Router) preflightSessionRoute(ctx context.Context, tenantID, appID, name string, route tenant.BackendConfig) error {
 	route = route.Clone()
 	route.MigrationTarget = nil
 	if route.Type == tenant.BackendPostgres {
-		target, err := router.Resolve(ctx, route)
+		target, err := router.ResolveForScope(ctx, tenantID, appID, route)
 		if err != nil || requireTables(ctx, target.DB, []string{"runtime_session_states", "runtime_session_events", "runtime_session_track_events", "runtime_session_summaries", "runtime_app_states", "runtime_user_states"}) != nil {
 			return fmt.Errorf("storage: %s route schema is unavailable", name)
 		}
 		return nil
 	}
-	service, err := router.sessionService(ctx, "preflight", "preflight", route)
+	if tenantID == "" {
+		tenantID = "preflight"
+	}
+	if appID == "" {
+		appID = "preflight"
+	}
+	service, err := router.sessionService(ctx, tenantID, appID, route)
 	if err != nil {
 		return fmt.Errorf("storage: %s route preflight failed", name)
 	}
@@ -478,11 +517,11 @@ func (router *Router) preflightSessionRoute(ctx context.Context, name string, ro
 // PreflightApp verifies external Artifact/Knowledge clients in addition to the
 // shared SQL schemas before a published app can receive new work.
 func (router *Router) PreflightApp(ctx context.Context, tenantID string, app tenant.AgentApp) error {
-	if err := router.Preflight(ctx, app.Storage); err != nil {
+	if err := router.preflight(ctx, tenantID, app.ID, app.Storage); err != nil {
 		return err
 	}
 	if app.Storage.Audit.MigrationTarget != nil && app.Storage.Audit.MigrationTarget.Type == tenant.BackendExternal {
-		credential, err := router.resolve(app.Storage.Audit.MigrationTarget.Credential)
+		credential, err := router.resolveRef(ctx, tenantID, app.ID, app.Storage.Audit.MigrationTarget.Credential)
 		if err != nil || credential == "" {
 			return errors.New("storage: audit archive credential preflight failed")
 		}
@@ -507,7 +546,7 @@ func (router *Router) PreflightApp(ctx context.Context, tenantID string, app ten
 			return errors.New("storage: external memory route is unreachable")
 		}
 	}
-	artifactService, err := router.artifactService(ctx, app.Storage.Artifact)
+	artifactService, err := router.artifactService(ctx, tenantID, app.ID, app.Storage.Artifact)
 	if err != nil {
 		return errors.New("storage: artifact route preflight failed")
 	}
@@ -523,7 +562,7 @@ func (router *Router) PreflightApp(ctx context.Context, tenantID string, app ten
 		_ = closer.Close()
 	}
 	if app.Storage.Artifact.MigrationTarget != nil && app.Storage.Artifact.MigrationTarget.Type == tenant.BackendS3 {
-		target, err := router.artifactService(ctx, *app.Storage.Artifact.MigrationTarget)
+		target, err := router.artifactService(ctx, tenantID, app.ID, *app.Storage.Artifact.MigrationTarget)
 		if err != nil {
 			return errors.New("storage: artifact migration target preflight failed")
 		}

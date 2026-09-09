@@ -42,3 +42,21 @@ func TestPublishedCacheRejectsInvalidLimit(t *testing.T) {
 		t.Fatal("zero cache limit was accepted")
 	}
 }
+
+func TestPublishedCacheAppliesDeploymentPolicyToLegacyRecords(t *testing.T) {
+	store := repository.NewMemoryStore()
+	if _, err := store.PublishConfig(context.Background(), repository.ConfigRecord{
+		TenantID: "tenant-a",
+		Payload:  []byte(validYAML),
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := NewPublishedCache(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.SetValidator((*File).ValidateProduction)
+	if _, err := cache.Version(context.Background(), "tenant-a", 1); err == nil {
+		t.Fatal("legacy env-based published secret bypassed production policy")
+	}
+}

@@ -19,9 +19,24 @@ const defaultVersionCacheLimit = 256
 type PublishedCache struct {
 	store      repository.Store
 	maxEntries int
+	validator  func(*File) error
 	mu         sync.Mutex
 	versions   map[publishedKey]*File
 	order      []publishedKey
+}
+
+// SetValidator installs a read-time gate for immutable records that may have
+// been published before the current production policy existed. It must be
+// called during bootstrap, before the cache is shared with request handlers.
+func (cache *PublishedCache) SetValidator(validator func(*File) error) {
+	if cache == nil {
+		return
+	}
+	cache.mu.Lock()
+	cache.validator = validator
+	cache.versions = make(map[publishedKey]*File)
+	cache.order = nil
+	cache.mu.Unlock()
 }
 
 type publishedKey struct {
@@ -64,6 +79,14 @@ func (cache *PublishedCache) Version(ctx context.Context, tenantID string, versi
 	file, err := Load(bytes.NewReader(record.Payload))
 	if err != nil {
 		return nil, err
+	}
+	cache.mu.Lock()
+	validator := cache.validator
+	cache.mu.Unlock()
+	if validator != nil {
+		if err := validator(file); err != nil {
+			return nil, errors.New("config: published version violates the active deployment policy")
+		}
 	}
 	cache.mu.Lock()
 	if existing, ok := cache.versions[key]; ok {

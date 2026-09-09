@@ -66,11 +66,11 @@ func (copier *PostgresCopier) Step(ctx context.Context, job Job, batchSize int) 
 	if job.Domain == DomainMemory && job.Source.Type == tenant.BackendPostgres && job.Target.Type == tenant.BackendExternal {
 		return copier.stepMemoryToExternal(ctx, job, appName, batchSize)
 	}
-	source, err := copier.Router.Resolve(ctx, job.Source)
+	source, err := copier.Router.ResolveForScope(ctx, job.TenantID, job.AppID, job.Source)
 	if err != nil {
 		return Progress{}, errors.New("storage migration: source backend unavailable")
 	}
-	target, err := copier.Router.Resolve(ctx, job.Target)
+	target, err := copier.Router.ResolveForScope(ctx, job.TenantID, job.AppID, job.Target)
 	if err != nil {
 		return Progress{}, errors.New("storage migration: target backend unavailable")
 	}
@@ -521,7 +521,7 @@ func sessionSourceKey(key session.Key) string {
 }
 
 func (copier *PostgresCopier) stepMemoryToExternal(ctx context.Context, job Job, appName string, batchSize int) (Progress, error) {
-	source, err := copier.Router.Resolve(ctx, job.Source)
+	source, err := copier.Router.ResolveForScope(ctx, job.TenantID, job.AppID, job.Source)
 	if err != nil {
 		return Progress{}, errors.New("storage migration: source memory backend unavailable")
 	}
@@ -700,11 +700,11 @@ type artifactRow struct {
 }
 
 func (copier *PostgresCopier) stepArtifactToS3(ctx context.Context, job Job, appName string, batchSize int) (Progress, error) {
-	source, err := copier.Router.Resolve(ctx, job.Source)
+	source, err := copier.Router.ResolveForScope(ctx, job.TenantID, job.AppID, job.Source)
 	if err != nil {
 		return Progress{}, errors.New("storage migration: source backend unavailable")
 	}
-	target, err := copier.Router.ArtifactForRoute(ctx, job.Target)
+	target, err := copier.Router.ArtifactForScope(ctx, job.TenantID, job.AppID, job.Target)
 	if err != nil {
 		return Progress{}, errors.New("storage migration: target artifact backend unavailable")
 	}
@@ -811,14 +811,14 @@ func copyArtifactRow(ctx context.Context, ledger *sql.DB, target artifact.Servic
 }
 
 func (copier *PostgresCopier) stepArtifactFromS3(ctx context.Context, job Job, appName string, batchSize int) (Progress, error) {
-	source, err := copier.Router.ArtifactForRoute(ctx, job.Source)
+	source, err := copier.Router.ArtifactForScope(ctx, job.TenantID, job.AppID, job.Source)
 	if err != nil {
 		return Progress{}, errors.New("storage migration: source artifact backend unavailable")
 	}
 	if closer, ok := source.(interface{ Close() error }); ok {
 		defer closer.Close()
 	}
-	targetRoute, err := copier.Router.Resolve(ctx, job.Target)
+	targetRoute, err := copier.Router.ResolveForScope(ctx, job.TenantID, job.AppID, job.Target)
 	if err != nil {
 		return Progress{}, errors.New("storage migration: target backend unavailable")
 	}

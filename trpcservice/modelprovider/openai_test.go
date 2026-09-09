@@ -72,3 +72,11 @@ func TestCredentialResolutionErrorIsRedacted(t *testing.T) {
 		t.Fatalf("error leaked credential metadata: %v", err)
 	}
 }
+
+func TestScopedModelRejectsCrossTenantSecretBeforeResolution(t *testing.T) {
+	ref := tenant.SecretRef{Provider: tenant.SecretProviderVault, Key: "tenant-b/app-a/model"}
+	_, err := NewScoped(tenant.ModelProfile{Provider: ProviderDeepSeek, Name: "deepseek-test", APIKey: ref}, "tenant-a", "app-a")
+	if err == nil || strings.Contains(err.Error(), ref.Key) {
+		t.Fatalf("scoped model error = %v", err)
+	}
+}

@@ -228,7 +228,16 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	if err != nil {
 		return nil, err
 	}
-	routes, err := openclaw.NewSQLRoutes(db, expectedCredential(published))
+	published.SetValidator(func(file *config.File) error {
+		if err := file.ValidateProduction(); err != nil {
+			return err
+		}
+		return validatePersistentProfiles(file)
+	})
+	scopedSecrets := secret.NewScopedResolver(func(ctx context.Context, ref tenant.SecretRef) (string, error) {
+		return secret.Resolve(ctx, ref)
+	})
+	routes, err := openclaw.NewSQLRoutes(db, expectedCredential(published, scopedSecrets.Resolve))
 	if err != nil {
 		return nil, err
 	}
@@ -239,6 +248,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	if err != nil {
 		return nil, err
 	}
+	storageRouter.SetScopedResolver(scopedSecrets.Resolve)
 	closeStorageRouter := true
 	defer func() {
 		if closeStorageRouter {
@@ -252,10 +262,6 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	if err != nil {
 		return nil, err
 	}
-	scopedSecrets := secret.NewScopedResolver(func(ctx context.Context, ref tenant.SecretRef) (string, error) {
-		return secret.Resolve(ctx, ref)
-	})
-	scopedSecrets.SetOwnershipStore(&secret.SQLOwnershipStore{DB: db})
 	toolRegistry.SetScopedResolver(scopedSecrets.Resolve)
 	toolRegistry.SetExecutionStore(&servicetool.SQLExecutionStore{DB: db, EncryptionKey: []byte(os.Getenv(toolLedgerKeyEnv))})
 	if err := preflightPublishedTools(connectCtx, db, toolRegistry); err != nil {
@@ -325,7 +331,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 				continue
 			}
 			route := *app.Storage.Audit.MigrationTarget
-			token, tokenErr := resolveLocalSecret(route.Credential)
+			token, tokenErr := scopedSecrets.Resolve(resolveCtx, record.TenantID, app.ID, route.Credential)
 			if tokenErr != nil || token == "" {
 				return nil, errors.New("audit: external archive credential is unavailable")
 			}
@@ -359,11 +365,11 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	switch role {
 	case roleGateway:
 		mode = openclaw.GatewayMode
-		decorators = productionDecorators(db, store, published, redactor, &storagemigration.SQLStore{DB: db}, storageRouter, toolRegistry)
+		decorators = productionDecorators(db, store, published, redactor, &storagemigration.SQLStore{DB: db}, storageRouter, toolRegistry, scopedSecrets.Resolve)
 	case roleWorker:
 		mode = openclaw.WorkerMode
 	default:
-		decorators = productionDecorators(db, store, published, redactor, &storagemigration.SQLStore{DB: db}, storageRouter, toolRegistry)
+		decorators = productionDecorators(db, store, published, redactor, &storagemigration.SQLStore{DB: db}, storageRouter, toolRegistry, scopedSecrets.Resolve)
 	}
 	component, err := openclaw.NewComponentForMode(runCtx, address, file, routes, dependencies, mode, decorators...)
 	if err != nil {
@@ -388,7 +394,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 		}
 	}
 	deliveryLimiter := &delivery.RedisFixedWindowLimiter{Redis: redisBackend}
-	deliveryRouter := &publishedDeliveryRoutes{db: db, published: published, limiter: deliveryLimiter, senders: make(map[deliverySenderKey]channels.TextSender)}
+	deliveryRouter := &publishedDeliveryRoutes{db: db, published: published, limiter: deliveryLimiter, resolveSecret: scopedSecrets.Resolve, senders: make(map[deliverySenderKey]channels.TextSender)}
 	telemetry, err := servicemetrics.New("trpc-agent-service")
 	if err != nil {
 		_ = component.Close(context.Background())
@@ -453,12 +459,13 @@ type deliverySenderKey struct {
 // ingress-pinned version. This lets old requests finish with their old sender
 // and makes newly published channel credentials effective without a restart.
 type publishedDeliveryRoutes struct {
-	db        *sql.DB
-	published *config.PublishedCache
-	limiter   channels.SendLimiter
-	mu        sync.Mutex
-	senders   map[deliverySenderKey]channels.TextSender
-	lastUsed  map[deliverySenderKey]time.Time
+	db            *sql.DB
+	published     *config.PublishedCache
+	limiter       channels.SendLimiter
+	resolveSecret servicetool.ScopedSecretResolver
+	mu            sync.Mutex
+	senders       map[deliverySenderKey]channels.TextSender
+	lastUsed      map[deliverySenderKey]time.Time
 }
 
 const (
@@ -542,7 +549,13 @@ func (routes *publishedDeliveryRoutes) ResolveContext(ctx context.Context, messa
 	if selected == nil {
 		return nil, errors.New("delivery: published channel binding is unavailable")
 	}
-	appSecret, err := resolveLocalSecret(selected.Secret)
+	resolve := func(ref tenant.SecretRef) (string, error) { return resolveLocalSecret(ref) }
+	if routes.resolveSecret != nil {
+		resolve = func(ref tenant.SecretRef) (string, error) {
+			return routes.resolveSecret(ctx, message.TenantID, message.AppID, ref)
+		}
+	}
+	appSecret, err := resolve(selected.Secret)
 	if err != nil {
 		return nil, errors.New("delivery: channel application secret is unavailable")
 	}
@@ -610,9 +623,9 @@ var _ delivery.RouteResolver = (*publishedDeliveryRoutes)(nil)
 
 // productionDecorators mounts the dynamic WeCom and Feishu callback adapters
 // and the authenticated administration API around the gateway.
-func productionDecorators(db *sql.DB, store repository.Store, published *config.PublishedCache, redactor *servicelog.Redactor, migrationStore storagemigration.Store, storageRouter *storage.Router, toolRegistry *servicetool.CatalogRegistry) []openclaw.HandlerDecorator {
+func productionDecorators(db *sql.DB, store repository.Store, published *config.PublishedCache, redactor *servicelog.Redactor, migrationStore storagemigration.Store, storageRouter *storage.Router, toolRegistry *servicetool.CatalogRegistry, resolveSecret servicetool.ScopedSecretResolver) []openclaw.HandlerDecorator {
 	wecomDecorator := func(core *openclaw.Handler, next http.Handler) (http.Handler, error) {
-		adapter, err := wecom.NewDynamicHandlerWithMedia(core, wecomBindingProvider(db, published), func(binding wecom.Binding) channels.MediaDownloader {
+		adapter, err := wecom.NewDynamicHandlerWithMedia(core, wecomBindingProvider(db, published, resolveSecret), func(binding wecom.Binding) channels.MediaDownloader {
 			return &wecom.MediaClient{Tokens: &wecom.CredentialTokenSource{CorpID: binding.CorpID, CorpSecret: binding.AppSecret}}
 		}, channels.MediaPolicy{})
 		if err != nil {
@@ -624,7 +637,7 @@ func productionDecorators(db *sql.DB, store repository.Store, published *config.
 		return mux, nil
 	}
 	feishuDecorator := func(core *openclaw.Handler, next http.Handler) (http.Handler, error) {
-		adapter, err := feishu.NewDynamicHandlerWithMedia(core, feishuBindingProvider(db, published), func(binding feishu.Binding) channels.MediaDownloader {
+		adapter, err := feishu.NewDynamicHandlerWithMedia(core, feishuBindingProvider(db, published, resolveSecret), func(binding feishu.Binding) channels.MediaDownloader {
 			return &feishu.MediaClient{Tokens: &feishu.AppTokenSource{AppID: binding.FeishuAppID, AppSecret: binding.AppSecret}}
 		}, channels.MediaPolicy{})
 		if err != nil {
@@ -770,13 +783,16 @@ func preflightPublishedTools(ctx context.Context, db *sql.DB, registry *servicet
 // binding. SecretRefs resolve at request time; the legacy per-binding
 // environment variable remains as a fallback for HTTP bindings that do not
 // declare a token SecretRef.
-func expectedCredential(published *config.PublishedCache) openclaw.ExpectedCredential {
+func expectedCredential(published *config.PublishedCache, scoped ...servicetool.ScopedSecretResolver) openclaw.ExpectedCredential {
 	return func(ctx context.Context, tenantID, bindingID string, version tenant.ConfigVersion) (string, error) {
-		binding, err := publishedBinding(published, ctx, tenantID, bindingID, version)
+		binding, appID, err := publishedBinding(published, ctx, tenantID, bindingID, version)
 		if err != nil {
 			return "", err
 		}
 		if !binding.Token.IsZero() {
+			if len(scoped) > 0 && scoped[0] != nil {
+				return scoped[0](ctx, tenantID, appID, binding.Token)
+			}
 			return resolveLocalSecret(binding.Token)
 		}
 		credential := os.Getenv(gatewayTokenEnv(bindingID))
@@ -790,7 +806,7 @@ func expectedCredential(published *config.PublishedCache) openclaw.ExpectedCrede
 // wecomBindingProvider returns every tenant-scoped candidate for one URL
 // binding ID. The adapter verifies the callback against each server-owned key
 // and requires exactly one match, mirroring Feishu's fail-closed isolation.
-func wecomBindingProvider(db *sql.DB, published *config.PublishedCache) wecom.BindingProvider {
+func wecomBindingProvider(db *sql.DB, published *config.PublishedCache, scoped ...servicetool.ScopedSecretResolver) wecom.BindingProvider {
 	return func(bindingID string) []wecom.Binding {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -806,15 +822,19 @@ func wecomBindingProvider(db *sql.DB, published *config.PublishedCache) wecom.Bi
 			if err := rows.Scan(&tenantID, &appID, &version); err != nil {
 				return nil
 			}
-			binding, err := publishedBinding(published, ctx, tenantID, bindingID, version)
+			binding, _, err := publishedBinding(published, ctx, tenantID, bindingID, version)
 			if err != nil || binding.Type != tenant.ChannelTypeWeCom {
 				continue
 			}
-			token, err := resolveLocalSecret(binding.Token)
+			resolve := resolveLocalSecret
+			if len(scoped) > 0 && scoped[0] != nil {
+				resolve = func(ref tenant.SecretRef) (string, error) { return scoped[0](ctx, tenantID, appID, ref) }
+			}
+			token, err := resolve(binding.Token)
 			if err != nil {
 				continue
 			}
-			aesKey, err := resolveLocalSecret(binding.EncryptionKey)
+			aesKey, err := resolve(binding.EncryptionKey)
 			if err != nil {
 				continue
 			}
@@ -822,7 +842,7 @@ func wecomBindingProvider(db *sql.DB, published *config.PublishedCache) wecom.Bi
 			if err != nil {
 				continue
 			}
-			appSecret, err := resolveLocalSecret(binding.Secret)
+			appSecret, err := resolve(binding.Secret)
 			if err != nil {
 				continue
 			}
@@ -841,7 +861,7 @@ func wecomBindingProvider(db *sql.DB, published *config.PublishedCache) wecom.Bi
 // may declare the same binding_id; the adapter narrows encrypted callbacks
 // with the server-owned Encrypt Key, then requires a unique Verification
 // Token and app_id match, so cross-tenant ambiguity fails closed.
-func feishuBindingProvider(db *sql.DB, published *config.PublishedCache) feishu.BindingProvider {
+func feishuBindingProvider(db *sql.DB, published *config.PublishedCache, scoped ...servicetool.ScopedSecretResolver) feishu.BindingProvider {
 	return func(bindingID string) []feishu.Binding {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -857,11 +877,15 @@ func feishuBindingProvider(db *sql.DB, published *config.PublishedCache) feishu.
 			if err := rows.Scan(&tenantID, &appID, &version); err != nil {
 				return nil
 			}
-			binding, err := publishedBinding(published, ctx, tenantID, bindingID, version)
+			binding, _, err := publishedBinding(published, ctx, tenantID, bindingID, version)
 			if err != nil || binding.Type != tenant.ChannelTypeFeishu {
 				continue
 			}
-			token, err := resolveLocalSecret(binding.Token)
+			resolve := resolveLocalSecret
+			if len(scoped) > 0 && scoped[0] != nil {
+				resolve = func(ref tenant.SecretRef) (string, error) { return scoped[0](ctx, tenantID, appID, ref) }
+			}
+			token, err := resolve(binding.Token)
 			if err != nil {
 				continue
 			}
@@ -870,13 +894,13 @@ func feishuBindingProvider(db *sql.DB, published *config.PublishedCache) feishu.
 				FeishuAppID: binding.ProviderAccountID, VerificationToken: token,
 				ConfigVersion: version,
 			}
-			appSecret, err := resolveLocalSecret(binding.Secret)
+			appSecret, err := resolve(binding.Secret)
 			if err != nil {
 				continue
 			}
 			candidate.AppSecret = appSecret
 			if !binding.EncryptionKey.IsZero() {
-				encryptKey, err := resolveLocalSecret(binding.EncryptionKey)
+				encryptKey, err := resolve(binding.EncryptionKey)
 				if err != nil {
 					continue
 				}
@@ -889,10 +913,10 @@ func feishuBindingProvider(db *sql.DB, published *config.PublishedCache) feishu.
 }
 
 // publishedBinding extracts one binding from the immutable published file.
-func publishedBinding(published *config.PublishedCache, ctx context.Context, tenantID, bindingID string, version tenant.ConfigVersion) (tenant.ChannelBinding, error) {
+func publishedBinding(published *config.PublishedCache, ctx context.Context, tenantID, bindingID string, version tenant.ConfigVersion) (tenant.ChannelBinding, string, error) {
 	file, err := published.Version(ctx, tenantID, version)
 	if err != nil {
-		return tenant.ChannelBinding{}, err
+		return tenant.ChannelBinding{}, "", err
 	}
 	for _, currentTenant := range file.Tenants {
 		if currentTenant.ID != tenantID {
@@ -901,12 +925,12 @@ func publishedBinding(published *config.PublishedCache, ctx context.Context, ten
 		for _, app := range currentTenant.Apps {
 			for _, binding := range app.Channels {
 				if binding.ID == bindingID {
-					return binding, nil
+					return binding, app.ID, nil
 				}
 			}
 		}
 	}
-	return tenant.ChannelBinding{}, fmt.Errorf("binding %q not found in tenant %q version %d", bindingID, tenantID, version)
+	return tenant.ChannelBinding{}, "", fmt.Errorf("binding %q not found in tenant %q version %d", bindingID, tenantID, version)
 }
 
 func nodeID() string {
