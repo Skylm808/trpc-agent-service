@@ -134,7 +134,7 @@ if [[ "$actual_tables" != "$expected_tables" ]]; then
 fi
 
 expected_indexes=$'idx_audit_config_version\nidx_derived_jobs_ready\nidx_inbox_execution_stage\nidx_inbox_recovery_ready\nidx_migration_jobs_claim\nidx_migration_jobs_config_domain\nidx_outbox_delivery_ready\nidx_run_statuses_binding_updated\nidx_runtime_artifact_catalog_scope\nidx_tool_executions_status\nidx_worker_nodes_live\nuq_inbox_session_seq\nuq_inbox_tenant_id\nuq_message_events_tenant_inbox'
-actual_indexes="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname IN ('uq_message_events_tenant_inbox','uq_inbox_tenant_id','uq_inbox_session_seq','idx_derived_jobs_ready','idx_inbox_recovery_ready','idx_inbox_execution_stage','idx_outbox_delivery_ready','idx_run_statuses_binding_updated','idx_worker_nodes_live','idx_migration_jobs_claim','idx_migration_jobs_config_domain','idx_runtime_artifact_catalog_scope','idx_audit_config_version') ORDER BY indexname")"
+actual_indexes="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname IN ('uq_message_events_tenant_inbox','uq_inbox_tenant_id','uq_inbox_session_seq','idx_derived_jobs_ready','idx_inbox_recovery_ready','idx_inbox_execution_stage','idx_outbox_delivery_ready','idx_run_statuses_binding_updated','idx_worker_nodes_live','idx_migration_jobs_claim','idx_migration_jobs_config_domain','idx_runtime_artifact_catalog_scope','idx_tool_executions_status','idx_audit_config_version') ORDER BY indexname")"
 if [[ "$actual_indexes" != "$expected_indexes" ]]; then
   echo "missing PostgreSQL migration indexes:" >&2
   echo "$actual_indexes" >&2
