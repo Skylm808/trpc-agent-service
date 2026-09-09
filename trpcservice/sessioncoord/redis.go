@@ -28,6 +28,9 @@ type RedisCoordinator struct {
 const acquireLua = `
 local live = redis.call('GET', KEYS[1])
 if live then return {0, live} end
+local floor = tonumber(ARGV[3]) or 0
+local current = tonumber(redis.call('GET', KEYS[2]) or '0') or 0
+if current < floor then redis.call('SET', KEYS[2], floor) end
 local token = redis.call('INCR', KEYS[2])
 local value = ARGV[1] .. '|' .. token
 redis.call('PSETEX', KEYS[1], ARGV[2], value)
@@ -48,7 +51,15 @@ func (coordinator *RedisCoordinator) Acquire(ctx context.Context, key gateway.Se
 		return Lease{}, errors.New("sessioncoord: redis, fencer, owner, and positive ttl are required")
 	}
 	leaseKey, counterKey := coordinator.keys(key)
-	result, err := coordinator.Redis.Eval(ctx, acquireLua, []string{leaseKey, counterKey}, owner, ttl.Milliseconds())
+	var floor uint64
+	var err error
+	if reader, ok := coordinator.Fencer.(FenceReader); ok {
+		floor, err = reader.CurrentFence(ctx, key)
+		if err != nil {
+			return Lease{}, err
+		}
+	}
+	result, err := coordinator.Redis.Eval(ctx, acquireLua, []string{leaseKey, counterKey}, owner, ttl.Milliseconds(), floor)
 	if err != nil {
 		return Lease{}, err
 	}
@@ -105,7 +116,10 @@ func (coordinator *RedisCoordinator) keys(key gateway.SessionKey) (string, strin
 	}
 	digest := sha256.Sum256([]byte(key.TenantID + "\x00" + key.AppID + "\x00" + key.UserID + "\x00" + key.SessionID))
 	suffix := hex.EncodeToString(digest[:])
-	return prefix + ":session-lease:" + suffix, prefix + ":session-fence:" + suffix
+	// Both keys must share a Redis Cluster hash tag because acquireLua reads
+	// and updates them atomically.
+	tag := "{" + suffix + "}"
+	return prefix + ":session-lease:" + tag, prefix + ":session-fence:" + tag
 }
 func redisLeaseValue(lease Lease) string {
 	return lease.Owner + "|" + strconv.FormatUint(lease.Token, 10)

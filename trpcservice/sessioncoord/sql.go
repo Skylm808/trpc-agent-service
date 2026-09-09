@@ -29,6 +29,18 @@ func (store *SQLWriteStore) AdvanceFence(ctx context.Context, key gateway.Sessio
 	return exactFenceResult(result, err)
 }
 
+func (store *SQLWriteStore) CurrentFence(ctx context.Context, key gateway.SessionKey) (uint64, error) {
+	if err := store.valid(key); err != nil {
+		return 0, err
+	}
+	var fence uint64
+	err := store.DB.QueryRowContext(ctx, `SELECT last_fence FROM session_heads WHERE tenant_id=$1 AND app_id=$2 AND user_id=$3 AND session_id=$4`, key.TenantID, key.AppID, key.UserID, key.SessionID).Scan(&fence)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return fence, err
+}
+
 func (store *SQLWriteStore) ValidateFence(ctx context.Context, key gateway.SessionKey, fence uint64) error {
 	if err := store.valid(key); err != nil {
 		return err

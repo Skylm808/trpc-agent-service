@@ -149,6 +149,15 @@ func (store *MemoryWriteStore) AdvanceFence(_ context.Context, key gateway.Sessi
 	return nil
 }
 
+func (store *MemoryWriteStore) CurrentFence(_ context.Context, key gateway.SessionKey) (uint64, error) {
+	if store == nil || key.TenantID == "" || key.AppID == "" || key.UserID == "" || key.SessionID == "" {
+		return 0, errors.New("sessioncoord: complete session key is required")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.data(key).head.LastFence, nil
+}
+
 // CommitTurn atomically verifies fence and commits an event and its state delta.
 func (store *MemoryWriteStore) CommitTurn(_ context.Context, write TurnWrite) (uint64, error) {
 	store.mu.Lock()

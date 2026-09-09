@@ -30,6 +30,12 @@ type FenceAdvancer interface {
 	AdvanceFence(context.Context, gateway.SessionKey, uint64) error
 }
 
+// FenceReader lets a volatile lease backend seed its counter from the
+// persistent session fence after restart or failover.
+type FenceReader interface {
+	CurrentFence(context.Context, gateway.SessionKey) (uint64, error)
+}
+
 // LeaseCoordinator is implemented by the local reference and Redis coordinator.
 type LeaseCoordinator interface {
 	Acquire(context.Context, gateway.SessionKey, string, time.Duration) (Lease, error)
