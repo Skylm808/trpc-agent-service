@@ -55,3 +55,16 @@ func TestResolveLocalErrorDoesNotRevealReferenceKey(t *testing.T) {
 		t.Fatalf("error leaked lookup metadata: %v", err)
 	}
 }
+
+func TestScopedResolverRejectsCrossTenantReferenceReuse(t *testing.T) {
+	resolver := NewScopedResolver(func(_ context.Context, ref tenant.SecretRef) (string, error) {
+		return ref.Key, nil
+	})
+	ref := tenant.SecretRef{Provider: tenant.SecretProviderEnv, Key: "SHARED_SECRET"}
+	if value, err := resolver.Resolve(context.Background(), "tenant-a", "app", ref); err != nil || value != ref.Key {
+		t.Fatalf("first scoped resolve value=%q err=%v", value, err)
+	}
+	if _, err := resolver.Resolve(context.Background(), "tenant-b", "app", ref); err == nil {
+		t.Fatal("cross-tenant secret reference reuse succeeded")
+	}
+}

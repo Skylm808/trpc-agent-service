@@ -32,6 +32,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/policy"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/recovery"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/repository"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/sessioncoord"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storagemigration"
@@ -250,6 +251,10 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	if err != nil {
 		return nil, err
 	}
+	scopedSecrets := secret.NewScopedResolver(func(ctx context.Context, ref tenant.SecretRef) (string, error) {
+		return secret.Resolve(ctx, ref)
+	})
+	toolRegistry.SetScopedResolver(scopedSecrets.Resolve)
 	if err := preflightPublishedTools(connectCtx, db, toolRegistry); err != nil {
 		return nil, err
 	}
@@ -260,7 +265,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	}, func(snapshot config.RuntimeSnapshot) (*servicetool.Catalog, error) {
 		toolCtx, cancel := context.WithTimeout(runCtx, 20*time.Second)
 		defer cancel()
-		return toolRegistry.Build(toolCtx, snapshot.App())
+		return toolRegistry.BuildForScope(toolCtx, snapshot.TenantID(), snapshot.AppID(), snapshot.App())
 	})
 	redactor := servicelog.NewRedactor(nil, nil)
 	bus := &openclaw.RedisEventBus{Backend: redisBackend}
@@ -646,7 +651,7 @@ func productionDecorators(db *sql.DB, store repository.Store, published *config.
 						cancel()
 						return fmt.Errorf("tenant %q app %q: %w", configured.ID, app.ID, err)
 					}
-					err = toolRegistry.Preflight(ctx, app)
+					err = toolRegistry.PreflightForScope(ctx, configured.ID, app.ID, app)
 					cancel()
 					if err != nil {
 						return fmt.Errorf("tenant %q app %q tool preflight: %w", configured.ID, app.ID, err)

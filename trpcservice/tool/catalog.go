@@ -21,6 +21,7 @@ const defaultRemoteTimeout = 10 * time.Second
 
 // SecretResolver resolves an immutable SecretRef without exposing its value.
 type SecretResolver func(tenant.SecretRef) (string, error)
+type ScopedSecretResolver func(context.Context, string, string, tenant.SecretRef) (string, error)
 
 type mcpToolSet interface {
 	Init(context.Context) error
@@ -34,9 +35,18 @@ type mcpFactory func(tenant.MCPServer, map[string]string) mcpToolSet
 // Models cannot add servers or endpoints; all targets originate in a validated
 // published AgentApp configuration.
 type CatalogRegistry struct {
-	resolve    SecretResolver
-	mcpFactory mcpFactory
-	httpClient *http.Client
+	resolve       SecretResolver
+	resolveScoped ScopedSecretResolver
+	mcpFactory    mcpFactory
+	httpClient    *http.Client
+}
+
+// SetScopedResolver enables tenant-scoped credential resolution for production
+// bundles while retaining the simple resolver used by unit tests.
+func (registry *CatalogRegistry) SetScopedResolver(resolve ScopedSecretResolver) {
+	if registry != nil {
+		registry.resolveScoped = resolve
+	}
 }
 
 // Catalog owns the external resources and model-visible tools for one Bundle.
@@ -65,6 +75,14 @@ func NewCatalogRegistry(resolve SecretResolver) (*CatalogRegistry, error) {
 // Build resolves credentials, initializes named MCP sessions, verifies the
 // configured discovery surface, and constructs fixed HTTPS business tools.
 func (registry *CatalogRegistry) Build(ctx context.Context, app tenant.AgentApp) (*Catalog, error) {
+	return registry.build(ctx, "", "", app)
+}
+
+func (registry *CatalogRegistry) BuildForScope(ctx context.Context, tenantID, appID string, app tenant.AgentApp) (*Catalog, error) {
+	return registry.build(ctx, tenantID, appID, app)
+}
+
+func (registry *CatalogRegistry) build(ctx context.Context, tenantID, appID string, app tenant.AgentApp) (*Catalog, error) {
 	if registry == nil || registry.resolve == nil || registry.mcpFactory == nil || registry.httpClient == nil || ctx == nil {
 		return nil, errors.New("tool catalog: registry and context are required")
 	}
@@ -79,7 +97,7 @@ func (registry *CatalogRegistry) Build(ctx context.Context, app tenant.AgentApp)
 		if !server.Enabled {
 			continue
 		}
-		headers, secretValues, err := registry.mcpHeaders(server)
+		headers, secretValues, err := registry.mcpHeadersForScope(ctx, tenantID, appID, server)
 		if err != nil {
 			return nil, fmt.Errorf("tool catalog: MCP server %q credential is unavailable", server.ID)
 		}
@@ -122,7 +140,7 @@ func (registry *CatalogRegistry) Build(ctx context.Context, app tenant.AgentApp)
 		if !configured.Enabled {
 			continue
 		}
-		credential, err := registry.resolve(configured.Credential)
+		credential, err := registry.resolveRef(ctx, tenantID, appID, configured.Credential)
 		if err != nil {
 			return nil, fmt.Errorf("tool catalog: business tool %q credential is unavailable", configured.Name)
 		}
@@ -135,9 +153,24 @@ func (registry *CatalogRegistry) Build(ctx context.Context, app tenant.AgentApp)
 	return catalog, nil
 }
 
+func (registry *CatalogRegistry) resolveRef(ctx context.Context, tenantID, appID string, ref tenant.SecretRef) (string, error) {
+	if registry.resolveScoped != nil && tenantID != "" && appID != "" {
+		return registry.resolveScoped(ctx, tenantID, appID, ref)
+	}
+	return registry.resolve(ref)
+}
+
 // Preflight builds and closes an App catalog, including MCP Initialize/ListTools.
 func (registry *CatalogRegistry) Preflight(ctx context.Context, app tenant.AgentApp) error {
 	catalog, err := registry.Build(ctx, app)
+	if err != nil {
+		return err
+	}
+	return catalog.Close()
+}
+
+func (registry *CatalogRegistry) PreflightForScope(ctx context.Context, tenantID, appID string, app tenant.AgentApp) error {
+	catalog, err := registry.BuildForScope(ctx, tenantID, appID, app)
 	if err != nil {
 		return err
 	}
@@ -173,10 +206,14 @@ func (catalog *Catalog) Close() error {
 }
 
 func (registry *CatalogRegistry) mcpHeaders(server tenant.MCPServer) (map[string]string, []string, error) {
+	return registry.mcpHeadersForScope(context.Background(), "", "", server)
+}
+
+func (registry *CatalogRegistry) mcpHeadersForScope(ctx context.Context, tenantID, appID string, server tenant.MCPServer) (map[string]string, []string, error) {
 	if server.Credential.IsZero() {
 		return nil, nil, nil
 	}
-	credential, err := registry.resolve(server.Credential)
+	credential, err := registry.resolveRef(ctx, tenantID, appID, server.Credential)
 	if err != nil {
 		return nil, nil, err
 	}

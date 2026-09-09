@@ -32,6 +32,37 @@ type Resolver struct {
 	providers map[tenant.SecretProvider]Provider
 }
 
+// ScopedResolver prevents a SecretRef from being reused by another tenant.
+// The first authenticated configuration that claims a provider/key pair owns
+// it for the lifetime of this process; values are still resolved by Base.
+type ScopedResolver struct {
+	Base  func(context.Context, tenant.SecretRef) (string, error)
+	mu    sync.Mutex
+	owner map[string]string
+}
+
+func NewScopedResolver(base func(context.Context, tenant.SecretRef) (string, error)) *ScopedResolver {
+	return &ScopedResolver{Base: base, owner: make(map[string]string)}
+}
+
+func (resolver *ScopedResolver) Resolve(ctx context.Context, tenantID, appID string, ref tenant.SecretRef) (string, error) {
+	if resolver == nil || resolver.Base == nil || strings.TrimSpace(tenantID) == "" || strings.TrimSpace(appID) == "" || ref.IsZero() {
+		return "", errors.New("secret: scoped resolution is unavailable")
+	}
+	key := string(ref.Provider) + "\x00" + ref.Key
+	resolver.mu.Lock()
+	if resolver.owner == nil {
+		resolver.owner = make(map[string]string)
+	}
+	if owner, ok := resolver.owner[key]; ok && owner != tenantID {
+		resolver.mu.Unlock()
+		return "", errors.New("secret: reference is not authorized for this tenant")
+	}
+	resolver.owner[key] = tenantID
+	resolver.mu.Unlock()
+	return resolver.Base(ctx, ref)
+}
+
 func NewResolver() *Resolver {
 	return &Resolver{providers: make(map[tenant.SecretProvider]Provider)}
 }

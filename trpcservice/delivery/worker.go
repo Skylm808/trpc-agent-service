@@ -154,8 +154,12 @@ func (worker *Worker) deliver(parent context.Context, claim Claim) {
 	if err == nil {
 		if aware, ok := sender.(channels.RateLimitAware); ok {
 			aware.SetDeliveryLimiter(worker.limiter)
+		} else {
+			// Provider-aware senders charge once per physical API call (for
+			// example, each text chunk). Generic senders are charged once for
+			// the logical delivery here.
+			err = worker.limiter.Wait(sendCtx, message)
 		}
-		err = worker.limiter.Wait(sendCtx, message)
 	}
 	if err != nil {
 		_ = stopRenew()

@@ -47,6 +47,11 @@ Worker。两个列表都为空时兼容现有绑定并允许全部；`allowed_us
 创建前完成，Inbox 标记为 `rejected`，审计只保存脱敏身份和 `decision=deny`，错误不回显名单或
 外部用户 ID。相同用户或群 ID 在不同租户独立判断，不能复用另一租户的 ACL。
 
+生产 MCP/HTTPS Tool 的凭据通过租户作用域 Resolver 解析。Resolver 记录 `provider + key`
+的首次租户归属；其他租户复用同一 SecretRef 会被拒绝，避免把一个租户的环境变量、挂载文件
+或外部 SecretRef 通过自定义 Tool 带出。Secret 值仍只在 Bundle 构建和请求头注入时短暂存在，
+错误、日志和 trace 不包含 key 或 value。
+
 ## 监控指标
 
 | 指标 | 建议维度 | 用途 |

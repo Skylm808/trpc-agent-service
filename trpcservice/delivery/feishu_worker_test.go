@@ -130,7 +130,7 @@ func TestFeishuSenderFlowsThroughOutboxWorker(t *testing.T) {
 		message := feishuWorkerMessage()
 		message.Text = "你好世界你好世界" // 24 bytes -> 4 rune-aligned chunks.
 		worker.deliver(context.Background(), Claim{Message: message, Owner: "worker", ClaimToken: "token", Attempt: 1, Status: StatusClaimed, LeaseUntil: time.Now().Add(time.Hour)})
-		if !store.markedSent || stub.calls() != 4 || limiterCalls != 5 {
+		if !store.markedSent || stub.calls() != 4 || limiterCalls != 4 {
 			t.Fatalf("sent=%v sends=%d limits=%d", store.markedSent, stub.calls(), limiterCalls)
 		}
 	})
