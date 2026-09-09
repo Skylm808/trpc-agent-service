@@ -328,6 +328,7 @@ func (processor *Processor) Process(ctx context.Context, request gateway.RunRequ
 	}
 	processor.publish(request, gateway.RunEvent{Type: "run.started", RequestID: request.InboxID, SessionID: request.SessionID, TraceID: request.TraceID})
 	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
 	runCtx = policy.WithRequest(runCtx, processor.Policy, policyRequest)
 	runCtx = servicelog.WithRedactor(runCtx, tenantRedactor)
 	runCtx = servicemetrics.WithTelemetry(runCtx, processor.Telemetry, processor.spanFields(request))
