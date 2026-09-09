@@ -88,7 +88,9 @@ for file in \
   000011_tool_executions.up.sql \
   000011_tool_executions.down.sql \
   000012_secret_ownership.up.sql \
-  000012_secret_ownership.down.sql; do
+  000012_secret_ownership.down.sql \
+  000013_tool_execution_ciphertext.up.sql \
+  000013_tool_execution_ciphertext.down.sql; do
   docker cp "$ROOT/migrations/$file" "$CONTAINER:/tmp/$file" >/dev/null
 done
 
@@ -96,7 +98,7 @@ psql_file() {
   docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d "$DATABASE" -f "/tmp/$1"
 }
 
-up() {
+up_through_000012() {
   psql_file 000001_control_plane.up.sql
   psql_file 000002_message_runtime.up.sql
   psql_file 000003_persistent_runtime.up.sql
@@ -111,7 +113,13 @@ up() {
   psql_file 000012_secret_ownership.up.sql
 }
 
+up() {
+  up_through_000012
+  psql_file 000013_tool_execution_ciphertext.up.sql
+}
+
 down() {
+  psql_file 000013_tool_execution_ciphertext.down.sql
   psql_file 000012_secret_ownership.down.sql
   psql_file 000011_tool_executions.down.sql
   psql_file 000010_execution_recovery.down.sql
@@ -126,7 +134,13 @@ down() {
   psql_file 000001_control_plane.down.sql
 }
 
-up
+up_through_000012
+legacy_ciphertext_columns="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='tool_executions' AND column_name='result_ciphertext'")"
+if [[ "$legacy_ciphertext_columns" != "0" ]]; then
+  echo "historical 000011 unexpectedly contains result_ciphertext" >&2
+  exit 1
+fi
+psql_file 000013_tool_execution_ciphertext.up.sql
 up
 
 expected_tables=$'agent_apps\naudit_logs\nchannel_bindings\nconfig_versions\nderived_jobs\nidentity_mappings\ninbox_messages\nmemory_entries\nmessage_events\nmigration_jobs\noutbox_messages\npolicy_budget_reservations\npolicy_budget_usage\nrun_statuses\nruntime_app_states\nruntime_artifact_catalog\nruntime_artifacts\nruntime_knowledge_documents\nruntime_memories\nruntime_session_events\nruntime_session_states\nruntime_session_summaries\nruntime_session_track_events\nruntime_user_states\nsecret_ownership\nsession_heads\nsession_summaries\nstorage_migration_items\ntenants\ntool_approvals\ntool_executions\nworker_nodes'

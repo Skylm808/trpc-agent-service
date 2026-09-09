@@ -26,6 +26,102 @@ type fakeCallable struct {
 	err    error
 }
 
+type ledgerFixture struct {
+	mu       sync.Mutex
+	status   ExecutionStatus
+	result   any
+	begin    int
+	complete int
+}
+
+func (fixture *ledgerFixture) Begin(_ context.Context, _ ExecutionRecord) (ExecutionDecision, error) {
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	fixture.begin++
+	if fixture.status == "" {
+		fixture.status = ExecutionRunning
+		return ExecutionDecision{Created: true, Status: ExecutionRunning}, nil
+	}
+	if fixture.status == ExecutionCompleted {
+		return ExecutionDecision{Status: ExecutionCompleted, Result: fixture.result}, nil
+	}
+	return ExecutionDecision{Status: fixture.status}, nil
+}
+
+func (fixture *ledgerFixture) Complete(_ context.Context, _, _, _ string, result any) error {
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	fixture.complete++
+	fixture.status = ExecutionCompleted
+	fixture.result = result
+	return nil
+}
+
+func (fixture *ledgerFixture) Fail(_ context.Context, _, _, _, _ string, status ExecutionStatus) error {
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	fixture.status = status
+	return nil
+}
+
+func ledgerToolContext() context.Context {
+	ctx := catalogPolicyContext("ledger_tool")
+	return context.WithValue(ctx, trpctool.ContextKeyToolCallID{}, "call-1")
+}
+
+func TestExecutionLedgerFirstCallCompletesAndReplays(t *testing.T) {
+	fixture := &ledgerFixture{}
+	var calls atomic.Int32
+	wrapped := &executionLedgerTool{
+		name: "ledger_tool", store: fixture,
+		delegate: fakeCallable{name: "ledger_tool", result: "fresh"},
+	}
+	wrapped.delegate = callableFunc{declaration: (&fakeCallable{name: "ledger_tool"}).Declaration(), call: func(context.Context, []byte) (any, error) {
+		calls.Add(1)
+		return "fresh", nil
+	}}
+
+	value, err := wrapped.Call(ledgerToolContext(), []byte(`{"value":1}`))
+	if err != nil || value != "fresh" {
+		t.Fatalf("first call = %#v, %v", value, err)
+	}
+	value, err = wrapped.Call(ledgerToolContext(), []byte(`{"value":1}`))
+	if err != nil || value != "fresh" {
+		t.Fatalf("replay = %#v, %v", value, err)
+	}
+	if calls.Load() != 1 || fixture.begin != 2 || fixture.complete != 1 {
+		t.Fatalf("ledger counts calls=%d begin=%d complete=%d", calls.Load(), fixture.begin, fixture.complete)
+	}
+}
+
+func TestExecutionLedgerRejectsExistingRunningDuplicate(t *testing.T) {
+	fixture := &ledgerFixture{status: ExecutionRunning}
+	var calls atomic.Int32
+	wrapped := &executionLedgerTool{
+		name: "ledger_tool", store: fixture,
+		delegate: callableFunc{declaration: (&fakeCallable{name: "ledger_tool"}).Declaration(), call: func(context.Context, []byte) (any, error) {
+			calls.Add(1)
+			return "unexpected", nil
+		}},
+	}
+	if _, err := wrapped.Call(ledgerToolContext(), []byte(`{}`)); err == nil || !strings.Contains(err.Error(), "reconciliation") {
+		t.Fatalf("duplicate error = %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("duplicate executed delegate %d times", calls.Load())
+	}
+}
+
+type callableFunc struct {
+	declaration *trpctool.Declaration
+	call        func(context.Context, []byte) (any, error)
+}
+
+func (tool callableFunc) Declaration() *trpctool.Declaration { return tool.declaration }
+func (tool callableFunc) Call(ctx context.Context, args []byte) (any, error) {
+	return tool.call(ctx, args)
+}
+
 func (tool fakeCallable) Declaration() *trpctool.Declaration {
 	return &trpctool.Declaration{Name: tool.name, Description: "fixture", InputSchema: &trpctool.Schema{Type: "object"}}
 }

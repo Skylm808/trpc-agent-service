@@ -208,7 +208,7 @@ func (tool *executionLedgerTool) Call(ctx context.Context, args []byte) (any, er
 	if decision.Status == ExecutionCompleted {
 		return decision.Result, nil
 	}
-	if decision.Status == ExecutionRunning || decision.Status == ExecutionOutcomeUnknown {
+	if !decision.Created && (decision.Status == ExecutionRunning || decision.Status == ExecutionOutcomeUnknown) {
 		return nil, errors.New("tool: execution outcome requires reconciliation")
 	}
 	callable, ok := tool.delegate.(trpctool.CallableTool)

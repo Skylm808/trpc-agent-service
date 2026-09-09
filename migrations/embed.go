@@ -75,12 +75,18 @@ var secretOwnershipUp string
 //go:embed 000012_secret_ownership.down.sql
 var secretOwnershipDown string
 
+//go:embed 000013_tool_execution_ciphertext.up.sql
+var toolExecutionCiphertextUp string
+
+//go:embed 000013_tool_execution_ciphertext.down.sql
+var toolExecutionCiphertextDown string
+
 // Up returns SQL that creates or verifies the schema.
 func Up() string {
-	return up + "\n" + messageRuntimeUp + "\n" + persistentRuntimeUp + "\n" + inboxRecoveryUp + "\n" + outboxDeliveryUp + "\n" + clusterControlUp + "\n" + storageMigrationsUp + "\n" + pr23MigrationCatalogUp + "\n" + auditVersionsUp + "\n" + executionRecoveryUp + "\n" + toolExecutionsUp + "\n" + secretOwnershipUp
+	return up + "\n" + messageRuntimeUp + "\n" + persistentRuntimeUp + "\n" + inboxRecoveryUp + "\n" + outboxDeliveryUp + "\n" + clusterControlUp + "\n" + storageMigrationsUp + "\n" + pr23MigrationCatalogUp + "\n" + auditVersionsUp + "\n" + executionRecoveryUp + "\n" + toolExecutionsUp + "\n" + secretOwnershipUp + "\n" + toolExecutionCiphertextUp
 }
 
 // Down returns destructive SQL intended only for tests and disaster recovery.
 func Down() string {
-	return secretOwnershipDown + "\n" + toolExecutionsDown + "\n" + executionRecoveryDown + "\n" + auditVersionsDown + "\n" + pr23MigrationCatalogDown + "\n" + storageMigrationsDown + "\n" + clusterControlDown + "\n" + outboxDeliveryDown + "\n" + inboxRecoveryDown + "\n" + persistentRuntimeDown + "\n" + messageRuntimeDown + "\n" + down
+	return toolExecutionCiphertextDown + "\n" + secretOwnershipDown + "\n" + toolExecutionsDown + "\n" + executionRecoveryDown + "\n" + auditVersionsDown + "\n" + pr23MigrationCatalogDown + "\n" + storageMigrationsDown + "\n" + clusterControlDown + "\n" + outboxDeliveryDown + "\n" + inboxRecoveryDown + "\n" + persistentRuntimeDown + "\n" + messageRuntimeDown + "\n" + down
 }
