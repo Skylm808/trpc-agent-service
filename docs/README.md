@@ -5,6 +5,7 @@
 - [双 IM 可复现契约验收](../scripts/dual_im_contract_acceptance.sh)：无真实凭据的加密回调到平台回复闭环。
 - [生产风险清单](risks.md)：18 项生产风险、缓解措施和演练方法。
 - [数据模型](data-model.md)：PostgreSQL 表、配置版本和迁移约束。
+- [数据库 Schema 迁移](database-migrations.md)：逐个 SQL 的职责、执行模型、升级规则和验证证据。
 - [多节点消息运行时](message-runtime.md)：Inbox、fencing、提交顺序和 Outbox。
 - [消息故障恢复](message-recovery.md)：DLQ 查询/重放、uncertain 人工裁决、并发保护和审计。
 - [租户 Runner 并发配额](tenant-concurrency.md)：Redis 跨节点准入、动态配额、续租与崩溃恢复。

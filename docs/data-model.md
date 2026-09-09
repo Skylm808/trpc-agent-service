@@ -23,7 +23,7 @@ worker_node
 
 ## 最小逻辑表
 
-下表省略了通用时间戳和部分错误字段。实际 DDL 以 [`000001_control_plane.up.sql`](../migrations/000001_control_plane.up.sql)及后续增量迁移为准。
+下表省略了通用时间戳和部分错误字段。实际 DDL 以 [`000001_control_plane.up.sql`](../migrations/000001_control_plane.up.sql)及后续增量迁移为准；每个迁移文件的职责、执行顺序和升级规则见[数据库 Schema 迁移说明](database-migrations.md)。
 
 | 表 | 最小字段 | 主键、唯一键与用途 |
 | --- | --- | --- |
@@ -62,7 +62,7 @@ Inbox 和 Outbox 分别处理入站与出站幂等。Inbox 唯一键是 `(tenant
 
 ## tRPC-Agent-Go 运行时表
 
-`000003_persistent_runtime` 固定 tRPC-Agent-Go PostgreSQL Session/Memory Adapter 的表契约，并增加 `runtime_artifacts` 与 `runtime_knowledge_documents`。`000007_storage_migrations` 扩充迁移状态并创建目标端 ledger，`000008_pr23_migration_catalog` 增加不含正文的 S3 Artifact 版本目录，`000010_execution_recovery` 增加 durable Runner checkpoint。平台表负责 Inbox、fencing、审计和可恢复执行；`runtime_session_*`、`runtime_memories` 保存 Runner 使用的具体状态。两组表职责不同，但都使用 canonical `app_name` 或显式 tenant/app 字段保持租户作用域。
+`000003_persistent_runtime` 固定 tRPC-Agent-Go PostgreSQL Session/Memory Adapter 的表契约，并增加 `runtime_artifacts` 与 `runtime_knowledge_documents`。`000007_storage_migrations` 扩充迁移状态并创建目标端 ledger，`000008_external_storage_catalog` 增加不含正文的 S3 Artifact 版本目录，`000010_execution_recovery` 增加 durable Runner checkpoint。平台表负责 Inbox、fencing、审计和可恢复执行；`runtime_session_*`、`runtime_memories` 保存 Runner 使用的具体状态。两组表职责不同，但都使用 canonical `app_name` 或显式 tenant/app 字段保持租户作用域。
 
 Artifact revision 的主键是 `(tenant_id, app_id, user_id, session_id, filename, revision)`；S3 使用相同逻辑 key/revision，并由共享 PostgreSQL advisory lock 协调分配。Knowledge 通过 PGVector/Qdrant 保存 chunk、embedding 与 metadata，Runtime 只在显式允许 `knowledge_search` 时暴露检索工具；`runtime_knowledge_documents` 保存 Admin ingest 的原始文档与版本，是跨向量后端重建的租户级事实源。
 

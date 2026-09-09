@@ -79,18 +79,16 @@ for file in \
   000006_cluster_control.down.sql \
   000007_storage_migrations.up.sql \
   000007_storage_migrations.down.sql \
-  000008_pr23_migration_catalog.up.sql \
-  000008_pr23_migration_catalog.down.sql \
+  000008_external_storage_catalog.up.sql \
+  000008_external_storage_catalog.down.sql \
   000009_audit_versions.up.sql \
   000009_audit_versions.down.sql \
   000010_execution_recovery.up.sql \
   000010_execution_recovery.down.sql \
   000011_tool_executions.up.sql \
   000011_tool_executions.down.sql \
-  000012_secret_ownership.up.sql \
-  000012_secret_ownership.down.sql \
-  000013_tool_execution_ciphertext.up.sql \
-  000013_tool_execution_ciphertext.down.sql; do
+  000012_tool_execution_ciphertext.up.sql \
+  000012_tool_execution_ciphertext.down.sql; do
   docker cp "$ROOT/migrations/$file" "$CONTAINER:/tmp/$file" >/dev/null
 done
 
@@ -98,7 +96,7 @@ psql_file() {
   docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d "$DATABASE" -f "/tmp/$1"
 }
 
-up_through_000012() {
+up_through_000011() {
   psql_file 000001_control_plane.up.sql
   psql_file 000002_message_runtime.up.sql
   psql_file 000003_persistent_runtime.up.sql
@@ -106,25 +104,23 @@ up_through_000012() {
   psql_file 000005_outbox_delivery.up.sql
   psql_file 000006_cluster_control.up.sql
   psql_file 000007_storage_migrations.up.sql
-  psql_file 000008_pr23_migration_catalog.up.sql
+  psql_file 000008_external_storage_catalog.up.sql
   psql_file 000009_audit_versions.up.sql
   psql_file 000010_execution_recovery.up.sql
   psql_file 000011_tool_executions.up.sql
-  psql_file 000012_secret_ownership.up.sql
 }
 
 up() {
-  up_through_000012
-  psql_file 000013_tool_execution_ciphertext.up.sql
+  up_through_000011
+  psql_file 000012_tool_execution_ciphertext.up.sql
 }
 
 down() {
-  psql_file 000013_tool_execution_ciphertext.down.sql
-  psql_file 000012_secret_ownership.down.sql
+  psql_file 000012_tool_execution_ciphertext.down.sql
   psql_file 000011_tool_executions.down.sql
   psql_file 000010_execution_recovery.down.sql
   psql_file 000009_audit_versions.down.sql
-  psql_file 000008_pr23_migration_catalog.down.sql
+  psql_file 000008_external_storage_catalog.down.sql
   psql_file 000007_storage_migrations.down.sql
   psql_file 000006_cluster_control.down.sql
   psql_file 000005_outbox_delivery.down.sql
@@ -134,16 +130,16 @@ down() {
   psql_file 000001_control_plane.down.sql
 }
 
-up_through_000012
+up_through_000011
 legacy_ciphertext_columns="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='tool_executions' AND column_name='result_ciphertext'")"
 if [[ "$legacy_ciphertext_columns" != "0" ]]; then
   echo "historical 000011 unexpectedly contains result_ciphertext" >&2
   exit 1
 fi
-psql_file 000013_tool_execution_ciphertext.up.sql
+psql_file 000012_tool_execution_ciphertext.up.sql
 up
 
-expected_tables=$'agent_apps\naudit_logs\nchannel_bindings\nconfig_versions\nderived_jobs\nidentity_mappings\ninbox_messages\nmemory_entries\nmessage_events\nmigration_jobs\noutbox_messages\npolicy_budget_reservations\npolicy_budget_usage\nrun_statuses\nruntime_app_states\nruntime_artifact_catalog\nruntime_artifacts\nruntime_knowledge_documents\nruntime_memories\nruntime_session_events\nruntime_session_states\nruntime_session_summaries\nruntime_session_track_events\nruntime_user_states\nsecret_ownership\nsession_heads\nsession_summaries\nstorage_migration_items\ntenants\ntool_approvals\ntool_executions\nworker_nodes'
+expected_tables=$'agent_apps\naudit_logs\nchannel_bindings\nconfig_versions\nderived_jobs\nidentity_mappings\ninbox_messages\nmemory_entries\nmessage_events\nmigration_jobs\noutbox_messages\npolicy_budget_reservations\npolicy_budget_usage\nrun_statuses\nruntime_app_states\nruntime_artifact_catalog\nruntime_artifacts\nruntime_knowledge_documents\nruntime_memories\nruntime_session_events\nruntime_session_states\nruntime_session_summaries\nruntime_session_track_events\nruntime_user_states\nsession_heads\nsession_summaries\nstorage_migration_items\ntenants\ntool_approvals\ntool_executions\nworker_nodes'
 actual_tables="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name")"
 if [[ "$actual_tables" != "$expected_tables" ]]; then
   echo "unexpected PostgreSQL tables:" >&2
@@ -151,8 +147,8 @@ if [[ "$actual_tables" != "$expected_tables" ]]; then
   exit 1
 fi
 
-expected_indexes=$'idx_audit_config_version\nidx_derived_jobs_ready\nidx_inbox_execution_stage\nidx_inbox_recovery_ready\nidx_migration_jobs_claim\nidx_migration_jobs_config_domain\nidx_outbox_delivery_ready\nidx_run_statuses_binding_updated\nidx_runtime_artifact_catalog_scope\nidx_secret_ownership_scope\nidx_tool_executions_status\nidx_worker_nodes_live\nuq_inbox_session_seq\nuq_inbox_tenant_id\nuq_message_events_tenant_inbox'
-actual_indexes="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname IN ('uq_message_events_tenant_inbox','uq_inbox_tenant_id','uq_inbox_session_seq','idx_derived_jobs_ready','idx_inbox_recovery_ready','idx_inbox_execution_stage','idx_outbox_delivery_ready','idx_run_statuses_binding_updated','idx_worker_nodes_live','idx_migration_jobs_claim','idx_migration_jobs_config_domain','idx_runtime_artifact_catalog_scope','idx_secret_ownership_scope','idx_tool_executions_status','idx_audit_config_version') ORDER BY indexname")"
+expected_indexes=$'idx_audit_config_version\nidx_derived_jobs_ready\nidx_inbox_execution_stage\nidx_inbox_recovery_ready\nidx_migration_jobs_claim\nidx_migration_jobs_config_domain\nidx_outbox_delivery_ready\nidx_run_statuses_binding_updated\nidx_runtime_artifact_catalog_scope\nidx_tool_executions_status\nidx_worker_nodes_live\nuq_inbox_session_seq\nuq_inbox_tenant_id\nuq_message_events_tenant_inbox'
+actual_indexes="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname IN ('uq_message_events_tenant_inbox','uq_inbox_tenant_id','uq_inbox_session_seq','idx_derived_jobs_ready','idx_inbox_recovery_ready','idx_inbox_execution_stage','idx_outbox_delivery_ready','idx_run_statuses_binding_updated','idx_worker_nodes_live','idx_migration_jobs_claim','idx_migration_jobs_config_domain','idx_runtime_artifact_catalog_scope','idx_tool_executions_status','idx_audit_config_version') ORDER BY indexname")"
 if [[ "$actual_indexes" != "$expected_indexes" ]]; then
   echo "missing PostgreSQL migration indexes:" >&2
   echo "$actual_indexes" >&2

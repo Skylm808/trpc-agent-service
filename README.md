@@ -164,7 +164,7 @@ Admin API 是平台控制面，用于租户配置的预览、发布、回滚，�
 | 交付物 | 位置 | 内容 |
 | --- | --- | --- |
 | 架构设计、系统架构图、核心时序图 | [架构设计](docs/architecture.md) | 组件职责、跨节点路由、租户隔离、完整消息链路与框架复用边界 |
-| 数据模型 | [数据模型](docs/data-model.md)、[`migrations/`](migrations/) | Tenant、Agent App、Session、Event、Memory、Summary、Channel Binding、Audit 等核心模型 |
+| 数据模型与 Schema 迁移 | [数据模型](docs/data-model.md)、[迁移说明](docs/database-migrations.md)、[`migrations/`](migrations/) | 核心模型、每个 SQL 的职责、前向升级及回滚边界 |
 | 数据同步与幂等策略 | [消息运行时](docs/message-runtime.md)、[恢复控制面](docs/message-recovery.md) | 顺序提交、lease/fencing、Inbox/Outbox、重复投递和崩溃恢复 |
 | 多后端适配与迁移 | [多后端与迁移](docs/storage-migrations.md)、[Knowledge/Artifact](docs/knowledge.md) | Redis/PostgreSQL、PGVector/Qdrant、S3-compatible、外部 Memory 的路由与迁移 |
 | IM 接入设计 | [企业微信](docs/wecom.md)、[飞书](docs/feishu.md)、[媒体与卡片](docs/media.md) | 验签、身份/会话映射、异步回复、重试、限流及媒体边界 |

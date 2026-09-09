@@ -45,11 +45,11 @@ var storageMigrationsUp string
 //go:embed 000007_storage_migrations.down.sql
 var storageMigrationsDown string
 
-//go:embed 000008_pr23_migration_catalog.up.sql
-var pr23MigrationCatalogUp string
+//go:embed 000008_external_storage_catalog.up.sql
+var externalStorageCatalogUp string
 
-//go:embed 000008_pr23_migration_catalog.down.sql
-var pr23MigrationCatalogDown string
+//go:embed 000008_external_storage_catalog.down.sql
+var externalStorageCatalogDown string
 
 //go:embed 000009_audit_versions.up.sql
 var auditVersionsUp string
@@ -69,24 +69,18 @@ var toolExecutionsUp string
 //go:embed 000011_tool_executions.down.sql
 var toolExecutionsDown string
 
-//go:embed 000012_secret_ownership.up.sql
-var secretOwnershipUp string
-
-//go:embed 000012_secret_ownership.down.sql
-var secretOwnershipDown string
-
-//go:embed 000013_tool_execution_ciphertext.up.sql
+//go:embed 000012_tool_execution_ciphertext.up.sql
 var toolExecutionCiphertextUp string
 
-//go:embed 000013_tool_execution_ciphertext.down.sql
+//go:embed 000012_tool_execution_ciphertext.down.sql
 var toolExecutionCiphertextDown string
 
 // Up returns SQL that creates or verifies the schema.
 func Up() string {
-	return up + "\n" + messageRuntimeUp + "\n" + persistentRuntimeUp + "\n" + inboxRecoveryUp + "\n" + outboxDeliveryUp + "\n" + clusterControlUp + "\n" + storageMigrationsUp + "\n" + pr23MigrationCatalogUp + "\n" + auditVersionsUp + "\n" + executionRecoveryUp + "\n" + toolExecutionsUp + "\n" + secretOwnershipUp + "\n" + toolExecutionCiphertextUp
+	return up + "\n" + messageRuntimeUp + "\n" + persistentRuntimeUp + "\n" + inboxRecoveryUp + "\n" + outboxDeliveryUp + "\n" + clusterControlUp + "\n" + storageMigrationsUp + "\n" + externalStorageCatalogUp + "\n" + auditVersionsUp + "\n" + executionRecoveryUp + "\n" + toolExecutionsUp + "\n" + toolExecutionCiphertextUp
 }
 
 // Down returns destructive SQL intended only for tests and disaster recovery.
 func Down() string {
-	return toolExecutionCiphertextDown + "\n" + secretOwnershipDown + "\n" + toolExecutionsDown + "\n" + executionRecoveryDown + "\n" + auditVersionsDown + "\n" + pr23MigrationCatalogDown + "\n" + storageMigrationsDown + "\n" + clusterControlDown + "\n" + outboxDeliveryDown + "\n" + inboxRecoveryDown + "\n" + persistentRuntimeDown + "\n" + messageRuntimeDown + "\n" + down
+	return toolExecutionCiphertextDown + "\n" + toolExecutionsDown + "\n" + executionRecoveryDown + "\n" + auditVersionsDown + "\n" + externalStorageCatalogDown + "\n" + storageMigrationsDown + "\n" + clusterControlDown + "\n" + outboxDeliveryDown + "\n" + inboxRecoveryDown + "\n" + persistentRuntimeDown + "\n" + messageRuntimeDown + "\n" + down
 }
