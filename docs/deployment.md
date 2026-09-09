@@ -37,7 +37,9 @@ curl -H 'Authorization: Bearer local-secret' \
 
 Admin API 与 Gateway 共用 HTTP 端口，所有 `/v1/tenants/{tenant_id}/configs*` 请求必须携带
 `TRPC_AGENT_ADMIN_TOKENS` 中配置的 Bearer 凭据，且凭据的租户 scope 必须覆盖 URL 中的租户
-（格式：`名称=令牌:租户-a,租户-b;ops=令牌2:*`；未配置时拒绝一切请求）。支持
+（格式：`名称=令牌:租户-a,租户-b|viewer;ops=令牌2:*|operator`；角色可选，默认 `admin`；
+未配置时拒绝一切请求）。`viewer` 只能读取，`operator` 可读取并操作 recovery/migration，`admin`
+拥有全部控制面操作。支持
 `validate`、`publish`（`expected_version` 乐观锁）、`list`、`current` 和 `rollback`
 （`expected_version` + `target_version`）。发布和回滚都创建新的不可变版本并写审计日志；
 响应只含版本元数据，不包含配置原文或 SecretRef 解析值。
@@ -61,7 +63,7 @@ Admin API 与 Gateway 共用 HTTP 端口，所有 `/v1/tenants/{tenant_id}/confi
 - `TRPC_AGENT_SHUTDOWN_TIMEOUT`：收到 SIGTERM 后排空组件的总上限，默认 10 秒、合法范围 1 秒到 10 分钟；Kubernetes 基线设置 100 秒并保留 preStop/退出余量；
 - `DEEPSEEK_API_KEY`：DeepSeek API Key，由模型配置中的 SecretRef 引用；
 - `TRPC_AGENT_GATEWAY_TOKEN_<BINDING_ID>`：HTTP Channel token；
-- `TRPC_AGENT_ADMIN_TOKENS`：Admin API 管理员凭据（`名称=令牌:租户列表`，`;` 分隔，`*` 表示全部租户）；未配置时 Admin API 拒绝一切请求；
+- `TRPC_AGENT_ADMIN_TOKENS`：Admin API 凭据（`名称=令牌:租户列表|角色`，`;` 分隔，`*` 表示全部租户；角色可选，支持 `admin`、`operator`、`viewer`）；未配置时 Admin API 拒绝一切请求；
 - `OTEL_EXPORTER_OTLP_ENDPOINT`：OTLP/gRPC Collector 地址；Compose 固定为内部 `otel-collector:4317`；
 - `TRPC_AGENT_TRACE_SAMPLE_RATIO`：0 到 1 的 parent-based trace 采样率，Compose 默认 0.1；
 - `TRPC_AGENT_VAULT_ENDPOINT` / `TRPC_AGENT_VAULT_TOKEN`：可选 Vault KV v2-compatible HTTPS endpoint 与 bootstrap token；配置使用 `provider: vault` 时必须提供；

@@ -18,7 +18,16 @@ type Credential struct {
 	Name    string
 	Token   string
 	Tenants map[string]bool
+	Role    Role
 }
+
+type Role string
+
+const (
+	RoleAdmin    Role = "admin"
+	RoleOperator Role = "operator"
+	RoleViewer   Role = "viewer"
+)
 
 // Allows reports whether the credential may operate on tenantID.
 func (credential Credential) Allows(tenantID string) bool {
@@ -44,9 +53,17 @@ func ParseCredentials(value string) ([]Credential, error) {
 		}
 		name = strings.TrimSpace(name)
 		token, tenants, _ := strings.Cut(rest, ":")
-		credential := Credential{Name: name, Token: strings.TrimSpace(token), Tenants: make(map[string]bool)}
+		role := RoleAdmin
+		if scoped, declared, ok := strings.Cut(tenants, "|"); ok {
+			tenants = scoped
+			role = Role(strings.TrimSpace(declared))
+		}
+		credential := Credential{Name: name, Token: strings.TrimSpace(token), Tenants: make(map[string]bool), Role: role}
 		if credential.Name == "" || credential.Token == "" {
 			return nil, fmt.Errorf("admin: credential entry %q requires a name and token", entry)
+		}
+		if credential.Role != RoleAdmin && credential.Role != RoleOperator && credential.Role != RoleViewer {
+			return nil, fmt.Errorf("admin: credential entry %q has unsupported role", entry)
 		}
 		for _, tenantID := range strings.Split(tenants, ",") {
 			tenantID = strings.TrimSpace(tenantID)
@@ -57,6 +74,26 @@ func ParseCredentials(value string) ([]Credential, error) {
 		credentials = append(credentials, credential)
 	}
 	return credentials, nil
+}
+
+func (credential Credential) AllowsRequest(request *http.Request) bool {
+	role := credential.Role
+	if role == "" {
+		role = RoleAdmin
+	}
+	switch role {
+	case RoleAdmin:
+		return true
+	case RoleViewer:
+		return request != nil && (request.Method == http.MethodGet || request.Method == http.MethodHead)
+	case RoleOperator:
+		if request == nil || request.Method == http.MethodGet || request.Method == http.MethodHead {
+			return true
+		}
+		return strings.Contains(strings.Trim(request.URL.Path, "/"), "/operations/")
+	default:
+		return false
+	}
 }
 
 type contextKey string
@@ -136,6 +173,10 @@ func (auth *Authenticator) Wrap(next http.Handler) http.Handler {
 		}
 		if !matched.Allows(tenantID) {
 			writeError(writer, http.StatusForbidden, errors.New("admin credential is not authorized for this tenant"))
+			return
+		}
+		if !matched.AllowsRequest(request) {
+			writeError(writer, http.StatusForbidden, errors.New("admin credential role does not allow this operation"))
 			return
 		}
 		traceID := strings.TrimSpace(request.Header.Get("X-Trace-ID"))

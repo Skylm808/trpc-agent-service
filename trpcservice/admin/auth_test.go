@@ -146,6 +146,20 @@ func TestAdminAPIRequiresAuthentication(t *testing.T) {
 	}
 }
 
+func TestAdminRolesRestrictWrites(t *testing.T) {
+	viewer, err := ParseCredentials("read=token:tenant-a|viewer")
+	if err != nil || len(viewer) != 1 || viewer[0].Role != RoleViewer {
+		t.Fatalf("viewer credentials=%+v err=%v", viewer, err)
+	}
+	handler := newSecuredHandler(t, repository.NewMemoryStore(), nil, "read=token:tenant-a|viewer")
+	if response := call(handler, http.MethodGet, "/v1/tenants/tenant-a/configs", "token", nil); response.Code != http.StatusOK {
+		t.Fatalf("viewer read=%d", response.Code)
+	}
+	if response := call(handler, http.MethodPost, "/v1/tenants/tenant-a/configs/rollback?expected_version=1&target_version=1", "token", nil); response.Code != http.StatusForbidden {
+		t.Fatalf("viewer write=%d", response.Code)
+	}
+}
+
 func TestAdminAPITenantScopeEnforcement(t *testing.T) {
 	handler := newSecuredHandler(t, repository.NewMemoryStore(), nil, "alice=token-a:tenant-a;root=root-token:*")
 	// alice may publish to tenant-a.
