@@ -197,7 +197,7 @@ command bus 只做低延迟通知。预算和工具审批同样使用 PostgreSQL
 | 回调处理 | 快速完成验签、Inbox claim 并返回 `200 success` | URL 验证与挑战应答后快速返回 2xx，执行与回复仍走异步 Worker/Outbox |
 | 主动回复 | 获取 `access_token` 后调用 `message/send` 或 `appchat/send` | 使用 tenant_access_token 调用 `im/v1/messages`，支持文本与交互式卡片 |
 | 平台限制 | 文本按 UTF-8 字节分片，处理成员频率限制和 token 刷新 | 处理消息长度、频控与 token 缓存刷新，群聊需要 @机器人才触发事件 |
-| 当前状态 | Adapter、Sender、自动化协议测试和人工真实 E2E 均已通过 | Adapter、Sender、自动化协议测试和人工真实 E2E 均已通过 |
+| 当前状态 | Adapter、Sender 和协议自动化测试已实现；真实账号 E2E 待部署方复验 | Adapter、Sender 和协议自动化测试已实现；真实账号 E2E 待部署方复验 |
 
 企业微信和飞书的图片/文件在认证后通过固定平台 API 受控下载，媒体标识不会进入 Inbox、日志或审计；类型、大小、超时、临时文件与模型能力边界见 [IM 媒体与飞书卡片](media.md)。未识别语音仍转为安全占位，撤回等事件只确认接收，不触发 Runner；未来若同步撤回状态，应追加 tombstone event，已发生的 Tool 副作用不能自动撤销。
 
@@ -314,4 +314,4 @@ Worker 在 Runner 之前执行身份和预算预检，在 Tool 展示与执行�
 | 可观测性 | 执行一次含 Tool 的完整消息 | callback、Runner、Tool、存储和投递共享同一 trace |
 | 可部署性 | Compose 启动后执行 HTTP smoke、迁移回放和测试 | PostgreSQL/Redis 链路可运行，migration 可重复执行 |
 
-当前代码已覆盖表中全部基础验收目标。企业微信与飞书的真实平台 E2E 已人工通过；多租户、跨节点、迁移、治理和可观测性由自动化及 Compose 验收覆盖；Kubernetes 提供专用 kind 集群的最小闭环。生产部署仍需按实际流量完成容量标定、托管依赖高可用配置、告警通知渠道和外部密钥系统接入。
+当前代码已覆盖表中基础实现目标，企业微信与飞书协议自动化已纳入 CI。真实平台 E2E、目标环境容量标定和专用 kind 集群验收仍需部署方执行并留存脱敏证据；生产部署还需完成托管依赖高可用配置、告警通知渠道和外部密钥系统接入。

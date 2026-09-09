@@ -4,9 +4,9 @@
 > 由部署方完成人工验收；CI 中的
 > `scripts/dual_im_contract_acceptance.sh` 使用纯合成凭据重放两种加密回调，并贯穿
 > Inbox、Worker、离线 Runner、Session/Memory/Summary、Outbox 和模拟平台 API。
-> 前者证明真实平台可用，后者让评审者无需真实账号或消息正文即可复现协议与平台链路。
+> 真实平台验收用于证明外部平台可达，协议自动化让评审者无需真实账号或消息正文即可复现协议与平台链路。
 
-本文把题目要求映射到当前代码、设计文档和可复现证据。状态中的“已实现”表示存在可运行代码和自动化测试；“Demo 通过”表示最小部署闭环，不等同于真实生产容量认证；“人工通过”表示真实外部平台已经验证，仓库只保留脱敏结论。
+本文把题目要求映射到当前代码、设计文档和可复现证据。状态中的“已实现”表示存在可运行代码和自动化测试，不等同于真实平台、真实生产容量或生产 Kubernetes 集群认证。
 
 ## 多租户与节点部署
 
@@ -70,9 +70,9 @@
 | IM、数据库、模型和工具故障降级 | 已实现基础闭环 | 分类重试、DLQ、Outbox、timeout/cancel；Delivery/Recovery 测试 |
 | Context、goroutine 生命周期和事件排空 | 已实现 | Managed Runner、bounded drain、组件 Close；Runtime/Queue drain 测试 |
 | 灰度、版本固定和租户回滚 | 已实现 | 不可变配置、旧 Bundle drain、Admin rollback；Runtime switch 测试 |
-| 容量评估 | 已实现工具与本机实测 | `cmd/capacity`、`docs/capacity.md`、`docs/acceptance/capacity-current.md` |
+| 容量评估 | 已实现工具；目标环境待实测 | `cmd/capacity`、`docs/capacity.md` |
 | 最小 Compose 部署 | 已实现 | `docker-compose.yml`、生产/多节点验收脚本 |
-| Kubernetes 推荐拓扑 | Demo 通过 | Kustomize、多副本、PDB/HPA；Kubernetes 验收脚本与报告 |
+| Kubernetes 推荐拓扑 | 清单与验收脚本已实现 | Kustomize、多副本、PDB/HPA；真实 kind/生产集群验收由部署方执行 |
 
 ## 交付物
 
@@ -86,8 +86,8 @@
 
 ## 后置能力
 
-具体云厂商 SDK（当前提供 Vault KV v2/KMS-compatible HTTPS 协议适配）、队列自定义指标 HPA、复杂 PDF/OCR、更多微信产品接入和真实生产规模压测属于后续增强。当前 Kubernetes 结论是“可复现最小 Demo 通过”，不是云上生产集群认证。
+具体云厂商 SDK（当前提供 Vault KV v2/KMS-compatible HTTPS 协议适配）、队列自定义指标 HPA、复杂 PDF/OCR、更多微信产品接入和真实生产规模压测属于后续增强。Kubernetes 清单可离线校验，真实 kind/生产集群结论必须由部署方复验，不能视为云上生产集群认证。
 
 平台事件、Memory、Outbox 和 Audit 通过稳定业务键幂等；`runner_committed` 之后的接管不会重复模型或 Tool。模型/Tool 成功但该阶段尚未落库的极窄窗口仍是 at-least-once，因此 MCP 发布要求 `idempotent: true`，副作用业务工具必须接受稳定 `X-Idempotency-Key`。这项责任边界不是未完成项，而是跨外部系统无法共享数据库事务时必须显式满足的生产契约。
 
-本轮脱敏实跑结果见 `docs/acceptance/` 下的双 IM、覆盖率、容量、多节点、Kubernetes 和可观测性报告。
+可复现门禁入口包括 `./check.sh`、`scripts/dual_im_contract_acceptance.sh`、`scripts/coverage_acceptance.sh`、`scripts/multinode_acceptance.sh`、`scripts/kubernetes_acceptance.sh` 和 `scripts/observability_acceptance.sh`。运行结果应使用仓库中的脱敏模板保存到受控验收系统，不把易过期的本机快照作为当前代码结论。

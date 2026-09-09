@@ -30,7 +30,7 @@ export TRPC_AGENT_ACCEPTANCE_RUN_MESSAGE=1
 指定既有 Compose 项目名即可复用原 PostgreSQL/Redis 命名卷：
 
 ```bash
-export TRPC_AGENT_COMPOSE_PROJECT=trpc-agent-service-pr14-check
+export TRPC_AGENT_COMPOSE_PROJECT=trpc-agent-service-acceptance
 export TRPC_AGENT_ACCEPTANCE_START=1
 ./scripts/multinode_acceptance.sh
 ```
@@ -88,7 +88,7 @@ TRPC_AGENT_K8S_CREATE_KIND=1 ./scripts/kubernetes_acceptance.sh --run
 - Session/Memory 为共享 PostgreSQL，调度/限流为 Redis；缺失或初始化失败必须 fail fast，不能出现 InMemory 回退。
 - 容量测试达到批准的错误率、完整执行 p95、队列和数据库阈值，并留出一个 Pod 失效余量。
 - 单 Pod、PostgreSQL、Redis、模型、Sender 和 Collector 故障场景有演练记录；告警能在目标时间内到达值班人员。
-- 企业微信与飞书真实回调、幂等、Runner、Outbox 回复均完成人工回归；自动化协议和隔离测试同时通过。
+- 企业微信与飞书真实回调、幂等、Runner、Outbox 回复必须由部署方完成人工回归并留存脱敏证据；自动化协议和隔离测试同时通过。
 - 日志、trace、HTTP 错误、审计和验收产物抽查无模型 Key、IM Secret/Token、EncodingAESKey、数据库密码或用户敏感正文。
 
 任一硬门禁失败都停止发布并保留上一镜像和上一不可变配置版本。配置问题用 Admin rollback 创建新版本；二进制问题使用 Kubernetes rollout undo。两者都不得删除或重建 PostgreSQL/Redis 数据卷。

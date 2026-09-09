@@ -144,9 +144,9 @@ go test ./cmd/trpc-service -run Feishu
 
 ## 真实联调与复验
 
-飞书真实端到端链路已经通过人工平台验收：飞书事件订阅经公网 HTTPS 进入 Adapter，随后经过
-Inbox、Runner、DeepSeek、PostgreSQL、Outbox 并回到飞书。该结论与仓库内自动化协议/集成测试
-分开记录；仓库不保存平台截图、用户消息正文、回调原文或任何凭据。
+仓库已通过飞书协议自动化和集成测试，覆盖事件订阅进入 Adapter 后的 Inbox、Runner、
+PostgreSQL、Outbox 与模拟 Sender 链路。真实飞书账号、真实模型和公网 HTTPS 回调仍需部署方
+按下述步骤复验并在受控系统留存脱敏证据；仓库不保存平台截图、用户消息正文、回调原文或任何凭据。
 
 在新环境复验需要以下外部条件：
 

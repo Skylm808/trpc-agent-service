@@ -129,8 +129,8 @@ https://<public-host>/channels/wecom/<binding_id>
 CAS、指数退避、DLQ、`uncertain` 和 Redis 跨节点限流。启用 WeCom binding 后，Agent
 生成的 Outbox 会由现有 Sender 主动发送，不再需要修改 Runner 主链路。
 
-企业微信测试账号、Cloudflare Tunnel、真实 DeepSeek 和 PostgreSQL 的收发链路已经完成人工
-E2E 验收；自动化协议/隔离测试独立运行，仓库不保存截图、用户正文或凭据。系统已提供
+企业微信协议、隔离和 Sender 自动化测试已纳入 CI；测试账号、公网 HTTPS、真实模型和
+PostgreSQL 的真实平台 E2E 仍需部署方复验，仓库不保存截图、用户正文或凭据。系统已提供
 `uncertain` / DLQ 的 Admin 运维 API，Web 页面仍未实现。图片和基础文本文件已经接入
 受控下载和模型输入；PDF/Office/OCR、媒体回传与复杂预览仍是后续增强。
 部署新企业账号时仍需在对应企业启用应用，并准备公网 HTTPS 回调地址。

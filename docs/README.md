@@ -2,9 +2,7 @@
 
 - [总体架构设计](architecture.md)：系统拓扑、核心时序、租户隔离、多后端和验收目标。
 - [需求验收矩阵](acceptance-matrix.md)：逐项关联题目要求、实现代码和验证证据。
-- [双 IM 可复现契约验收](acceptance/dual-im-contract-current.md)：无真实凭据的加密回调到平台回复闭环。
-- [当前容量探针报告](acceptance/capacity-current.md)：本机 Compose 聚合性能基线及适用边界。
-- [关键模块覆盖率](acceptance/coverage-current.md)：高风险模块短测覆盖率与 CI 门槛。
+- [双 IM 可复现契约验收](../scripts/dual_im_contract_acceptance.sh)：无真实凭据的加密回调到平台回复闭环。
 - [生产风险清单](risks.md)：17 项生产风险、缓解措施和演练方法。
 - [数据模型](data-model.md)：PostgreSQL 表、配置版本和迁移约束。
 - [多节点消息运行时](message-runtime.md)：Inbox、fencing、提交顺序和 Outbox。

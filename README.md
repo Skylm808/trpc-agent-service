@@ -132,12 +132,10 @@ Admin API 是平台控制面，用于租户配置的预览、发布、回滚，�
 
 - [架构设计](docs/architecture.md)：组件职责、路由、隔离、一致性与容量设计
 - [需求验收矩阵](docs/acceptance-matrix.md)：题目要求对应的代码、测试与验收证据
-- [双 IM 可复现验收](docs/acceptance/dual-im-contract-current.md)：合成加密回调到模拟平台回复
-- [当前容量报告](docs/acceptance/capacity-current.md)：Compose 健康/就绪探针实测
-- [关键模块覆盖率](docs/acceptance/coverage-current.md)：高风险模块覆盖率与 CI 门槛
+- [双 IM 可复现验收](scripts/dual_im_contract_acceptance.sh)：合成加密回调到模拟平台回复
+- [容量测试与估算](docs/capacity.md)：负载探针、容量模型与准入指标
 - [部署指南](docs/deployment.md)：Compose、生产参数和运维操作
 - [数据模型](docs/data-model.md)：核心表和租户键
-- [PR #14/#15 取舍记录](docs/pr14-pr15-review.md)：对比结果、吸收项与暂不引入项
 - [数据同步与幂等](docs/message-runtime.md)：顺序、幂等、lease 与 fencing
 - [多后端与迁移](docs/storage-migrations.md)：适配、双写、校验和 cutover
 - [企业微信接入](docs/wecom.md) / [飞书接入](docs/feishu.md)

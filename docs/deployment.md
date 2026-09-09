@@ -100,8 +100,8 @@ Redis 跨节点限流。默认 Compose 使用 `all`；多节点 profile 和 Kube
 跨节点请求状态、取消意图、预算、人工审批和节点心跳均保存在共享后端；取消命令另用 Redis
 Pub/Sub 做低延迟通知。系统已提供受认证、租户隔离并带审计的 `uncertain` / DLQ Admin
 运维 API，操作流程见[消息故障恢复](message-recovery.md)；Web 运维页面仍未实现。
-系统已实现按租户动态 Runner 并发配额、Gateway/Worker 拆分和 Compose 多节点验收。企业微信与飞书真实 E2E 均已人工通过；新环境仍需部署方配置真实账号、公网
-HTTPS 回调和平台网络策略。尚未生产化的部分包括 Delivery/maintenance 独立角色和基于队列
+系统已实现按租户动态 Runner 并发配额、Gateway/Worker 拆分和 Compose 多节点验收脚本。企业微信与飞书协议自动化已纳入 CI；真实平台 E2E 仍需部署方配置真实账号、公网
+HTTPS 回调和平台网络策略后复验。尚未生产化的部分包括 Delivery/maintenance 独立角色和基于队列
 自定义指标的自动扩缩容控制器。
 
 ## 多节点 Compose 验收
@@ -109,7 +109,7 @@ HTTPS 回调和平台网络策略。尚未生产化的部分包括 Delivery/main
 必须复用既有项目名以复用命名卷；下面的命令只创建或更新明确服务，不执行 `down -v`：
 
 ```bash
-export TRPC_AGENT_COMPOSE_PROJECT=trpc-agent-service-pr14-check
+export TRPC_AGENT_COMPOSE_PROJECT=trpc-agent-service-acceptance
 docker compose -p "$TRPC_AGENT_COMPOSE_PROJECT" --profile multinode \
   up -d --build gateway worker-a worker-b
 ./scripts/multinode_acceptance.sh
@@ -124,10 +124,12 @@ docker compose -p "$TRPC_AGENT_COMPOSE_PROJECT" --profile multinode \
 除 `service` 和 `worker-a` 外不会停止其他容器，更不会停止数据库、清空表或删除卷。证据记录
 使用[脱敏报告模板](production-acceptance-report.md)。
 
-共享后端集成测试不需要暴露 PostgreSQL/Redis 到宿主机：
+共享后端集成测试可复用 Compose 的 `test` profile；迁移与后端专项检查由独立脚本创建临时容器：
 
 ```bash
 docker compose --profile test run --rm --build integration-test
+./scripts/postgres_migrations_test.sh
+./scripts/redis_integration_test.sh
 ```
 
 测试覆盖 Redis 双节点 consumer group、PostgreSQL 状态/取消、节点 ID 冲突与重启、共享预算/

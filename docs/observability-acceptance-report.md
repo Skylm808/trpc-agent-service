@@ -9,7 +9,7 @@
 | --- | --- |
 | 日期 / 环境 | `<UTC time / non-production>` |
 | Git commit | `<commit hash>` |
-| Compose project | `trpc-agent-service-pr14-check` |
+| Compose project | `<non-secret project name>` |
 | Tempo / Collector / Prometheus / Grafana | `<image digest or approved version>` |
 | 既有数据卷 | `保留；未执行 down -v 或 volume rm` |
 
