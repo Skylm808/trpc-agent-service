@@ -195,15 +195,21 @@ func (tool *executionLedgerTool) Call(ctx context.Context, args []byte) (any, er
 	if !ok || request.Request.RequestID == "" || request.Request.TenantID == "" {
 		return nil, policy.ErrToolDenied
 	}
-	ordinal := request.Invocations.Next()
-	if ordinal == 0 {
-		ordinal = 1
+	callID, ok := trpctool.ToolCallIDFromContext(ctx)
+	if !ok || strings.TrimSpace(callID) == "" {
+		return nil, errors.New("tool: framework tool call id is unavailable")
 	}
-	callID := executionCallID(tool.name, ordinal)
-	requestCtx := policy.WithInvocation(ctx, ordinal)
-	record := ExecutionRecord{TenantID: request.Request.TenantID, RequestID: request.Request.RequestID, ToolCallID: callID, ToolName: tool.name, ArgumentsHash: hashBytes(args), IdempotencyKey: request.Request.RequestID + ":" + tool.name + ":" + fmt.Sprint(ordinal), TraceID: "", Status: ExecutionRunning}
-	if err := tool.store.Begin(requestCtx, record); err != nil {
+	requestCtx := ctx
+	record := ExecutionRecord{TenantID: request.Request.TenantID, RequestID: request.Request.RequestID, ToolCallID: callID, ToolName: tool.name, ArgumentsHash: hashBytes(args), IdempotencyKey: request.Request.RequestID + ":" + callID, TraceID: "", Status: ExecutionRunning}
+	decision, err := tool.store.Begin(requestCtx, record)
+	if err != nil {
 		return nil, errors.New("tool: execution ledger unavailable")
+	}
+	if decision.Status == ExecutionCompleted {
+		return decision.Result, nil
+	}
+	if decision.Status == ExecutionRunning || decision.Status == ExecutionOutcomeUnknown {
+		return nil, errors.New("tool: execution outcome requires reconciliation")
 	}
 	callable, ok := tool.delegate.(trpctool.CallableTool)
 	if !ok {
@@ -219,7 +225,7 @@ func (tool *executionLedgerTool) Call(ctx context.Context, args []byte) (any, er
 		_ = tool.store.Fail(context.Background(), record.TenantID, record.RequestID, record.ToolCallID, "tool_call_failed", status)
 		return nil, err
 	}
-	if completeErr := tool.store.Complete(context.Background(), record.TenantID, record.RequestID, record.ToolCallID, hashBytes([]byte(fmt.Sprint(result)))); completeErr != nil {
+	if completeErr := tool.store.Complete(context.Background(), record.TenantID, record.RequestID, record.ToolCallID, result); completeErr != nil {
 		return result, errors.New("tool: execution ledger completion failed")
 	}
 	return result, nil

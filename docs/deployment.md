@@ -72,6 +72,9 @@ Admin API 与 Gateway 共用 HTTP 端口，所有 `/v1/tenants/{tenant_id}/confi
   和 `WECOM_ENCODING_AES_KEY`。Delivery Worker 会自动使用应用 Secret 获取 access token。
 - 飞书启用后，还需要配置文件所引用的 `FEISHU_VERIFICATION_TOKEN`、`FEISHU_APP_SECRET`
   和可选的 `FEISHU_ENCRYPT_KEY`。Delivery Worker 自动使用 App Secret 获取并缓存
+
+生产模式启用外部工具时必须配置 `TRPC_AGENT_TOOL_LEDGER_KEY`（由部署密钥系统注入，长度至少
+32 字节）。它用于加密可恢复 Tool 结果；缺失时工具执行仍会 fail-closed，不会自动重调未知副作用。
   tenant_access_token。飞书回调地址为 `/channels/feishu/{binding_id}`，协议细节见
   [飞书 Channel Adapter](feishu.md)。
 

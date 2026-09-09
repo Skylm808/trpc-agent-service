@@ -141,8 +141,8 @@ if [[ "$actual_indexes" != "$expected_indexes" ]]; then
   exit 1
 fi
 
-expected_columns=$'audit_logs.config_version\naudit_logs.policy_version\ninbox_messages.execution_event_id\ninbox_messages.execution_reply\ninbox_messages.execution_stage'
-actual_columns="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT table_name || '.' || column_name FROM information_schema.columns WHERE table_schema='public' AND ((table_name='audit_logs' AND column_name IN ('config_version','policy_version')) OR (table_name='inbox_messages' AND column_name IN ('execution_stage','execution_reply','execution_event_id'))) ORDER BY table_name,column_name")"
+expected_columns=$'audit_logs.config_version\naudit_logs.policy_version\ninbox_messages.execution_event_id\ninbox_messages.execution_reply\ninbox_messages.execution_stage\ntool_executions.result_ciphertext'
+actual_columns="$(docker exec "$CONTAINER" psql -At -U postgres -d "$DATABASE" -c "SELECT table_name || '.' || column_name FROM information_schema.columns WHERE table_schema='public' AND ((table_name='audit_logs' AND column_name IN ('config_version','policy_version')) OR (table_name='inbox_messages' AND column_name IN ('execution_stage','execution_reply','execution_event_id')) OR (table_name='tool_executions' AND column_name IN ('result_ciphertext'))) ORDER BY table_name,column_name")"
 if [[ "$actual_columns" != "$expected_columns" ]]; then
   echo "missing PostgreSQL migration columns:" >&2
   echo "$actual_columns" >&2

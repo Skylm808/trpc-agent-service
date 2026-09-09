@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS tool_executions (
   idempotency_key TEXT NOT NULL,
   status TEXT NOT NULL,
   result_hash TEXT,
+  result_ciphertext BYTEA,
   error_type TEXT,
   trace_id TEXT,
   started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
