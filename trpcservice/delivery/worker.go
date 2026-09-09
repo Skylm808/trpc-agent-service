@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	servicemetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 )
 
@@ -61,7 +62,18 @@ func NewWorker(store Store, router RouteResolver, limiter Limiter, telemetry *se
 	if config.RetryMax <= 0 {
 		config.RetryMax = 5 * time.Minute
 	}
-	return &Worker{store: store, router: router, limiter: limiter, telemetry: telemetry, config: config, sem: make(chan struct{}, config.MaxConcurrency)}, nil
+	worker := &Worker{store: store, router: router, limiter: limiter, telemetry: telemetry, config: config, sem: make(chan struct{}, config.MaxConcurrency)}
+	// Inject once while the route table is immutable. Dynamic production
+	// resolvers perform the same injection when they create a versioned sender.
+	for _, key := range router.Keys() {
+		sender, err := router.Resolve(gateway.OutboundMessage{TenantID: key.TenantID, BindingID: key.BindingID})
+		if err == nil {
+			if aware, ok := sender.(channels.RateLimitAware); ok {
+				aware.SetDeliveryLimiter(limiter)
+			}
+		}
+	}
+	return worker, nil
 }
 
 // Start begins polling. It implements trpcservice.Component.
@@ -152,9 +164,7 @@ func (worker *Worker) deliver(parent context.Context, claim Claim) {
 		sender, err = worker.router.Resolve(message)
 	}
 	if err == nil {
-		if aware, ok := sender.(channels.RateLimitAware); ok {
-			aware.SetDeliveryLimiter(worker.limiter)
-		} else {
+		if _, aware := sender.(channels.RateLimitAware); !aware {
 			// Provider-aware senders charge once per physical API call (for
 			// example, each text chunk). Generic senders are charged once for
 			// the logical delivery here.

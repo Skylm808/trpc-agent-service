@@ -133,7 +133,7 @@ func (handler *Handler) verifyURL(w http.ResponseWriter, request *http.Request, 
 }
 
 func (handler *Handler) receive(w http.ResponseWriter, request *http.Request, bindings []Binding) {
-	body, err := io.ReadAll(io.LimitReader(request.Body, 1<<20))
+	body, err := io.ReadAll(http.MaxBytesReader(w, request.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "read callback", http.StatusBadRequest)
 		return

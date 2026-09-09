@@ -46,6 +46,7 @@ const (
 	postgresDSNEnv       = "TRPC_AGENT_POSTGRES_DSN"
 	redisURLEnv          = "TRPC_AGENT_REDIS_URL"
 	adminTokensEnv       = "TRPC_AGENT_ADMIN_TOKENS"
+	toolLedgerKeyEnv     = "TRPC_AGENT_TOOL_LEDGER_KEY"
 	workerConcurrencyEnv = "TRPC_AGENT_WORKER_CONCURRENCY"
 	gatewayRateLimitEnv  = "TRPC_AGENT_GATEWAY_RATE_LIMIT"
 	shutdownTimeoutEnv   = "TRPC_AGENT_SHUTDOWN_TIMEOUT"
@@ -254,8 +255,9 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	scopedSecrets := secret.NewScopedResolver(func(ctx context.Context, ref tenant.SecretRef) (string, error) {
 		return secret.Resolve(ctx, ref)
 	})
+	scopedSecrets.SetOwnershipStore(&secret.SQLOwnershipStore{DB: db})
 	toolRegistry.SetScopedResolver(scopedSecrets.Resolve)
-	toolRegistry.SetExecutionStore(&servicetool.SQLExecutionStore{DB: db})
+	toolRegistry.SetExecutionStore(&servicetool.SQLExecutionStore{DB: db, EncryptionKey: []byte(os.Getenv(toolLedgerKeyEnv))})
 	if err := preflightPublishedTools(connectCtx, db, toolRegistry); err != nil {
 		return nil, err
 	}
@@ -314,7 +316,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 	}
 	primaryAuditStore := &audit.SQLStore{DB: db, Redactor: redactor}
 	auditStore := &audit.RoutedStore{Primary: primaryAuditStore, Resolve: func(resolveCtx context.Context, record audit.Record) (audit.Store, error) {
-		file, resolveErr := published.Current(resolveCtx, record.TenantID)
+		file, resolveErr := published.Version(resolveCtx, record.TenantID, record.ConfigVersion)
 		if resolveErr != nil || len(file.Tenants) != 1 {
 			return nil, errors.New("audit: published route is unavailable")
 		}
@@ -385,7 +387,8 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 			},
 		}
 	}
-	deliveryRouter := &publishedDeliveryRoutes{db: db, published: published, senders: make(map[deliverySenderKey]channels.TextSender)}
+	deliveryLimiter := &delivery.RedisFixedWindowLimiter{Redis: redisBackend}
+	deliveryRouter := &publishedDeliveryRoutes{db: db, published: published, limiter: deliveryLimiter, senders: make(map[deliverySenderKey]channels.TextSender)}
 	telemetry, err := servicemetrics.New("trpc-agent-service")
 	if err != nil {
 		_ = component.Close(context.Background())
@@ -405,7 +408,7 @@ func newDurableComponent(ctx context.Context, address string, file *config.File,
 		outboxWorker, err = delivery.NewWorker(
 			&delivery.SQLStore{DB: db},
 			deliveryRouter,
-			&delivery.RedisFixedWindowLimiter{Redis: redisBackend},
+			deliveryLimiter,
 			telemetry,
 			delivery.WorkerConfig{Owner: workerID + ":outbox"},
 		)
@@ -452,6 +455,7 @@ type deliverySenderKey struct {
 type publishedDeliveryRoutes struct {
 	db        *sql.DB
 	published *config.PublishedCache
+	limiter   channels.SendLimiter
 	mu        sync.Mutex
 	senders   map[deliverySenderKey]channels.TextSender
 	lastUsed  map[deliverySenderKey]time.Time
@@ -555,6 +559,9 @@ func (routes *publishedDeliveryRoutes) ResolveContext(ctx context.Context, messa
 	default:
 		return nil, errors.New("delivery: channel type is unsupported")
 	}
+	if aware, ok := sender.(channels.RateLimitAware); ok && routes.limiter != nil {
+		aware.SetDeliveryLimiter(routes.limiter)
+	}
 	routes.mu.Lock()
 	routes.initSenderCacheLocked()
 	if existing := routes.senders[key]; existing != nil {
@@ -638,6 +645,9 @@ func productionDecorators(db *sql.DB, store repository.Store, published *config.
 			return nil, err
 		}
 		profileValidator := func(file *config.File) error {
+			if err := file.ValidateProduction(); err != nil {
+				return err
+			}
 			if err := validatePersistentProfiles(file); err != nil {
 				return err
 			}

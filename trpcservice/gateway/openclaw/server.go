@@ -38,9 +38,11 @@ func (component *Server) Start(_ context.Context) error {
 		Handler:           component.Handler,
 		ReadHeaderTimeout: defaultDuration(component.ReadHeaderTimeout, 10*time.Second),
 		ReadTimeout:       defaultDuration(component.ReadTimeout, 30*time.Second),
-		WriteTimeout:      defaultDuration(component.WriteTimeout, 60*time.Second),
-		IdleTimeout:       defaultDuration(component.IdleTimeout, 120*time.Second),
-		MaxHeaderBytes:    defaultInt(component.MaxHeaderBytes, 1<<20),
+		// A non-zero http.Server WriteTimeout aborts long-lived SSE streams.
+		// Streaming handlers enforce their own request lifetime instead.
+		WriteTimeout:   component.WriteTimeout,
+		IdleTimeout:    defaultDuration(component.IdleTimeout, 120*time.Second),
+		MaxHeaderBytes: defaultInt(component.MaxHeaderBytes, 1<<20),
 	}
 	server := component.server
 	component.mu.Unlock()

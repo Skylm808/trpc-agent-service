@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -80,6 +81,10 @@ func decodeEnvelope(value []byte) (EncryptedEnvelope, error) {
 	decoder.Strict = true
 	if err := decoder.Decode(&envelope); err != nil {
 		return EncryptedEnvelope{}, fmt.Errorf("wecom: decode encrypted callback: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return EncryptedEnvelope{}, errors.New("wecom: trailing callback data")
 	}
 	if strings.TrimSpace(envelope.Encrypt) == "" {
 		return EncryptedEnvelope{}, errors.New("wecom: encrypted callback body is required")

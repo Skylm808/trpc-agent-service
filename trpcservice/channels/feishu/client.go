@@ -172,14 +172,6 @@ func (sender *Sender) SendText(ctx context.Context, outbound gateway.OutboundMes
 		return err
 	}
 	for index, chunk := range chunks {
-		if sender.Limiter != nil {
-			if err := sender.Limiter.Wait(ctx, outbound); err != nil {
-				if index > 0 {
-					return &channels.UncertainError{Cause: fmt.Errorf("feishu: partial chunk delivery: %w", err)}
-				}
-				return err
-			}
-		}
 		if err := sender.sendChunk(ctx, outbound, chunk); err != nil {
 			if index > 0 && !isUncertain(err) {
 				return &channels.UncertainError{Cause: fmt.Errorf("feishu: partial chunk delivery: %w", err)}
@@ -194,6 +186,11 @@ func (sender *Sender) SendText(ctx context.Context, outbound gateway.OutboundMes
 // cached token.
 func (sender *Sender) sendChunk(ctx context.Context, outbound gateway.OutboundMessage, text string) error {
 	for attempt := 0; attempt < 2; attempt++ {
+		if sender.Limiter != nil {
+			if err := sender.Limiter.Wait(ctx, outbound); err != nil {
+				return err
+			}
+		}
 		token, err := sender.Tokens.Token(ctx)
 		if err != nil {
 			return err

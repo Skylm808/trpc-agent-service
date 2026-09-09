@@ -13,7 +13,7 @@ func TestServerAppliesProductionTimeoutDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = component.Close(context.Background()) })
-	if component.server.ReadHeaderTimeout != 10*time.Second || component.server.ReadTimeout != 30*time.Second || component.server.WriteTimeout != 60*time.Second || component.server.IdleTimeout != 120*time.Second || component.server.MaxHeaderBytes != 1<<20 {
+	if component.server.ReadHeaderTimeout != 10*time.Second || component.server.ReadTimeout != 30*time.Second || component.server.WriteTimeout != 0 || component.server.IdleTimeout != 120*time.Second || component.server.MaxHeaderBytes != 1<<20 {
 		t.Fatalf("unexpected server limits: %+v", component.server)
 	}
 }

@@ -196,7 +196,7 @@ func (handler *Handler) authenticate(request *http.Request) (Route, error) {
 }
 
 func (handler *Handler) message(w http.ResponseWriter, request *http.Request) {
-	accepted, _, status, err := handler.accept(request)
+	accepted, _, status, err := handler.accept(w, request)
 	if err != nil {
 		writeError(w, status, err)
 		return
@@ -205,7 +205,7 @@ func (handler *Handler) message(w http.ResponseWriter, request *http.Request) {
 }
 
 func (handler *Handler) stream(w http.ResponseWriter, request *http.Request) {
-	accepted, events, status, err := handler.acceptStream(request)
+	accepted, events, status, err := handler.acceptStream(w, request)
 	if err != nil {
 		writeError(w, status, err)
 		return
@@ -242,14 +242,14 @@ func (handler *Handler) stream(w http.ResponseWriter, request *http.Request) {
 	}
 }
 
-func (handler *Handler) accept(request *http.Request) (MessageResponse, <-chan StreamEvent, int, error) {
-	return handler.acceptWithSubscription(request, false)
+func (handler *Handler) accept(writer http.ResponseWriter, request *http.Request) (MessageResponse, <-chan StreamEvent, int, error) {
+	return handler.acceptWithSubscription(writer, request, false)
 }
-func (handler *Handler) acceptStream(request *http.Request) (MessageResponse, <-chan StreamEvent, int, error) {
-	return handler.acceptWithSubscription(request, true)
+func (handler *Handler) acceptStream(writer http.ResponseWriter, request *http.Request) (MessageResponse, <-chan StreamEvent, int, error) {
+	return handler.acceptWithSubscription(writer, request, true)
 }
 
-func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe bool) (MessageResponse, <-chan StreamEvent, int, error) {
+func (handler *Handler) acceptWithSubscription(writer http.ResponseWriter, request *http.Request, subscribe bool) (MessageResponse, <-chan StreamEvent, int, error) {
 	if handler == nil || handler.Routes == nil || handler.Inbox == nil || handler.Submitter == nil || handler.ClaimOwner == "" {
 		return MessageResponse{}, nil, http.StatusServiceUnavailable, errors.New("gateway is not configured")
 	}
@@ -266,10 +266,14 @@ func (handler *Handler) acceptWithSubscription(request *http.Request, subscribe 
 	defer callbackSpan.End()
 	request = request.WithContext(callbackCtx)
 	var input MessageRequest
-	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&input); err != nil {
 		return MessageResponse{}, nil, http.StatusBadRequest, fmt.Errorf("decode message: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return MessageResponse{}, nil, http.StatusBadRequest, errors.New("decode message: trailing data")
 	}
 	if input.MessageID == "" || input.SessionID != "" {
 		return MessageResponse{}, nil, http.StatusUnprocessableEntity, errors.New("message_id is required and session_id is server-generated")

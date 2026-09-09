@@ -107,8 +107,8 @@ func TestSenderSplitsUTF8AndRefreshesRejectedToken(t *testing.T) {
 	if len(tokens.invalidated) != 1 || tokens.invalidated[0] != "stale" {
 		t.Fatalf("invalidated=%v", tokens.invalidated)
 	}
-	if limiter.calls != len(contents) {
-		t.Fatalf("limiter calls=%d chunks=%d", limiter.calls, len(contents))
+	if limiter.calls != len(contents)+1 {
+		t.Fatalf("limiter calls=%d chunks=%d (one token refresh retry)", limiter.calls, len(contents))
 	}
 }
 

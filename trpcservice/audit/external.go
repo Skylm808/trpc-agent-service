@@ -55,7 +55,9 @@ func (store *HTTPArchive) Append(ctx context.Context, record Record) error {
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
-	response, err := client.Do(request)
+	clientCopy := *client
+	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := clientCopy.Do(request)
 	if err != nil {
 		return errors.New("audit: external archive request failed")
 	}
