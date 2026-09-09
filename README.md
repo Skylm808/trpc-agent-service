@@ -137,6 +137,7 @@ Admin API 是平台控制面，用于租户配置的预览、发布、回滚，�
 - [关键模块覆盖率](docs/acceptance/coverage-current.md)：高风险模块覆盖率与 CI 门槛
 - [部署指南](docs/deployment.md)：Compose、生产参数和运维操作
 - [数据模型](docs/data-model.md)：核心表和租户键
+- [PR #14/#15 取舍记录](docs/pr14-pr15-review.md)：对比结果、吸收项与暂不引入项
 - [数据同步与幂等](docs/message-runtime.md)：顺序、幂等、lease 与 fencing
 - [多后端与迁移](docs/storage-migrations.md)：适配、双写、校验和 cutover
 - [企业微信接入](docs/wecom.md) / [飞书接入](docs/feishu.md)
