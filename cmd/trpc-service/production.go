@@ -448,7 +448,13 @@ type publishedDeliveryRoutes struct {
 	published *config.PublishedCache
 	mu        sync.Mutex
 	senders   map[deliverySenderKey]channels.TextSender
+	lastUsed  map[deliverySenderKey]time.Time
 }
+
+const (
+	senderCacheTTL = 30 * time.Minute
+	senderCacheMax = 1024
+)
 
 func (routes *publishedDeliveryRoutes) Keys() []delivery.BindingKey {
 	if routes == nil || routes.db == nil {
@@ -498,7 +504,10 @@ func (routes *publishedDeliveryRoutes) ResolveContext(ctx context.Context, messa
 	}
 	key := deliverySenderKey{tenantID: message.TenantID, bindingID: message.BindingID, version: version}
 	routes.mu.Lock()
+	routes.initSenderCacheLocked()
+	routes.evictSendersLocked(time.Now().UTC())
 	if sender := routes.senders[key]; sender != nil {
+		routes.lastUsed[key] = time.Now().UTC()
 		routes.mu.Unlock()
 		return sender, nil
 	}
@@ -541,13 +550,47 @@ func (routes *publishedDeliveryRoutes) ResolveContext(ctx context.Context, messa
 		return nil, errors.New("delivery: channel type is unsupported")
 	}
 	routes.mu.Lock()
+	routes.initSenderCacheLocked()
 	if existing := routes.senders[key]; existing != nil {
+		routes.lastUsed[key] = time.Now().UTC()
 		routes.mu.Unlock()
 		return existing, nil
 	}
 	routes.senders[key] = sender
+	routes.lastUsed[key] = time.Now().UTC()
+	routes.evictSendersLocked(time.Now().UTC())
 	routes.mu.Unlock()
 	return sender, nil
+}
+
+func (routes *publishedDeliveryRoutes) initSenderCacheLocked() {
+	if routes.senders == nil {
+		routes.senders = make(map[deliverySenderKey]channels.TextSender)
+	}
+	if routes.lastUsed == nil {
+		routes.lastUsed = make(map[deliverySenderKey]time.Time)
+	}
+}
+
+func (routes *publishedDeliveryRoutes) evictSendersLocked(now time.Time) {
+	for key, used := range routes.lastUsed {
+		if now.Sub(used) > senderCacheTTL {
+			delete(routes.lastUsed, key)
+			delete(routes.senders, key)
+		}
+	}
+	for len(routes.senders) > senderCacheMax {
+		var oldest deliverySenderKey
+		var oldestAt time.Time
+		for key := range routes.senders {
+			used := routes.lastUsed[key]
+			if oldestAt.IsZero() || used.Before(oldestAt) {
+				oldest, oldestAt = key, used
+			}
+		}
+		delete(routes.lastUsed, oldest)
+		delete(routes.senders, oldest)
+	}
 }
 
 var _ delivery.RouteResolver = (*publishedDeliveryRoutes)(nil)
