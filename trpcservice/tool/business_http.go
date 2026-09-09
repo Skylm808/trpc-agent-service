@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -68,7 +69,11 @@ func (tool *HTTPJSONTool) Call(ctx context.Context, args []byte) (any, error) {
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "trpc-agent-service-business-tool/1")
-	request.Header.Set("X-Idempotency-Key", requestPolicy.Request.RequestID+":"+tool.config.Name)
+	invocation := requestPolicy.Invocations.Next()
+	if invocation == 0 {
+		invocation = 1
+	}
+	request.Header.Set("X-Idempotency-Key", fmt.Sprintf("%s:%s:%d", requestPolicy.Request.RequestID, tool.config.Name, invocation))
 	response, err := tool.client.Do(request)
 	if err != nil {
 		return nil, errors.New("tool: business endpoint unavailable")

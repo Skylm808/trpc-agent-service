@@ -166,7 +166,7 @@ func TestHTTPBusinessToolPolicyHeadersLimitsAndRedaction(t *testing.T) {
 		if request.Method != http.MethodPost || request.Header.Get("Authorization") != "Bearer "+catalogCanary {
 			t.Errorf("unexpected authenticated request")
 		}
-		if request.Header.Get("X-Idempotency-Key") != "request-1:ticket_lookup" {
+		if request.Header.Get("X-Idempotency-Key") != "request-1:ticket_lookup:1" {
 			t.Errorf("idempotency key = %q", request.Header.Get("X-Idempotency-Key"))
 		}
 		writer.Header().Set("Content-Type", "application/json")

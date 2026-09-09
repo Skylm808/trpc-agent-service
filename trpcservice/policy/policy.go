@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -77,8 +78,21 @@ type Engine struct {
 
 type requestContextKey struct{}
 type ContextRequest struct {
-	Engine  *Engine
-	Request Request
+	Engine      *Engine
+	Request     Request
+	Invocations *InvocationState
+}
+
+// InvocationState assigns a deterministic ordinal to tool calls made during
+// one Runner execution. The ordinal is included in external idempotency keys
+// so two calls to the same tool in one request cannot collide.
+type InvocationState struct{ next atomic.Uint64 }
+
+func (state *InvocationState) Next() uint64 {
+	if state == nil {
+		return 0
+	}
+	return state.next.Add(1)
 }
 
 func WithRequest(ctx context.Context, engine *Engine, request Request) context.Context {
@@ -88,7 +102,7 @@ func WithRequest(ctx context.Context, engine *Engine, request Request) context.C
 	request.ConversationID = ""
 	request.AllowedUsers = nil
 	request.AllowedChats = nil
-	return context.WithValue(ctx, requestContextKey{}, ContextRequest{Engine: engine, Request: request})
+	return context.WithValue(ctx, requestContextKey{}, ContextRequest{Engine: engine, Request: request, Invocations: &InvocationState{}})
 }
 func FromContext(ctx context.Context) (ContextRequest, bool) {
 	value, ok := ctx.Value(requestContextKey{}).(ContextRequest)
