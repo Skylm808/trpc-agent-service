@@ -36,28 +36,54 @@ go run ./examples/quickstart ./configs/demo.yaml
 ## 架构概览
 
 ```mermaid
-flowchart LR
-    IM[企业微信 / 飞书] --> CA[Channel Adapter]
-    CA --> GW[Agent Gateway]
-    GW --> IN[(Inbox / Redis Streams)]
-    IN --> W1[Agent Worker]
-    IN --> W2[Agent Worker]
-    W1 --> R[tRPC-Agent-Go Runner]
-    W2 --> R
-    R --> ST[Storage Adapter]
-    ST --> PG[(PostgreSQL)]
-    ST --> V[(PGVector / Qdrant)]
-    ST --> OBJ[(S3 / Artifact)]
-    W1 --> OUT[(Outbox)]
-    W2 --> OUT
-    OUT --> IM
-    ADM[Admin API] --> CFG[(版本化租户配置)]
-    CFG --> GW
-    CFG --> W1
-    CFG --> W2
-    GW -. OTLP .-> TEL[Collector / Tempo]
-    W1 -. OTLP .-> TEL
-    W2 -. OTLP .-> TEL
+flowchart TB
+    subgraph CONTROL["控制面"]
+        direction LR
+        ADMIN[Admin API] --> CONFIG[(版本化租户配置)]
+    end
+
+    subgraph ACCESS["IM 接入与调度"]
+        direction LR
+        IM[企业微信 / 飞书] --> CHANNEL[Channel Adapter]
+        CHANNEL --> GATEWAY[Agent Gateway]
+        GATEWAY --> INBOX[(Inbox / Redis Streams)]
+    end
+
+    subgraph EXECUTION["无状态执行面（水平扩展）"]
+        direction LR
+        WORKERS[Agent Worker × N] --> RUNNER[tRPC-Agent-Go Runner]
+        RUNNER --> GOVERNANCE[Plugin / Guardrail]
+        RUNNER --> TOOLS[Tool / MCP / 外部系统]
+    end
+
+    subgraph DATA["共享数据面"]
+        direction LR
+        STORAGE[Storage Adapter] --> PG[(PostgreSQL<br/>Event / Audit / Fencing)]
+        STORAGE --> VECTOR[(PGVector / Qdrant<br/>Knowledge)]
+        STORAGE --> OBJECT[(S3-compatible<br/>Artifact)]
+    end
+
+    subgraph DELIVERY["异步回复"]
+        direction LR
+        OUTBOX[(Outbox)] --> SENDER[Channel Sender]
+    end
+
+    subgraph OBSERVABILITY["可观测性"]
+        direction LR
+        OTEL[OpenTelemetry] --> COLLECTOR[OTel Collector]
+        COLLECTOR --> BACKEND[Tempo / Prometheus / Grafana]
+    end
+
+    INBOX --> WORKERS
+    RUNNER --> STORAGE
+    WORKERS --> OUTBOX
+    SENDER --> IM_REPLY[企业微信 / 飞书 Reply API]
+
+    CONFIG -. 配置快照 .-> GATEWAY
+    CONFIG -. Runtime Bundle .-> WORKERS
+    GATEWAY -. OTLP .-> OTEL
+    WORKERS -. OTLP .-> OTEL
+    RUNNER -. OTLP .-> OTEL
 ```
 
 Gateway 只接收和规范化请求，Worker 执行 Runner；节点不保存会话亲和状态。租户、binding、identity、session 和 message_id 共同确定隔离边界，共享 PostgreSQL/Redis 保证任意 Worker 可继续处理，因此不需要 sticky session。
