@@ -559,15 +559,15 @@ func (routes *publishedDeliveryRoutes) ResolveContext(ctx context.Context, messa
 	default:
 		return nil, errors.New("delivery: channel type is unsupported")
 	}
-	if aware, ok := sender.(channels.RateLimitAware); ok && routes.limiter != nil {
-		aware.SetDeliveryLimiter(routes.limiter)
-	}
 	routes.mu.Lock()
 	routes.initSenderCacheLocked()
 	if existing := routes.senders[key]; existing != nil {
 		routes.lastUsed[key] = time.Now().UTC()
 		routes.mu.Unlock()
 		return existing, nil
+	}
+	if aware, ok := sender.(channels.RateLimitAware); ok && routes.limiter != nil {
+		aware.SetDeliveryLimiter(routes.limiter)
 	}
 	routes.senders[key] = sender
 	routes.lastUsed[key] = time.Now().UTC()
