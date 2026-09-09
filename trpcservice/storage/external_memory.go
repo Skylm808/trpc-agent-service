@@ -103,10 +103,7 @@ func (service *ExternalMemory) call(ctx context.Context, path string, body map[s
 	}
 	request.Header.Set("Authorization", "Bearer "+service.Token)
 	request.Header.Set("Content-Type", "application/json")
-	client := service.Client
-	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
-	}
+	client := externalMemoryHTTPClient(service.Client)
 	response, err := client.Do(request)
 	if err != nil {
 		return errors.New("storage: external memory request failed")
@@ -125,6 +122,19 @@ func (service *ExternalMemory) call(ctx context.Context, path string, body map[s
 		return errors.New("storage: external memory response is invalid")
 	}
 	return nil
+}
+
+// externalMemoryHTTPClient keeps the configured transport and timeout but
+// prevents redirects from forwarding the tenant bearer token elsewhere.
+func externalMemoryHTTPClient(configured *http.Client) *http.Client {
+	if configured == nil {
+		configured = &http.Client{Timeout: 5 * time.Second}
+	}
+	copy := *configured
+	copy.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &copy
 }
 
 var _ memory.Service = (*ExternalMemory)(nil)

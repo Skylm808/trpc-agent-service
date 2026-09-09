@@ -37,10 +37,7 @@ func (provider *HTTPProvider) Resolve(ctx context.Context, key string) (string, 
 	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
 		return "", errors.New("secret: external provider configuration is invalid")
 	}
-	client := provider.Client
-	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
-	}
+	client := providerHTTPClient(provider.Client)
 	var request *http.Request
 	switch provider.Mode {
 	case HTTPProviderVault:
@@ -100,6 +97,21 @@ func (provider *HTTPProvider) Resolve(ctx context.Context, key string) (string, 
 		return "", errors.New("secret: resolved value is empty")
 	}
 	return value, nil
+}
+
+// providerHTTPClient preserves the caller's transport and timeout while
+// refusing redirects. Secret provider endpoints are trust boundaries: a
+// redirect must not turn a configured Vault/KMS request into a credentialed
+// request to an unreviewed host.
+func providerHTTPClient(configured *http.Client) *http.Client {
+	if configured == nil {
+		configured = &http.Client{Timeout: 5 * time.Second}
+	}
+	copy := *configured
+	copy.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &copy
 }
 
 var _ Provider = (*HTTPProvider)(nil)
