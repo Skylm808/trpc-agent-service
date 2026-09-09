@@ -1,6 +1,6 @@
 # tRPC-Agent Service
 
-[![CI](https://github.com/Skylm808/trpc-agent-service/actions/workflows/ci.yml/badge.svg?branch=feat_tianlinmao)](https://github.com/Skylm808/trpc-agent-service/actions/workflows/ci.yml)
+[![CI](https://github.com/Skylm808/trpc-agent-service/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Skylm808/trpc-agent-service/actions/workflows/ci.yml)
 
 基于 tRPC-Agent-Go 的多租户、节点化 Agent 服务。项目已实现企业微信与飞书接入、Gateway/Worker 水平扩展、共享会话与记忆、多后端迁移、租户治理、审计及可观测性。
 
@@ -9,7 +9,7 @@
 只需 Go 1.24+，无需 Docker、外部模型、IM 凭据或数据库：
 
 ```bash
-git clone --branch feat_tianlinmao https://github.com/Skylm808/trpc-agent-service.git
+git clone https://github.com/Skylm808/trpc-agent-service.git
 cd trpc-agent-service
 ./demo.sh
 ```
@@ -70,7 +70,7 @@ Gateway 只接收和规范化请求，Worker 执行 Runner；节点不保存会�
 | 多节点 | Gateway/Worker/all 三种角色；Redis Streams 调度；Inbox lease、fencing token、`runner/derived/outbox` 可恢复阶段、崩溃接管、优雅 drain |
 | IM | 企业微信和飞书文本链路、回调验签/解密、去重、身份映射、媒体受控下载、基础文本文件提取、飞书卡片回复 |
 | Agent 编排 | 单 LLMAgent，以及 Chain、Parallel + Aggregator、有限 Cycle、声明式 Graph；均按租户配置版本构建不可变 Runtime Bundle |
-| 治理安全 | 用户/群 ACL、工具白名单、token/版本化成本预算、并发配额、Gateway 跨节点限流、危险工具确认、租户级 Audit fail-closed、env/file/Vault/KMS SecretRef、Runner Plugin 脱敏 |
+| 治理安全 | 用户/群 ACL、工具白名单、token/版本化成本预算、并发配额、Gateway 跨节点限流、危险工具确认、租户级 Audit fail-closed、生产 Vault/KMS tenant/app namespace、Runner Plugin 脱敏 |
 | 数据 | Session、Event、Memory、Summary、Artifact、Knowledge、Audit 的统一租户路由；迁移 checkpoint、checksum、双写与 cutover |
 | 可观测性 | Prometheus 指标、OTLP Trace、Tempo、Grafana，以及错误率、DLQ、积压、无 Worker、数据库异常告警 |
 | 部署运维 | 单机 Compose、多 Worker Compose、最小 Kubernetes Demo；探针、PDB、HPA、滚动升级和回滚验收 |
@@ -79,12 +79,12 @@ Gateway 只接收和规范化请求，Worker 执行 Runner；节点不保存会�
 
 ## Compose 运行
 
-生产型 Compose 需要自行提供模型和基础设施配置：
+生产型 Compose 需要自行提供 Vault/KMS 和符合 `tenant_id/app_id/...` namespace 的配置。仓库的 `configs/example.yaml` 使用 env SecretRef，只用于配置结构示例和离线开发，持久化生产入口会拒绝它：
 
 ```bash
 cp .env.example .env
-# 在本地填写所需 SecretRef 对应的环境变量，不要提交 .env
-docker compose up -d --build
+# 设置 TRPC_CONFIG_FILE、Vault/KMS bootstrap 参数和其他基础设施参数；不要提交 .env/local.yaml
+TRPC_CONFIG_FILE=./configs/local.yaml docker compose up -d --build
 curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 ```
@@ -107,7 +107,7 @@ Compose 使用命名数据卷保存 PostgreSQL、Redis、Tempo 和 Grafana 数�
 ./scripts/kubernetes_acceptance.sh
 ```
 
-Kubernetes 脚本默认只执行离线清单校验；使用 `TRPC_AGENT_K8S_CREATE_KIND=1 ./scripts/kubernetes_acceptance.sh --run` 才会创建 kind 集群并走通部署、扩缩容、Pod 故障、滚动升级、HPA/PDB 和回滚。它是可复现的最小验收 Demo，不宣称替代真实生产集群容量测试。
+Kubernetes 脚本默认只执行离线清单校验。`--run` 还要求部署方先把示例 env SecretRef 替换为可访问的、符合 tenant/app namespace 的 Vault/KMS 配置；仓库 CI 当前不执行真实 kind/生产集群验收。
 
 ## 数据后端
 
@@ -116,8 +116,8 @@ Kubernetes 脚本默认只执行离线清单校验；使用 `TRPC_AGENT_K8S_CREA
 | Runner Session / Summary | InMemory（仅离线）、PostgreSQL、Redis | PostgreSQL |
 | 平台 Event / state / fencing | PostgreSQL | PostgreSQL |
 | Memory | InMemory（仅离线）、PostgreSQL、外部 Memory Service | PostgreSQL |
-| Knowledge | InMemory、PGVector、Qdrant | PGVector |
-| Artifact | InMemory、PostgreSQL、S3 | PostgreSQL |
+| Knowledge | InMemory、PGVector、Qdrant | PGVector（目标环境验证） |
+| Artifact | InMemory、PostgreSQL、S3 | PostgreSQL；S3 需目标环境验证 |
 | Audit | InMemory（仅离线）、PostgreSQL；可同步至外置 WORM Archive | PostgreSQL + 归档 |
 
 InMemory 只用于测试和离线 Demo；生产模式会拒绝关键数据域使用内存后端。Redis Runner Session 必须配置独立 `namespace`，平台事件顺序、fencing、Inbox 和 Outbox 仍由 PostgreSQL 强一致保存。Runner Session/State/Event/Track/Summary 已支持 Redis ↔ PostgreSQL 分批迁移；迁移由 Admin API 创建、推进并 cutover，checkpoint、checksum、配置版本及租户边界都持久化在 PostgreSQL。
@@ -152,7 +152,7 @@ go test ./trpcservice/channels/... ./trpcservice/acceptance/...
 go test ./trpcservice/storage/... ./trpcservice/storagemigration/...
 ```
 
-涉及真实企业微信、飞书、模型、数据库或对象存储的测试必须显式提供环境变量；默认测试不会读取真实凭据。仓库禁止提交 `.env`、`configs/local.yaml`、Secret、下载 URL、媒体 key 或用户消息正文。
+涉及真实企业微信、飞书、模型、向量库或对象存储的测试必须显式提供目标环境和凭据；默认 CI 只对 PostgreSQL/Redis 使用临时容器，不读取真实凭据。仓库禁止提交 `.env`、`configs/local.yaml`、Secret、下载 URL、媒体 key 或用户消息正文。
 
 生产入口默认限制每个 `(tenant_id, binding_id)` 每秒 100 个回调，可用 `TRPC_AGENT_GATEWAY_RATE_LIMIT` 调整。Vault/KMS-compatible HTTPS Secret Provider 的 bootstrap 参数及其他生产环境变量见 [`.env.example`](.env.example) 和[部署指南](docs/deployment.md)。
 

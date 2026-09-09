@@ -54,14 +54,14 @@ channels:
     provider_account_id: cli_a1234567890      # 飞书 App ID
     webhook_url: https://agent.example.com/channels/feishu/support-feishu
     token:                                     # Verification Token（必填，SecretRef）
-      provider: env
-      key: FEISHU_VERIFICATION_TOKEN
+      provider: vault
+      key: demo/assistant/feishu-verification-token
     secret:                                    # App Secret（必填，SecretRef）
-      provider: env
-      key: FEISHU_APP_SECRET
+      provider: vault
+      key: demo/assistant/feishu-app-secret
     encryption_key:                            # Encrypt Key（可选；配置后明文回调一律拒绝）
-      provider: env
-      key: FEISHU_ENCRYPT_KEY
+      provider: vault
+      key: demo/assistant/feishu-encrypt-key
     enabled: true
 ```
 
@@ -154,8 +154,8 @@ PostgreSQL、Outbox 与模拟 Sender 链路。真实飞书账号、真实模型�
 2. 事件订阅配置：请求地址 `https://<public-host>/channels/feishu/<binding_id>`，
    添加 `im.message.receive_v1` 事件，记录 Verification Token（可选 Encrypt Key）；
 3. 公网 HTTPS 入口（如 Cloudflare Tunnel）；
-4. 在 `.env` 中配置 `FEISHU_VERIFICATION_TOKEN`、`FEISHU_APP_SECRET`、
-   `FEISHU_ENCRYPT_KEY`（不可提交），通过 Admin API 发布启用该 binding 的新版本；
+4. 在 Vault/KMS 的 `tenant_id/app_id/...` namespace 准备 Verification Token、App Secret 和
+   Encrypt Key，通过 Admin API 发布只包含 SecretRef 的新版本；
 5. 在飞书中给机器人发消息，验证 飞书回复 全链路。
 
 复验报告只记录时间、commit/image、匿名 binding/tenant、PASS/FAIL 和受控错误类型，不粘贴

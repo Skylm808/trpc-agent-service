@@ -1,6 +1,6 @@
 # Knowledge/RAG 与 S3 Artifact
 
-Knowledge 提供最小生产闭环：管理员把文本写入租户/App 的知识库，服务调用 OpenAI-compatible Embedding 并写入 PGVector 或 Qdrant；启用了 `knowledge_search` 的 Agent 可在运行时检索。它不是完整的文档管理系统，不包含 PDF/OCR、网页抓取、MCP 或业务 Tool。
+Knowledge 已实现管理员 ingest、OpenAI-compatible Embedding、PGVector/Qdrant 写入和 `knowledge_search` 运行时检索代码路径。仓库 CI 不启动真实 PGVector/Qdrant，生产可用性、召回质量和迁移结论必须在目标环境验证。它不是完整的文档管理系统，不包含 PDF/OCR、网页抓取、MCP 或业务 Tool。
 
 ## Knowledge 配置
 
@@ -15,7 +15,7 @@ knowledge:
     provider: openai-compatible
     model: text-embedding-3-small
     base_url: https://embedding.example/v1
-    api_key: {provider: env, key: EMBEDDING_API_KEY}
+    api_key: {provider: vault, key: demo/assistant/embedding-api-key}
     dimensions: 1536
   max_results: 8
   min_score: 0.2
@@ -24,7 +24,7 @@ storage:
     type: qdrant
     endpoint: grpcs://qdrant.example:6334
     namespace: support_docs
-    credential: {provider: env, key: QDRANT_API_KEY}
+    credential: {provider: vault, key: demo/assistant/qdrant-api-key}
 ```
 
 PGVector 使用 `type: postgres`；其目标 PostgreSQL 必须预装 `vector` extension，SecretRef 可像其他路由一样解析独立 DSN。发布阶段会建立并检查对应 table/collection。物理名称由配置 namespace 加 tenant/App 摘要派生，检索还会强制添加可信 `tenant_id` 与 `app_id` metadata filter；请求体里的同名字段会被覆盖。
@@ -56,4 +56,5 @@ PostgreSQL。Worker 丢失 lease 后可从 checkpoint 重放；内容冲突、�
 Knowledge ingest 同时维护租户/App 文档目录。PGVector ↔ Qdrant 迁移从该目录重新生成 embedding
 并 upsert 目标索引，在 `migration_target` 阶段对新文档同步双写。完成任务后仍应做召回抽样，
 再发布下一配置版本切换主索引。只存在于向量库、没有进入文档目录的早期历史数据，
-需先通过 Admin Knowledge API 重新 ingest 一次。
+需先通过 Admin Knowledge API 重新 ingest 一次。S3/PostgreSQL 双向迁移同样需要真实 bucket、
+权限、网络失败和版本冲突演练，单元测试不能替代该验收。

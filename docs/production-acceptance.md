@@ -66,19 +66,20 @@ export TRPC_AGENT_ACCEPTANCE_ISOLATE_TOPOLOGY=1
 
 ## Kubernetes 最小生产门禁
 
-在专用 kind 集群运行真实多副本拓扑；不具备集群时可先执行离线结构门禁：
+不具备集群时先执行离线结构门禁。`--run` 不会自动配置生产 Secret Provider；运行前必须把
+demo/base 中的 env SecretRef 替换为目标环境可访问的 Vault/KMS tenant/app namespace：
 
 ```bash
 ./scripts/kubernetes_acceptance.sh --validate
 TRPC_AGENT_K8S_CREATE_KIND=1 ./scripts/kubernetes_acceptance.sh --run
 ```
 
-真实模式部署 3 个 Gateway 和 3 个 Worker，并实际运行合成 Runner 链路、100 个 health 请求和
+完成上述 Secret 配置后，脚本预期部署 3 个 Gateway 和 3 个 Worker，并运行合成 Runner 链路、100 个 health 请求和
 20 个并发 Gateway→Runner→PostgreSQL 完成态请求的容量冒烟、
 单 Pod 重建、Redis/PostgreSQL/模型/Collector 故障恢复、Sender retry/DLQ 回归、滚动升级与
 `rollout undo`。验收前后比较 PostgreSQL 中的配置版本并确认 PVC 仍存在。专用 kind demo 安装
 固定版本 Metrics Server，并要求两个 HPA 的 `ScalingActive=True`；生产集群仍须按容量基线校准
-实际扩容阈值。脚本不执行 namespace/PVC/volume 删除，也不输出凭据、用户正文或 SecretRef 值。
+实际扩容阈值。该真实模式当前不在 GitHub CI 中执行，结果必须记录到脱敏报告模板。脚本不执行 namespace/PVC/volume 删除，也不输出凭据、用户正文或 SecretRef 值。
 
 ## 发布门禁
 

@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-project="${TRPC_AGENT_COMPOSE_PROJECT:-trpc-agent-service-pr14-check}"
+project="${TRPC_AGENT_COMPOSE_PROJECT:-trpc-agent-service-acceptance}"
 compose=(docker compose -p "$project")
 
 for command in docker; do

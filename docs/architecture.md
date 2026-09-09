@@ -33,7 +33,7 @@ flowchart TB
         ADMIN[Admin API]
         CFG[配置校验/发布/回滚]
         CONFIG[(PostgreSQL<br/>不可变配置版本)]
-        SECRET[env / file / Vault / KMS]
+        SECRET[生产 Vault / KMS<br/>离线 env / file]
     end
 
     subgraph DURABLE["3. 持久接入与调度"]
@@ -122,7 +122,7 @@ Agent Gateway 和 Worker 都是无状态节点，不要求负载均衡器提供 
 
 `tenant_id` 是最高隔离边界。一个租户可以有多个 Agent App，每个 App 保存模型配置、系统指令、工具策略、IM 绑定、存储路由和审计策略。配置发布后不可修改；`config_versions` 保存完整的 canonical 配置和内容摘要，`tenants.current_config_version` 是发布头。并发发布使用 expected version 做 CAS，回滚会创建一个新版本，而不是覆盖旧记录。
 
-隔离规则落实在接口和数据模型中：Repository 的每个方法都显式接收 `tenant_id`；SQL 的主键、唯一键、外键和索引以租户字段开头；Runtime Bundle 的键是 `(tenant_id, app_id, config_version)`；工具在展示和执行两个阶段都经过租户策略；模型密钥、IM token 和数据库凭据只保存 `SecretRef`。运行时内置 env/file Resolver，并可通过 HTTPS 接入 Vault KV v2 或 KMS-compatible 内部服务；Provider 未配置或解析失败时 fail-closed。Vault/KMS bootstrap token 只从部署环境注入，也不能进入发布配置、日志或 trace。日志与 trace 禁止记录 secret value，消息内容是否进入审计由租户的 `AuditPolicy` 决定。
+隔离规则落实在接口和数据模型中：Repository 的每个方法都显式接收 `tenant_id`；SQL 的主键、唯一键、外键和索引以租户字段开头；Runtime Bundle 的键是 `(tenant_id, app_id, config_version)`；工具在展示和执行两个阶段都经过租户策略；模型密钥、IM token 和数据库凭据只保存 `SecretRef`。env/file Resolver 仅用于离线开发和测试；持久化生产配置只接受 Vault/KMS，并强制 key 位于 `tenant_id/app_id/...` namespace。模型、Storage、迁移、IM、Audit 和 Tool 在解析时使用相同 scope，旧发布版本读取时再次校验，Provider 未配置或解析失败时 fail-closed。Vault/KMS bootstrap token 只从部署环境注入，也不能进入发布配置、日志或 trace。日志与 trace 禁止记录 secret value，消息内容是否进入审计由租户的 `AuditPolicy` 决定。
 
 每个 App 可选择单 `llm` 或 `chain`、`parallel`、`cycle`、`graph` 工作流。组合节点、边、Aggregator、循环次数和并发上限都属于不可变配置版本；Parallel 强制最终 Aggregator，Cycle 强制有限迭代，Graph 在发布前校验 entry/finish 和边引用。所有形态仍通过同一 Runner、Session 和治理管线执行。
 
@@ -256,7 +256,7 @@ Adapter 可以替换实现，但不能削弱这些语义。某个后端无法提
 
 默认选择 PostgreSQL Runner Session；低延迟租户可选择 Redis Session，但必须配置独立 namespace、同步写、AOF 和多副本。平台 Event/state/fencing 始终保留在 PostgreSQL，因此 Redis 故障不会破坏 Inbox、提交顺序或已发送记录；当前版本尚未自动用平台 Event 重建丢失的 Redis 对话历史，启用方必须把这项恢复复杂度纳入取舍。Knowledge 与 Artifact 不进入主事务：event 提交后创建派生任务，异步更新向量索引或对象元数据。
 
-后端迁移采用 `dual write -> snapshot/backfill -> verify -> cutover -> rollback window`。先发布带 `migration_target` 的配置版本，新 Bundle 从主库读取并同步双写目标；再通过 Admin API 创建租户/App/domain 任务。多个 Migration Worker 使用 PostgreSQL claim lease 和 `SKIP LOCKED` 分批处理，checkpoint 可恢复。任务完成后，下一次配置发布才能把目标提升为主路由。copier 覆盖 Redis ↔ PostgreSQL Runner Session/State/Event/Track/Summary、PostgreSQL Memory、PostgreSQL ↔ S3 Artifact 和 PGVector ↔ Qdrant Knowledge；各域通过可信目录和 checksum 校验，任何冲突都阻止 cutover。
+后端迁移采用 `dual write -> snapshot/backfill -> verify -> cutover -> rollback window`。先发布带 `migration_target` 的配置版本，新 Bundle 从主库读取并同步双写目标；再通过 Admin API 创建租户/App/domain 任务。多个 Migration Worker 使用 PostgreSQL claim lease 和 `SKIP LOCKED` 分批处理，checkpoint 可恢复。任务完成后，下一次配置发布才能把目标提升为主路由。copier 代码覆盖 Redis ↔ PostgreSQL Runner Session/State/Event/Track/Summary、PostgreSQL Memory、PostgreSQL ↔ S3 Artifact 和 PGVector ↔ Qdrant Knowledge；当前真实容器集成只覆盖 Redis/PostgreSQL，向量库和对象存储仍需目标环境验证。
 
 ## 7. 治理、可观测性与故障处理
 

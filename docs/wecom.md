@@ -48,20 +48,20 @@ channels:
     provider_app_id: "1000002"              # AgentID
     webhook_url: https://agent.example.com/channels/wecom/support-wecom
     token:                                   # 回调 Token
-      provider: env
-      key: WECOM_CALLBACK_TOKEN
+      provider: vault
+      key: demo/assistant/wecom-callback-token
     secret:                                  # 自建应用 Secret，仅主动发消息取 token 使用
-      provider: env
-      key: WECOM_APP_SECRET
+      provider: vault
+      key: demo/assistant/wecom-app-secret
     encryption_key:                          # 43 字符 EncodingAESKey
-      provider: env
-      key: WECOM_ENCODING_AES_KEY
+      provider: vault
+      key: demo/assistant/wecom-encoding-aes-key
     enabled: true
 ```
 
 `Token`、`EncodingAESKey`、应用 Secret 和 access token 的实际值不进入配置快照正文、日志、
-trace 或错误信息。组合器支持 `env`、挂载的 `file`、Vault KV v2-compatible HTTPS 和
-KMS-compatible HTTPS SecretRef；外部 Provider 未配置或解析失败时 fail-closed。
+trace 或错误信息。env/file SecretRef 仅供离线开发和测试；持久化生产组合器只接受符合
+tenant/app namespace 的 Vault KV v2-compatible 或 KMS-compatible SecretRef。
 
 ## 身份与会话
 

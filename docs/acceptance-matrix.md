@@ -19,7 +19,7 @@
 | 正确租户和 session 路由 | 已实现 | 服务端 Channel Binding 与 canonical user/session；`TestClientCannotChooseSessionOrTenant` |
 | 不依赖 sticky session | 已实现 | 共享 Session/Memory、session lease/fence；`TestRedisCoordinatorMonotonicFenceAndCompareRelease` |
 | 配置、数据、工具和身份隔离 | 已实现 | 租户前缀主键、版本化 Bundle、Tool Filter、IM ACL；`TestBundlesIsolateSameUserAndSessionAcrossTenants` |
-| Secret 与日志脱敏 | 已实现 | env/file/Vault KV v2-compatible/KMS-compatible HTTPS Resolver、Runner GovernancePlugin；`TestHTTPProviderResolvesVaultWithoutLeakingMetadata`、`TestGovernancePluginRedactsRunnerEventContent` 及泄漏测试 |
+| Secret 与日志脱敏 | 已实现 | 生产配置和运行时强制 Vault/KMS `tenant_id/app_id/...` namespace；旧发布版本读取时再次校验；Runner GovernancePlugin 与泄漏测试 |
 
 ## 数据同步与多后端
 
@@ -29,8 +29,8 @@
 | 多节点并发写同一 session | 已实现 | lease、单调 fencing token、事务提交；`TestSQLFenceGuardTurnOrderAndStaleCommit` |
 | Event → state → summary/memory 顺序与崩溃恢复 | 已实现 | Inbox `runner/derived/outbox` durable stage、原子写入和派生幂等键；`TestProcessorRecoversRunnerResultWithoutSecondModelCall`、`TestAtomicIdempotencySummaryAndMemory` |
 | Memory 跨节点可见 | 已实现 | PostgreSQL 或外部 Memory；双租户双 Worker E2E 和 External Memory 测试 |
-| 后端迁移 | 已实现最小闭环 | checkpoint、lease、checksum、双写、verify、cutover；Migration Worker 测试 |
-| Redis ↔ PostgreSQL Session、PGVector ↔ Qdrant、S3 ↔ PostgreSQL | 已实现最小闭环 | Admin Migration Job、迁移 catalog；临时 PG/Redis 双向集成测试 |
+| 后端迁移 | 代码路径已实现 | checkpoint、lease、checksum、双写、verify、cutover；Migration Worker 单元测试 |
+| Redis ↔ PostgreSQL Session、PGVector ↔ Qdrant、S3 ↔ PostgreSQL | 分层验证 | Redis/PostgreSQL 有临时容器集成测试；PGVector/Qdrant 和 S3/PostgreSQL 仅有适配、迁移代码与单元测试，真实后端待目标环境验证 |
 | IM 重投幂等 | 已实现 | 租户/绑定/外部消息唯一 Inbox；`TestConcurrentDuplicatesHaveOneWinner` |
 | 一致性取舍和最小表结构 | 已完成 | `docs/architecture.md`、`docs/storage-migrations.md`、`migrations/*.sql` |
 

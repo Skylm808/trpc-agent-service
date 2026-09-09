@@ -8,13 +8,13 @@
 - 客户端关闭可选的 GET SSE server-push 通道，只使用有界的 Streamable POST 请求/响应；这样既兼容有状态和无状态服务，也避免后台通知 goroutine 进入 Bundle 生命周期之外。工具发现和调用不依赖 GET SSE。
 - 同一个有状态 MCP client 在当前上游版本中不保证并发安全，因此一个 Bundle 内对同一 server 的调用按 session 串行化；不同 MCP server、Bundle、服务节点仍可并发。需要更高单 server 吞吐时应扩展为有界连接池，并先通过 race 与服务端限流验收。
 - MCP endpoint 和业务工具 endpoint 禁止 userinfo、query、fragment；HTTP client 禁止跟随重定向。每个远端调用都有 30 秒以内的有界超时。
-- 认证只允许 `Authorization: Bearer`（默认）或 MCP 的 `X-API-Key`。真实值由 `env`/挂载文件等 SecretRef provider 在 Bundle 创建时解析，不进入配置版本、API 响应、错误或工具结果。
+- 认证只允许 `Authorization: Bearer`（默认）或 MCP 的 `X-API-Key`。生产真实值由符合 tenant/app namespace 的 Vault/KMS SecretRef 在 Bundle 创建时解析，不进入配置版本、API 响应、错误或工具结果。
 - MCP 远端工具使用 `mcp__<server_id>__<remote_tool>` 名称。发布配置必须同时把这个完整名称加入 `tools.allow`；业务工具使用其 `name`。内置 `echo`、`calculator` 和 `knowledge_search` 不能被覆盖。
 - 所有可调用工具在最终 handler 再执行租户 allow/deny 与审批校验，并复用 Tool trace、审计和预算上下文。业务接口还必须按 `X-Idempotency-Key` 实现幂等。
 
 ## 配置示例
 
-以下片段位于一个 Agent App 下。凭据值只放部署环境或 secret mount，不要写入 YAML：
+以下片段位于租户 `demo` 的 App `assistant` 下。凭据值只放外部 Secret Manager，不要写入 YAML：
 
 ```yaml
 tools:
@@ -30,8 +30,8 @@ mcp_servers:
   - server_id: crm
     endpoint: https://mcp.example.com/mcp
     credential:
-      provider: env
-      key: CRM_MCP_TOKEN
+      provider: vault
+      key: demo/assistant/crm-mcp-token
     credential_header: Authorization
     credential_scheme: Bearer
     allowed_tools:
@@ -46,13 +46,13 @@ business_tools:
     description: Create a support ticket through the approved service.
     endpoint: https://tools.example.com/v1/tickets
     credential:
-      provider: env
-      key: TICKET_API_TOKEN
+      provider: vault
+      key: demo/assistant/ticket-api-token
     timeout_seconds: 10
     enabled: true
 ```
 
-业务工具向固定 endpoint 发送 `POST application/json`，模型参数只能成为 JSON body。服务自动添加 Bearer credential 和 `X-Idempotency-Key: <request_id>:<tool_name>`，请求和响应上限均为 64 KiB，响应必须是 JSON object。非 2xx、超时、重定向、非 JSON 或超限响应都会变成不包含上游正文的通用错误。
+业务工具向固定 endpoint 发送 `POST application/json`，模型参数只能成为 JSON body。服务自动添加 Bearer credential 和 `X-Idempotency-Key: <request_id>:<tool_name>:<invocation>`，持久 ledger 另以框架 `tool_call_id` 防止崩溃接管时自动重放未知副作用。请求和响应上限均为 64 KiB，响应必须是 JSON object。非 2xx、超时、重定向、非 JSON 或超限响应都会变成不包含上游正文的通用错误。
 
 启用的 MCP server 必须声明 `idempotent: true`，表示远端对重复调用具备幂等语义。平台不能把 MCP 网络副作用与 Inbox 事务做成原子提交；不能满足该契约的写操作必须使用 Business HTTP adapter，并由远端按稳定 `X-Idempotency-Key` 去重。
 

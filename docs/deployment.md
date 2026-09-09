@@ -2,14 +2,14 @@
 
 ## 最小可运行环境
 
-根目录的 `docker-compose.yml` 启动 PostgreSQL、Redis、一次性 migration、兼容模式的合并 Gateway/Worker，以及 OpenTelemetry Collector、Tempo、Prometheus、Grafana；opt-in `multinode` profile 另提供一个 Gateway 和两个 Worker 的验收拓扑。Kubernetes 基线使用 `--role gateway` 与 `--role worker` 拆成独立 Deployment。服务启动时把 `configs/example.yaml` 当作**种子**：租户在控制面还没有任何已发布版本时才写入 version 1；一旦通过 Admin API 发布过新版本，数据库就是唯一事实源，重启不再校验文件与数据库一致，也不要求重建环境。启动文件中的版本号超过数据库已发布版本时拒绝启动，避免节点使用未发布配置。
+根目录的 `docker-compose.yml` 描述 PostgreSQL、Redis、一次性 migration、合并 Gateway/Worker 和可观测性组件；opt-in `multinode` profile 描述一个 Gateway 与两个 Worker。Kubernetes 基线使用 `--role gateway` 与 `--role worker` 拆成独立 Deployment。持久化入口要求启动配置通过生产 Secret 门禁，因此必须通过 `TRPC_CONFIG_FILE` 指向使用 Vault/KMS、且 key 符合 `tenant_id/app_id/...` namespace 的部署配置；仓库的 `configs/example.yaml` 是离线结构示例，不能直接作为生产种子。
 
-首次启动前执行 `cp .env.example .env`，然后只在本机 `.env` 中填写
-`DEEPSEEK_API_KEY`。生产 Runtime 使用 tRPC-Agent-Go 的 OpenAI-compatible Model
-访问 DeepSeek；`mock` provider 会被生产组合拒绝。
+首次启动前执行 `cp .env.example .env`，设置 `TRPC_CONFIG_FILE`、Vault/KMS endpoint 与 bootstrap
+token，并配置数据库等部署参数。生产 Runtime 使用 tRPC-Agent-Go 的 OpenAI-compatible Model；
+`mock` provider、env/file SecretRef 和不符合 tenant/app namespace 的 key 会被生产组合拒绝。
 
 ```bash
-docker compose up --build -d
+TRPC_CONFIG_FILE=./configs/local.yaml docker compose up --build -d
 docker compose ps
 ```
 
@@ -61,22 +61,18 @@ Admin API 与 Gateway 共用 HTTP 端口，所有 `/v1/tenants/{tenant_id}/confi
 - `TRPC_AGENT_WORKER_CONCURRENCY`：每节点 Worker 并发，默认 8，生产合法范围 1–256；非法值启动失败；
 - `TRPC_AGENT_GATEWAY_RATE_LIMIT`：每个 `(tenant_id, binding_id)` 的 Redis 共享固定窗口入口限流，默认 100 req/s；超限返回 429，Redis 异常时 fail-closed；
 - `TRPC_AGENT_SHUTDOWN_TIMEOUT`：收到 SIGTERM 后排空组件的总上限，默认 10 秒、合法范围 1 秒到 10 分钟；Kubernetes 基线设置 100 秒并保留 preStop/退出余量；
-- `DEEPSEEK_API_KEY`：DeepSeek API Key，由模型配置中的 SecretRef 引用；
+- 模型、IM 和数据后端的业务凭据由租户配置中的 Vault/KMS SecretRef 引用；key 必须使用 `tenant_id/app_id/...` namespace；
 - `TRPC_AGENT_GATEWAY_TOKEN_<BINDING_ID>`：HTTP Channel token；
 - `TRPC_AGENT_ADMIN_TOKENS`：Admin API 凭据（`名称=令牌:租户列表|角色`，`;` 分隔，`*` 表示全部租户；角色可选，支持 `admin`、`operator`、`viewer`）；未配置时 Admin API 拒绝一切请求；
 - `OTEL_EXPORTER_OTLP_ENDPOINT`：OTLP/gRPC Collector 地址；Compose 固定为内部 `otel-collector:4317`；
 - `TRPC_AGENT_TRACE_SAMPLE_RATIO`：0 到 1 的 parent-based trace 采样率，Compose 默认 0.1；
 - `TRPC_AGENT_VAULT_ENDPOINT` / `TRPC_AGENT_VAULT_TOKEN`：可选 Vault KV v2-compatible HTTPS endpoint 与 bootstrap token；配置使用 `provider: vault` 时必须提供；
 - `TRPC_AGENT_KMS_ENDPOINT` / `TRPC_AGENT_KMS_TOKEN`：可选 KMS-compatible HTTPS 解密服务与 bootstrap token；配置使用 `provider: kms` 时必须提供；
-- 企业微信启用后，还需要配置文件所引用的 `WECOM_CALLBACK_TOKEN`、`WECOM_APP_SECRET`
-  和 `WECOM_ENCODING_AES_KEY`。Delivery Worker 会自动使用应用 Secret 获取 access token。
-- 飞书启用后，还需要配置文件所引用的 `FEISHU_VERIFICATION_TOKEN`、`FEISHU_APP_SECRET`
-  和可选的 `FEISHU_ENCRYPT_KEY`。Delivery Worker 自动使用 App Secret 获取并缓存
+- 企业微信启用后，Vault/KMS 中需要准备 callback token、应用 Secret 和 EncodingAESKey；Delivery Worker 会自动使用应用 Secret 获取 access token。
+- 飞书启用后，Vault/KMS 中需要准备 Verification Token、App Secret 和可选 Encrypt Key；Delivery Worker 自动使用 App Secret 获取并缓存 tenant_access_token。飞书回调地址为 `/channels/feishu/{binding_id}`，协议细节见[飞书 Channel Adapter](feishu.md)。
 
 生产模式启用外部工具时必须配置 `TRPC_AGENT_TOOL_LEDGER_KEY`（由部署密钥系统注入，长度至少
 32 字节）。它用于加密可恢复 Tool 结果；缺失时工具执行仍会 fail-closed，不会自动重调未知副作用。
-  tenant_access_token。飞书回调地址为 `/channels/feishu/{binding_id}`，协议细节见
-  [飞书 Channel Adapter](feishu.md)。
 
 Compose 中的默认数据库密码和 HTTP token 只供本地使用。共享环境应通过 `.env`、Docker Secret 或外部密钥系统覆盖，不能提交真实值。
 
@@ -125,7 +121,7 @@ docker compose -p "$TRPC_AGENT_COMPOSE_PROJECT" --profile multinode \
 `TRPC_AGENT_ACCEPTANCE_RUN_MESSAGES=1`。若同一项目仍运行旧 `service --role all`，主动故障验收
 还需设置 `TRPC_AGENT_ACCEPTANCE_ISOLATE_TOPOLOGY=1`；脚本会临时停止该明确服务并在退出时恢复。
 除 `service` 和 `worker-a` 外不会停止其他容器，更不会停止数据库、清空表或删除卷。证据记录
-使用[脱敏报告模板](production-acceptance-report.md)。
+使用[脱敏报告模板](production-acceptance-template.md)。
 
 共享后端集成测试可复用 Compose 的 `test` profile；迁移与后端专项检查由独立脚本创建临时容器：
 

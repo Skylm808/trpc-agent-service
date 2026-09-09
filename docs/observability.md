@@ -57,7 +57,7 @@ Compose 已加载错误率、DLQ 非零、队列持续增长、无活跃 Worker 
 
 验收脚本默认只做结构与 Prometheus 规则校验；live 模式仅输出状态和 span 名称。指定一条
 独立测试 trace 时可验证完整持久链路，可选 private canary 只执行“不存在”判断，不输出
-canary 或 trace 原文。结果使用[脱敏报告模板](observability-acceptance-report.md)。
+canary 或 trace 原文。结果使用[脱敏报告模板](observability-acceptance-template.md)。
 
 ## 审计保留
 

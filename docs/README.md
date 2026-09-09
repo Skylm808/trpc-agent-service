@@ -14,6 +14,7 @@
 - [容量测试与估算](capacity.md)：有界负载探针、完整执行容量模型与准入指标。
 - [故障演练手册](fault-drills.md)：单 Pod、共享后端、模型、Sender 与 Collector 故障场景。
 - [生产验收](production-acceptance.md)：离线 Demo、Compose 多节点、Kubernetes Demo、真实 IM 与发布硬门禁。
+- [生产验收报告模板](production-acceptance-template.md) / [可观测性验收模板](observability-acceptance-template.md)：只记录脱敏证据，不保存凭据或正文。
 - [企业微信 Adapter](wecom.md)：回调协议、身份映射、媒体和主动发送。
 - [飞书 Adapter](feishu.md)：回调协议、身份映射、媒体和交互卡片。
 - [IM 媒体与卡片](media.md)：安全下载、文档提取、多模态输入和 Outbox 策略。

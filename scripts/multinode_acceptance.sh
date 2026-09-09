@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-project="${TRPC_AGENT_COMPOSE_PROJECT:-trpc-agent-service-pr14-check}"
+project="${TRPC_AGENT_COMPOSE_PROJECT:-trpc-agent-service-acceptance}"
 profile="multinode"
 base_url="${TRPC_AGENT_ACCEPTANCE_BASE_URL:-http://127.0.0.1:${TRPC_AGENT_MULTINODE_PORT:-18080}}"
 compose=(docker compose -p "$project" --profile "$profile")
