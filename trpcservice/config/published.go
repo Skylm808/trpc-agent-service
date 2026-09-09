@@ -10,14 +10,18 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
+const defaultVersionCacheLimit = 256
+
 // PublishedCache loads published tenant configurations from the control-plane
 // store. Versions are immutable, so parsed files are cached forever; the
 // tenant head is re-read on every Current call so a publish takes effect
 // without a restart.
 type PublishedCache struct {
-	store    repository.Store
-	mu       sync.Mutex
-	versions map[publishedKey]*File
+	store      repository.Store
+	maxEntries int
+	mu         sync.Mutex
+	versions   map[publishedKey]*File
+	order      []publishedKey
 }
 
 type publishedKey struct {
@@ -27,10 +31,21 @@ type publishedKey struct {
 
 // NewPublishedCache creates a cache over the control-plane store.
 func NewPublishedCache(store repository.Store) (*PublishedCache, error) {
+	return NewPublishedCacheWithLimit(store, defaultVersionCacheLimit)
+}
+
+// NewPublishedCacheWithLimit creates a published cache with an explicit
+// maximum number of immutable version files kept in memory. A cache miss simply
+// reloads the version from the control-plane store, so eviction cannot change
+// correctness and bounds memory as tenants publish indefinitely.
+func NewPublishedCacheWithLimit(store repository.Store, maxEntries int) (*PublishedCache, error) {
 	if store == nil {
 		return nil, errors.New("config: nil control-plane store")
 	}
-	return &PublishedCache{store: store, versions: make(map[publishedKey]*File)}, nil
+	if maxEntries <= 0 {
+		return nil, errors.New("config: published cache limit must be positive")
+	}
+	return &PublishedCache{store: store, maxEntries: maxEntries, versions: make(map[publishedKey]*File)}, nil
 }
 
 // Version returns the immutable published file pinned at one version.
@@ -51,7 +66,17 @@ func (cache *PublishedCache) Version(ctx context.Context, tenantID string, versi
 		return nil, err
 	}
 	cache.mu.Lock()
+	if existing, ok := cache.versions[key]; ok {
+		cache.mu.Unlock()
+		return existing, nil
+	}
+	if len(cache.versions) >= cache.maxEntries {
+		oldest := cache.order[0]
+		cache.order = cache.order[1:]
+		delete(cache.versions, oldest)
+	}
 	cache.versions[key] = file
+	cache.order = append(cache.order, key)
 	cache.mu.Unlock()
 	return file, nil
 }
