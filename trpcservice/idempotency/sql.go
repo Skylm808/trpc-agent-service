@@ -30,7 +30,8 @@ func (store *SQLStore) Cancel(ctx context.Context, claim Claim) error {
 	if err := validateSQLClaim(store, claim); err != nil {
 		return err
 	}
-	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='canceled',completed_at=$6 WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing'`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, store.now().UTC())
+	now := store.now().UTC()
+	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='canceled',completed_at=$7 WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing' AND lease_until>$6`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, now, now)
 	return exactClaimResult(result, err)
 }
 
@@ -38,7 +39,8 @@ func (store *SQLStore) Reject(ctx context.Context, claim Claim) error {
 	if err := validateSQLClaim(store, claim); err != nil {
 		return err
 	}
-	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='rejected', completed_at=$6, lease_until=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing'`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, store.now().UTC())
+	now := store.now().UTC()
+	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='rejected', completed_at=$7, lease_until=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing' AND lease_until>$6`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, now, now)
 	return exactClaimResult(result, err)
 }
 
@@ -270,7 +272,7 @@ func (store *SQLStore) SaveExecution(ctx context.Context, claim Claim, execution
 		return errors.New("idempotency: execution stage, reply, and event ID are required")
 	}
 	now := store.now().UTC()
-	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET execution_stage=$6,execution_reply=$7,execution_event_id=$8 WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing' AND lease_until>$9 AND CASE execution_stage WHEN 'outbox_committed' THEN 3 WHEN 'derived_committed' THEN 2 WHEN 'runner_committed' THEN 1 ELSE 0 END <= CASE $6 WHEN 'outbox_committed' THEN 3 WHEN 'derived_committed' THEN 2 WHEN 'runner_committed' THEN 1 ELSE 0 END`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, execution.Stage, execution.Reply, execution.EventID, now)
+	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET execution_stage=$6,execution_reply=$7,execution_event_id=$8 WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing' AND lease_until>$9 AND (CASE execution_stage WHEN 'outbox_committed' THEN 3 WHEN 'derived_committed' THEN 2 WHEN 'runner_committed' THEN 1 ELSE 0 END < CASE $6 WHEN 'outbox_committed' THEN 3 WHEN 'derived_committed' THEN 2 WHEN 'runner_committed' THEN 1 ELSE 0 END OR (execution_stage=$6 AND execution_reply=$7 AND execution_event_id=$8))`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, execution.Stage, execution.Reply, execution.EventID, now)
 	return exactClaimResult(result, err)
 }
 
@@ -283,7 +285,8 @@ func (store *SQLStore) Fail(ctx context.Context, claim Claim, cause error, retry
 	if cause != nil {
 		lastError = sanitizeError(cause.Error())
 	}
-	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='retry', next_attempt_at=$6, last_error=$7, lease_until=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing'`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, retryAt.UTC(), lastError)
+	now := store.now().UTC()
+	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='retry', next_attempt_at=$6, last_error=$7, lease_until=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing' AND lease_until>$8`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, retryAt.UTC(), lastError, now)
 	return exactClaimResult(result, err)
 }
 
@@ -294,7 +297,8 @@ func (store *SQLStore) Defer(ctx context.Context, claim Claim, retryAt time.Time
 	if err := validateSQLClaim(store, claim); err != nil {
 		return err
 	}
-	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='retry',attempts=GREATEST(attempts-1,0),next_attempt_at=$6,last_error=NULL,claim_owner=NULL,claim_token=NULL,lease_until=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing'`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, retryAt.UTC())
+	now := store.now().UTC()
+	result, err := store.DB.ExecContext(ctx, `UPDATE inbox_messages SET status='retry',attempts=GREATEST(attempts-1,0),next_attempt_at=$6,last_error=NULL,claim_owner=NULL,claim_token=NULL,lease_until=NULL WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3 AND claim_owner=$4 AND claim_token=$5 AND status='processing' AND lease_until>$7`, claim.Message.TenantID, claim.Message.BindingID, claim.Message.ExternalMessageID, claim.Owner, claim.ClaimToken, retryAt.UTC(), now)
 	return exactClaimResult(result, err)
 }
 

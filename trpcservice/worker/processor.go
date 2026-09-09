@@ -100,6 +100,18 @@ func RuntimeFactoryWithServicesAndTools(writes PlatformStore, servicesFactory Se
 			return nil, err
 		}
 		services.Session = fenced
+		fencedMemory, err := sessioncoord.NewFencedMemoryService(services.Memory, writes)
+		if err != nil {
+			_ = services.Close()
+			return nil, err
+		}
+		fencedArtifact, err := sessioncoord.NewFencedArtifactService(services.Artifact, writes)
+		if err != nil {
+			_ = services.Close()
+			return nil, err
+		}
+		services.Memory = fencedMemory
+		services.Artifact = fencedArtifact
 		var catalog *servicetool.Catalog
 		if toolFactory != nil {
 			catalog, err = toolFactory(snapshot)

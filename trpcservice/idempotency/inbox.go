@@ -112,7 +112,7 @@ func (store *MemoryStore) Cancel(_ context.Context, claim Claim) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	item := store.records[claim.InboxID]
-	if item == nil || item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing {
+	if item == nil || item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing || !store.now().UTC().Before(item.claim.LeaseUntil) {
 		return ErrClaimOwner
 	}
 	item.claim.Status = StatusCanceled
@@ -125,7 +125,7 @@ func (store *MemoryStore) Defer(_ context.Context, claim Claim, retryAt time.Tim
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	item := store.records[claim.InboxID]
-	if item == nil || item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing {
+	if item == nil || item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing || !store.now().UTC().Before(item.claim.LeaseUntil) {
 		return ErrClaimOwner
 	}
 	item.claim.Status = StatusRetry
@@ -330,6 +330,9 @@ func (store *MemoryStore) SaveExecution(_ context.Context, claim Claim, executio
 	if stageRank(execution.Stage) < stageRank(item.execution.Stage) {
 		return nil
 	}
+	if execution.Stage == item.execution.Stage && item.execution.Stage != ExecutionNone && execution != item.execution {
+		return errors.New("idempotency: execution checkpoint conflict")
+	}
 	item.execution = execution
 	return nil
 }
@@ -355,7 +358,7 @@ func (store *MemoryStore) Fail(_ context.Context, claim Claim, cause error, retr
 	if item == nil {
 		return fmt.Errorf("idempotency: inbox %q not found", claim.InboxID)
 	}
-	if item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing {
+	if item.claim.Owner != claim.Owner || item.claim.ClaimToken != claim.ClaimToken || item.claim.Status != StatusProcessing || !store.now().UTC().Before(item.claim.LeaseUntil) {
 		return ErrClaimOwner
 	}
 	item.claim.Status = StatusRetry
