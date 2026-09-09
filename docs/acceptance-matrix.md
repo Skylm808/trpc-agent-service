@@ -81,7 +81,7 @@
 | 中文架构设计、系统架构图和核心时序图 | `docs/architecture.md` | 已完成 |
 | 数据模型 | `docs/data-model.md`、`migrations/` | 已完成 |
 | 同步、幂等和多后端方案 | `docs/message-runtime.md`、`docs/storage-migrations.md` | 已完成 |
-| 至少 8 项生产风险 | `docs/risks.md` | 已完成（17 项） |
+| 至少 8 项生产风险 | `docs/risks.md` | 已完成（18 项） |
 | GitHub 实现代码 | 当前仓库 | 已完成 |
 
 ## 后置能力

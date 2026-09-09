@@ -9,7 +9,7 @@
 只需 Go 1.24+，无需 Docker、外部模型、IM 凭据或数据库：
 
 ```bash
-git clone https://github.com/Skylm808/trpc-agent-service.git
+git clone --branch feat_tianlinmao https://github.com/Skylm808/trpc-agent-service.git
 cd trpc-agent-service
 ./demo.sh
 ```
@@ -107,7 +107,7 @@ Compose 使用命名数据卷保存 PostgreSQL、Redis、Tempo 和 Grafana 数�
 ./scripts/kubernetes_acceptance.sh
 ```
 
-Kubernetes 脚本会创建本地 kind 集群并走通部署、扩缩容、Pod 故障、滚动升级、HPA/PDB 和回滚；它是可复现的最小验收 Demo，不宣称替代真实生产集群容量测试。
+Kubernetes 脚本默认只执行离线清单校验；使用 `TRPC_AGENT_K8S_CREATE_KIND=1 ./scripts/kubernetes_acceptance.sh --run` 才会创建 kind 集群并走通部署、扩缩容、Pod 故障、滚动升级、HPA/PDB 和回滚。它是可复现的最小验收 Demo，不宣称替代真实生产集群容量测试。
 
 ## 数据后端
 
