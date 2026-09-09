@@ -136,6 +136,9 @@ func gatewayComponent(ctx context.Context, path, address string, role processRol
 	if err != nil {
 		return nil, err
 	}
+	if err := file.ValidateProduction(); err != nil {
+		return nil, err
+	}
 	return newDurableComponent(ctx, address, file, role)
 }
 

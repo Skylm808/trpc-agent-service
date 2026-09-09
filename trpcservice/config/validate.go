@@ -115,6 +115,66 @@ func (file *File) Validate() error {
 	return nil
 }
 
+// ValidateProduction applies controls that cannot be relaxed for a local
+// config file: production credentials must come from the configured external
+// secret manager, never process env or arbitrary mounted paths.
+func (file *File) ValidateProduction() error {
+	if err := file.Validate(); err != nil {
+		return err
+	}
+	for ti := range file.Tenants {
+		for ai := range file.Tenants[ti].Apps {
+			app := file.Tenants[ti].Apps[ai]
+			check := func(path string, ref tenant.SecretRef) error {
+				if ref.IsZero() {
+					return nil
+				}
+				if ref.Provider == tenant.SecretProviderEnv || ref.Provider == tenant.SecretProviderFile {
+					return fmt.Errorf("config: %s must use vault or kms in production", path)
+				}
+				return nil
+			}
+			base := fmt.Sprintf("tenants[%d].apps[%d]", ti, ai)
+			refs := []struct {
+				path string
+				ref  tenant.SecretRef
+			}{
+				{base + ".model.api_key", app.Model.APIKey},
+				{base + ".knowledge.embedding.api_key", app.Knowledge.Embedding.APIKey},
+				{base + ".storage.session.credential", app.Storage.Session.Credential},
+				{base + ".storage.memory.credential", app.Storage.Memory.Credential},
+				{base + ".storage.summary.credential", app.Storage.Summary.Credential},
+				{base + ".storage.artifact.credential", app.Storage.Artifact.Credential},
+				{base + ".storage.knowledge.credential", app.Storage.Knowledge.Credential},
+				{base + ".storage.audit.credential", app.Storage.Audit.Credential},
+			}
+			for _, item := range refs {
+				if err := check(item.path, item.ref); err != nil {
+					return err
+				}
+			}
+			for i, binding := range app.Channels {
+				for name, ref := range map[string]tenant.SecretRef{"token": binding.Token, "secret": binding.Secret, "encryption_key": binding.EncryptionKey} {
+					if err := check(fmt.Sprintf("%s.channels[%d].%s", base, i, name), ref); err != nil {
+						return err
+					}
+				}
+			}
+			for i, mcp := range app.MCPServers {
+				if err := check(fmt.Sprintf("%s.mcp_servers[%d].credential", base, i), mcp.Credential); err != nil {
+					return err
+				}
+			}
+			for i, business := range app.BusinessTools {
+				if err := check(fmt.Sprintf("%s.business_tools[%d].credential", base, i), business.Credential); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func validateApp(
 	path string,
 	app *tenant.AgentApp,
