@@ -86,7 +86,8 @@ Summary/Memory 投影和 Outbox 始终在当前 fence 下写 PostgreSQL。Runner
 平台对 Inbox、平台 turn、Summary/Memory、Outbox 和 Audit 使用稳定业务键，目标是“至少一次调度、
 幂等提交、至多一个待投递回复”。`runner_committed` 之后的崩溃可以直接恢复最终回复，不重跑模型
 或工具。但无法把任意外部模型/Tool 调用与 PostgreSQL Inbox 放进同一事务：若调用已经产生结果或
-副作用，进程却在保存 `runner_committed` 前退出，重试仍可能再次调用。
+副作用，进程却在保存 `runner_committed` 前退出，重试仍可能再次调用；每次 MCP/HTTPS Tool 调用
+同时写入 `tool_executions` 账本，未知结果进入 `outcome_unknown`，由运维确认后再决定补偿或重试。
 
 tRPC Event 的 `RequestID` 已固定为 Inbox ID，但一轮内用户、工具和模型事件合法共享同一个
 `RequestID`，而重跑生成新的 Invocation/Event ID，因此不能按 RequestID 全量过滤而不破坏事件

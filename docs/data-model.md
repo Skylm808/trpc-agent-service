@@ -46,6 +46,7 @@ worker_node
 | `policy_budget_usage` | `tenant_id`, `period`, `used_micros` | PK `(tenant_id, period)`；跨节点月度预算原子累计 |
 | `policy_budget_reservations` | `tenant_id`, `request_id`, `period`, `reserved_micros`, `actual_micros` | PK `(tenant_id, request_id)`；请求重试时幂等预留与核销 |
 | `tool_approvals` | `tenant_id`, `request_id`, `tool_name`, `approved_at` | PK `(tenant_id, request_id, tool_name)`；跨节点人工批准 |
+| `tool_executions` | `tenant_id`, `request_id`, `tool_call_id`, `tool_name`, `arguments_hash`, `idempotency_key`, `status`, `result_hash`, `error_type`, `trace_id` | 记录 MCP/HTTPS Tool 的 running/completed/failed/outcome_unknown；租户/请求/调用唯一，支持副作用核对 |
 
 表之间不使用裸 `app_id`、`session_id` 或外部用户 ID 关联。应用、绑定、会话和事件的外键路径都带 `tenant_id`，Repository 方法也显式接收租户参数，因此两个租户可以安全使用相同的业务 ID。
 

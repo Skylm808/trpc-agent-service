@@ -1,6 +1,7 @@
 # 需求验收矩阵
 
-> 双 IM 证据分为两层：企业微信、飞书真实平台 E2E 已完成人工验收；CI 中的
+> 双 IM 证据分为两层：企业微信、飞书协议自动化验收已纳入 CI；真实平台 E2E 需要在目标环境
+> 由部署方完成人工验收；CI 中的
 > `scripts/dual_im_contract_acceptance.sh` 使用纯合成凭据重放两种加密回调，并贯穿
 > Inbox、Worker、离线 Runner、Session/Memory/Summary、Outbox 和模拟平台 API。
 > 前者证明真实平台可用，后者让评审者无需真实账号或消息正文即可复现协议与平台链路。
@@ -39,7 +40,7 @@
 
 | 验收要求 | 状态 | 实现与验证证据 |
 | --- | --- | --- |
-| 至少两类 IM，且包含企业微信 | 已实现 + 人工通过 | 企业微信、飞书真实平台 E2E；`TestDualIMContractE2E` 可自动重放完整合成链路 |
+| 至少两类 IM，且包含企业微信 | 已实现 + 协议自动化通过 | 企业微信、飞书 Handler/Sender；`TestDualIMContractE2E` 可自动重放完整合成链路；真实账号验收由部署方执行 |
 | IM 消息转 Runner、Event 转回复/卡片 | 已实现 | Callback → Inbox → Runner → Outbox → Sender；Channel/Sender 测试 |
 | 验签、解密、绑定、去重、身份映射 | 已实现 | 动态 Binding Provider 与 canonical identity；企业微信/飞书 Handler 测试 |
 | 群聊/单聊 session 和跨租户隔离 | 已实现 | `dm/{binding}/{user}`、`group/{binding}/{conversation}`；跨通道身份测试 |

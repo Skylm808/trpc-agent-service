@@ -75,7 +75,7 @@ Gateway 只接收和规范化请求，Worker 执行 Runner；节点不保存会�
 | 可观测性 | Prometheus 指标、OTLP Trace、Tempo、Grafana，以及错误率、DLQ、积压、无 Worker、数据库异常告警 |
 | 部署运维 | 单机 Compose、多 Worker Compose、最小 Kubernetes Demo；探针、PDB、HPA、滚动升级和回滚验收 |
 
-企业微信与飞书真实平台 E2E 均已人工验证通过；仓库仅保留可复现的脱敏验收步骤，不保存截图、用户消息正文或真实凭据。自动化测试与真实平台人工验收的边界见[生产验收说明](docs/production-acceptance.md)。
+企业微信与飞书协议自动化验收已纳入 CI；真实平台 E2E 需要部署方提供账号、公网 HTTPS 回调并按[生产验收说明](docs/production-acceptance.md)留存脱敏证据，仓库不保存截图、用户消息正文或真实凭据。
 
 ## Compose 运行
 
@@ -149,8 +149,8 @@ Admin API 是平台控制面，用于租户配置的预览、发布、回滚，�
 ```bash
 ./demo.sh
 GOCACHE=/private/tmp/trpc-agent-service-cache ./check.sh
-go test -tags=protocol ./internal/channel/...
-go test -tags=integration ./internal/storage/...
+go test ./trpcservice/channels/... ./trpcservice/acceptance/...
+go test ./trpcservice/storage/... ./trpcservice/storagemigration/...
 ```
 
 涉及真实企业微信、飞书、模型、数据库或对象存储的测试必须显式提供环境变量；默认测试不会读取真实凭据。仓库禁止提交 `.env`、`configs/local.yaml`、Secret、下载 URL、媒体 key 或用户消息正文。
